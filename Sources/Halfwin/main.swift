@@ -4,6 +4,7 @@ import ServiceManagement
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let keepAwake = KeepAwake()
     private let mouseFeatures = MouseFeatures()
+    private let keyboardExtras = KeyboardExtras()
     private let snapSettings = SnapSettings.shared
     private lazy var snapManager = SnapManager(settings: snapSettings)
     private let snapAssistManager = SnapAssistManager()
@@ -27,6 +28,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var durationItems: [NSMenuItem] = []
     private var lidItem: NSMenuItem!
     private var lidDurationItems: [NSMenuItem] = []
+    private var hasPendingFinderCut = false
     private var loginItem: NSMenuItem!
     private var accessibilityItem: NSMenuItem!
     private var screenRecordingItem: NSMenuItem!
@@ -52,6 +54,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dockPreviewsSwitch.start()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        keyboardExtras.onCutPendingChange = { [weak self] pending in
+            guard let self else { return }
+            self.hasPendingFinderCut = pending
+            self.updateStatusTitle()
+        }
         buildMenu()
         menu.delegate = self
         statusItem.menu = menu
@@ -61,6 +68,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         mouseFeatures.start()
         snapManager.refreshPermission()
         layoutMenuManager.refreshPermission()
+        keyboardExtras.start()
         updateUI()
     }
 
@@ -75,6 +83,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dockPreviewsManager.stop()
         snapGroupsManager.stop()
         snapAssistManager.setEnabled(false)
+        keyboardExtras.stop()
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -86,6 +95,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         snapGroupsManager.refreshPermission()
         windowExtrasManager.refreshPermission()
         dockPreviewsManager.refreshPermission()
+        keyboardExtras.refreshPermission()
     }
 
     private func buildMenu() {
@@ -134,6 +144,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(snappingHeader)
         menu.addItem(snapAssistSwitch.makeMenuItem())
         menu.addItem(snapGroupsSwitch.makeMenuItem())
+        keyboardExtras.addMenuItems(to: menu)
         menu.addItem(.separator())
         let dockHeader = NSMenuItem(title: "Dock", action: nil, keyEquivalent: "")
         dockHeader.isEnabled = false
@@ -228,7 +239,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             image.isTemplate = true
             statusItem.button?.image = image
         }
-        statusItem.button?.title = "hfWn"
+        updateStatusTitle()
         statusItem.button?.imagePosition = .imageLeft
 
         awakeItem.state = keepAwake.isPlainAwake ? .on : .off
@@ -245,6 +256,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         accessibilityItem.isEnabled = !Permissions.accessibilityGranted
         screenRecordingItem.title = "Screen Recording: \(Permissions.screenRecordingGranted ? "Granted" : "Not Granted")"
         screenRecordingItem.isEnabled = !Permissions.screenRecordingGranted
+    }
+
+    private func updateStatusTitle() {
+        statusItem.button?.title = hasPendingFinderCut ? "✂︎ hfWn" : "hfWn"
     }
 }
 
