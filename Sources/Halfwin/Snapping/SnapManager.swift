@@ -134,7 +134,7 @@ final class SnapManager {
             // (besides the drop). Restore only if this drag actually started
             // from the frame Halfwin snapped it to — otherwise the entry is
             // stale and stays dropped from pruneUnreadableSnapInfo/here.
-            if let info = snappedInfo.removeValue(forKey: draggedWindow), isClose(initialFrame, info.target, tolerance: 1) {
+            if let info = snappedInfo.removeValue(forKey: draggedWindow), SnapGeometry.isClose(initialFrame, info.target, tolerance: 1) {
                 restoreSize(info.preSnapSize, current: frame, window: draggedWindow)
                 lockedSize = info.preSnapSize
             }
@@ -179,8 +179,9 @@ final class SnapManager {
         // Only remember this as a real snap if the window actually landed
         // there — a failed AX write shouldn't let a later drag "restore" to
         // a size it was never snapped from.
-        if let readBack = draggedWindow.frame, isClose(readBack, target, tolerance: 2) {
+        if let readBack = draggedWindow.frame, SnapGeometry.isClose(readBack, target, tolerance: 2) {
             snappedInfo[draggedWindow] = (target: target, preSnapSize: frame.size)
+            SnapEvents.didSnap(window: draggedWindow, action: zone.action, screen: zone.screen)
         }
     }
 
@@ -225,10 +226,6 @@ final class SnapManager {
         window.setFrame(restored)
     }
 
-    private func isClose(_ a: CGRect, _ b: CGRect, tolerance: CGFloat) -> Bool {
-        abs(a.minX - b.minX) <= tolerance && abs(a.minY - b.minY) <= tolerance &&
-            abs(a.width - b.width) <= tolerance && abs(a.height - b.height) <= tolerance
-    }
 }
 
 private extension CGRect {

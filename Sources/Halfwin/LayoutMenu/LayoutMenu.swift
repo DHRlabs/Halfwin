@@ -233,7 +233,7 @@ final class LayoutMenuManager {
         guard let action = snapAction(for: preset) else { return }
         guard let target = SnapGeometry.frame(for: action, visibleFrame: visibleFrame,
                                               currentWindowFrame: currentFrame, portrait: portrait) else { return }
-        apply(target, to: window, currentFrame: currentFrame)
+        apply(target, to: window, currentFrame: currentFrame, action: action, screen: screen)
     }
 
     /// `restore` doesn't produce a `SnapAction`; the big-left-stack
@@ -256,14 +256,14 @@ final class LayoutMenuManager {
         let portrait = screen.frame.height > screen.frame.width
         guard let target = SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
                                               currentWindowFrame: currentFrame, portrait: portrait) else { return }
-        apply(target, to: window, currentFrame: currentFrame)
+        apply(target, to: window, currentFrame: currentFrame, action: action, screen: screen)
     }
 
     /// Only sound if the window is still where this menu last put it — drop
     /// the entry (no-op) otherwise, so "Normal" never yanks a window the
     /// user has since moved or resized by hand.
     private func restore(window: AXWindow, currentFrame: CGRect) {
-        guard let info = lastMoved[window], isClose(currentFrame, info.target) else {
+        guard let info = lastMoved[window], SnapGeometry.isClose(currentFrame, info.target) else {
             lastMoved.removeValue(forKey: window)
             return
         }
@@ -277,9 +277,10 @@ final class LayoutMenuManager {
     /// min size) so a later restore-eligibility check compares against
     /// reality. Carries the original pre-move frame forward across repeated
     /// picks, the same way `SnapManager.snappedInfo` does.
-    private func apply(_ target: CGRect, to window: AXWindow, currentFrame: CGRect) {
+    private func apply(_ target: CGRect, to window: AXWindow, currentFrame: CGRect,
+                       action: SnapAction, screen: NSScreen) {
         let preMove: CGRect
-        if let info = lastMoved[window], isClose(currentFrame, info.target) {
+        if let info = lastMoved[window], SnapGeometry.isClose(currentFrame, info.target) {
             preMove = info.preMove
         } else {
             preMove = currentFrame
@@ -287,13 +288,12 @@ final class LayoutMenuManager {
         window.setFrame(target)
         if let readBack = window.frame {
             lastMoved[window] = (target: readBack, preMove: preMove)
+            if SnapGeometry.isClose(readBack, target) {
+                SnapEvents.didSnap(window: window, action: action, screen: screen)
+            }
         }
     }
 
-    private func isClose(_ a: CGRect, _ b: CGRect, tolerance: CGFloat = 2) -> Bool {
-        abs(a.minX - b.minX) <= tolerance && abs(a.minY - b.minY) <= tolerance &&
-            abs(a.width - b.width) <= tolerance && abs(a.height - b.height) <= tolerance
-    }
 }
 
 /// Borderless non-activating panel holding the layout thumbnails, dropped
