@@ -80,7 +80,13 @@ final class LayoutMenuManager {
             .store(in: &cancellables)
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.refreshPermission() }
+        ) { [weak self] _ in
+            guard let self else { return }
+            self.refreshPermission()
+            guard self.panel.isVisible,
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier != self.targetWindow?.processIdentifier else { return }
+            self.hidePanel()
+        }
     }
 
     /// Starts (or stops) the monitors to match Accessibility permission and

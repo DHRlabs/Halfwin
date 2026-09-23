@@ -145,6 +145,16 @@ final class WindowExtrasManager {
                   NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
                 return Unmanaged.passUnretained(event)
             }
+            if keyCode == 125,
+               let app = NSWorkspace.shared.frontmostApplication,
+               app.bundleIdentifier == "com.apple.finder",
+               let windows = CGWindowListCopyWindowInfo(.optionAll.union(.excludeDesktopElements), kCGNullWindowID) as? [[String: Any]],
+               !windows.contains(where: {
+                   ($0[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value == app.processIdentifier &&
+                   ($0[kCGWindowLayer as String] as? NSNumber)?.intValue == 0
+               }) {
+                return Unmanaged.passUnretained(event)
+            }
             swallowedCommandArrowKeyCodes.insert(keyCode)
             if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
                 DispatchQueue.main.async { [weak self] in self?.applyCommandArrow(keyCode) }
@@ -194,7 +204,7 @@ final class WindowExtrasManager {
 
     private func windowClickCandidates(at quartzPoint: CGPoint, clickCount: Int64) -> (greenButton: Bool, titleBar: Bool) {
         guard greenButtonEnabled || (titleBarDoubleClickEnabled && clickCount == 2),
-              let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else {
+              let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly.union(.excludeDesktopElements), kCGNullWindowID) as? [[String: Any]] else {
             return (false, false)
         }
         var candidates = (greenButton: false, titleBar: false)
@@ -202,11 +212,11 @@ final class WindowExtrasManager {
             guard window[kCGWindowLayer as String] as? Int == 0,
                   let bounds = window[kCGWindowBounds as String] as? NSDictionary,
                   let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary),
-                  frame.contains(quartzPoint), quartzPoint.y <= frame.minY + 40 else { continue }
-            candidates.greenButton = candidates.greenButton ||
-                (greenButtonEnabled && quartzPoint.x <= frame.minX + 80)
-            candidates.titleBar = candidates.titleBar || (titleBarDoubleClickEnabled && clickCount == 2)
-            if candidates.greenButton && candidates.titleBar { break }
+                  frame.contains(quartzPoint) else { continue }
+            let inTitleBarBand = quartzPoint.y <= frame.minY + 60
+            candidates.greenButton = greenButtonEnabled && inTitleBarBand && quartzPoint.x <= frame.minX + 140
+            candidates.titleBar = titleBarDoubleClickEnabled && clickCount == 2 && inTitleBarBand
+            break
         }
         return candidates
     }

@@ -145,6 +145,7 @@ final class SnapAssistManager {
         choice.window.raise()
         let mainError = AXUIElementSetAttributeValue(choice.window.element, kAXMainAttribute as CFString, kCFBooleanTrue)
         let appElement = AXUIElementCreateApplication(choice.application.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, 0.1)
         let frontmostError = AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue)
         if mainError != .success || frontmostError != .success {
             choice.application.activate(options: [])

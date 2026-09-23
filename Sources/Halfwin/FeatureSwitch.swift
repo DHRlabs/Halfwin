@@ -57,6 +57,7 @@ final class FeatureSwitch: NSObject {
     /// A menu row: the feature's name on the left, its switch on the right.
     func makeMenuItem() -> NSMenuItem {
         let labelButton = NSButton(title: title, target: self, action: #selector(toggleFromLabel))
+        labelButton.setAccessibilityElement(false)
         labelButton.isBordered = false
         labelButton.alignment = .left
         labelButton.font = .menuFont(ofSize: 0)
