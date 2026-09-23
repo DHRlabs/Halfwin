@@ -1,21 +1,30 @@
 import AppKit
 import Carbon.HIToolbox
 import CoreGraphics
-import IOKit.hid
-import IOKit.hidsystem
+
+private let sideButtonShortcutBundleIDs: Set<String> = [
+    "com.apple.finder",
+    "com.apple.Safari",
+    "com.apple.SafariTechnologyPreview",
+    "org.mozilla.firefox",
+    "company.thebrowser.Browser",
+    "com.tinyspeck.slackmacgap",
+    "com.apple.systempreferences",
+    "com.apple.AppStore",
+    "com.apple.Music",
+    "com.apple.Notes",
+    "com.apple.helpviewer"
+]
 
 final class MouseFeatures {
-    let linearPointer = FeatureSwitch(key: "mouse.linear-pointer", title: "Linear pointer", defaultOn: true)
     let windowsScrollDirection = FeatureSwitch(key: "mouse.windows-scroll-direction", title: "Windows scroll direction", defaultOn: true)
     let sideButtonsBackForward = FeatureSwitch(key: "mouse.side-buttons-back-forward", title: "Side buttons back/forward", defaultOn: true)
 
-    private let pointer = LinearPointerController()
     private let eventTap = MouseEventTap()
     private var permissionTimer: Timer?
     private var activationObserver: NSObjectProtocol?
 
     init() {
-        linearPointer.onChange = { [weak self] enabled in self?.pointer.setEnabled(enabled) }
         windowsScrollDirection.onChange = { [weak self] _ in self?.refreshPermission() }
         sideButtonsBackForward.onChange = { [weak self] _ in self?.refreshPermission() }
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
@@ -24,7 +33,6 @@ final class MouseFeatures {
     }
 
     func start() {
-        linearPointer.start()
         windowsScrollDirection.start()
         sideButtonsBackForward.start()
         refreshPermission()
@@ -53,68 +61,8 @@ final class MouseFeatures {
         permissionTimer?.invalidate()
         permissionTimer = nil
         eventTap.stop()
-        pointer.setEnabled(false)
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
         activationObserver = nil
-    }
-}
-
-private final class LinearPointerController {
-    private struct SavedProperty {
-        let service: IOHIDServiceClient
-        let value: CFTypeRef
-    }
-
-    private static let linearAccelerationKey = kIOHIDUseLinearScalingMouseAccelerationKey as CFString
-    private let client = IOHIDEventSystemClientCreateSimpleClient(kCFAllocatorDefault)
-    private var savedProperties: [SavedProperty] = []
-    private var isEnabled = false
-    private var deviceTimer: Timer?
-
-    func setEnabled(_ enabled: Bool) {
-        guard enabled != isEnabled else { return }
-        isEnabled = enabled
-        if enabled {
-            applyToConnectedMice()
-            // ponytail: discovery can lag five seconds; use IOHID service notifications if faster hot-plug updates matter.
-            deviceTimer = Timer.scheduledTimer(withTimeInterval: 5, repeats: true) { [weak self] _ in
-                self?.applyToConnectedMice()
-            }
-        } else {
-            deviceTimer?.invalidate()
-            deviceTimer = nil
-            restoreProperties()
-        }
-    }
-
-    private func applyToConnectedMice() {
-        guard let services = IOHIDEventSystemClientCopyServices(client) else { return }
-        for index in 0..<CFArrayGetCount(services) {
-            guard let rawService = CFArrayGetValueAtIndex(services, index) else { continue }
-            let service = Unmanaged<IOHIDServiceClient>.fromOpaque(rawService).takeUnretainedValue()
-            guard isExternalMouse(service), !savedProperties.contains(where: { CFEqual($0.service, service) }) else { continue }
-            guard let previous = IOHIDServiceClientCopyProperty(service, Self.linearAccelerationKey),
-                  IOHIDServiceClientSetProperty(service, Self.linearAccelerationKey, kCFBooleanTrue) else { continue }
-            savedProperties.append(SavedProperty(service: service, value: previous))
-        }
-    }
-
-    private func restoreProperties() {
-        for saved in savedProperties {
-            if !IOHIDServiceClientSetProperty(saved.service, Self.linearAccelerationKey, saved.value) {
-                NSLog("Halfwin: could not restore a mouse acceleration property")
-            }
-        }
-        savedProperties.removeAll()
-    }
-
-    private func isExternalMouse(_ service: IOHIDServiceClient) -> Bool {
-        guard let usagePage = IOHIDServiceClientCopyProperty(service, kIOHIDPrimaryUsagePageKey as CFString) as? NSNumber,
-              let usage = IOHIDServiceClientCopyProperty(service, kIOHIDPrimaryUsageKey as CFString) as? NSNumber,
-              let builtIn = IOHIDServiceClientCopyProperty(service, kIOHIDBuiltInKey as CFString) as? NSNumber else { return false }
-        return usagePage.uint32Value == UInt32(kHIDPage_GenericDesktop) &&
-            usage.uint32Value == UInt32(kHIDUsage_GD_Mouse) && !builtIn.boolValue &&
-            IOHIDServiceClientConformsTo(service, UInt32(kHIDPage_GenericDesktop), UInt32(kHIDUsage_GD_Mouse)) != 0
     }
 }
 
@@ -125,25 +73,65 @@ private final class MouseEventTap {
         return owner.handle(type, event)
     }
 
+    private let runLoopReady = DispatchSemaphore(value: 0)
+    private lazy var thread: Thread = {
+        let thread = Thread { [weak self] in self?.runEventLoop() }
+        thread.name = "Halfwin Mouse Event Tap"
+        return thread
+    }()
+
+    private var runLoop: CFRunLoop?
+    private var runLoopPort: Port?
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var currentMask: CGEventMask?
     private var scrollEnabled = false
     private var sideButtonsEnabled = false
     private var accessibilityGranted = false
-    private var matchedButtons: [Int64: pid_t] = [:]
+    private var matchedButtons: Set<Int64> = []
+
+    init() {
+        thread.start()
+        runLoopReady.wait()
+    }
 
     func configure(scrollEnabled: Bool, sideButtonsEnabled: Bool, accessibilityGranted: Bool) {
-        self.scrollEnabled = scrollEnabled
-        self.sideButtonsEnabled = sideButtonsEnabled
-        self.accessibilityGranted = accessibilityGranted
-        reconcile()
+        performOnEventThread { [weak self] in
+            guard let self else { return }
+            let permissionWasGranted = self.accessibilityGranted
+            self.scrollEnabled = scrollEnabled
+            self.sideButtonsEnabled = sideButtonsEnabled
+            self.accessibilityGranted = accessibilityGranted
+            if accessibilityGranted && !permissionWasGranted { self.stopTap() }
+            self.reconcile()
+        }
     }
 
     func stop() {
-        accessibilityGranted = false
-        matchedButtons.removeAll()
-        stopTap()
+        performOnEventThread { [weak self] in
+            guard let self else { return }
+            self.accessibilityGranted = false
+            self.matchedButtons.removeAll()
+            self.stopTap()
+            if let runLoop = self.runLoop { CFRunLoopStop(runLoop) }
+        }
+    }
+
+    private func runEventLoop() {
+        autoreleasepool {
+            let port = NSMachPort()
+            RunLoop.current.add(port, forMode: .default)
+            runLoopPort = port
+            runLoop = CFRunLoopGetCurrent()
+            runLoopReady.signal()
+            CFRunLoopRun()
+        }
+    }
+
+    private func performOnEventThread(_ action: @escaping () -> Void) {
+        guard let runLoop else { return }
+        CFRunLoopPerformBlock(runLoop, CFRunLoopMode.defaultMode.rawValue, action)
+        CFRunLoopWakeUp(runLoop)
     }
 
     private func reconcile() {
@@ -159,7 +147,8 @@ private final class MouseEventTap {
         }
 
         let mask = eventMask(scroll: scrollEnabled, buttons: listenForButtons)
-        guard eventTap == nil || currentMask != mask else { return }
+        if let eventTap, currentMask == mask, CGEvent.tapIsEnabled(tap: eventTap) { return }
+        // Deliberately stopped taps are removed, so a retained disabled tap needs recovery.
         stopTap()
         guard let tap = CGEvent.tapCreate(
             tap: .cgSessionEventTap,
@@ -173,12 +162,12 @@ private final class MouseEventTap {
         eventTap = tap
         runLoopSource = source
         currentMask = mask
-        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CFRunLoopAddSource(CFRunLoopGetCurrent(), source, .commonModes)
         CGEvent.tapEnable(tap: tap, enable: true)
     }
 
     private func stopTap() {
-        if let source = runLoopSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), source, .commonModes) }
+        if let source = runLoopSource { CFRunLoopRemoveSource(CFRunLoopGetCurrent(), source, .commonModes) }
         if let tap = eventTap {
             CGEvent.tapEnable(tap: tap, enable: false)
             CFMachPortInvalidate(tap)
@@ -200,13 +189,20 @@ private final class MouseEventTap {
 
     private func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            let permissionWasGranted = accessibilityGranted
             accessibilityGranted = Permissions.accessibilityGranted
-            if !accessibilityGranted { matchedButtons.removeAll(); stopTap() }
-            else if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
+            if !accessibilityGranted {
+                matchedButtons.removeAll()
+                stopTap()
+            } else {
+                if !permissionWasGranted { stopTap() }
+                performOnEventThread { [weak self] in self?.reconcile() }
+            }
             return Unmanaged.passUnretained(event)
         }
 
-        if type == .scrollWheel, scrollEnabled, UserDefaults.standard.bool(forKey: "com.apple.swipescrolldirection") {
+        if type == .scrollWheel, scrollEnabled,
+           NSEvent(cgEvent: event)?.isDirectionInvertedFromDevice == true {
             reverseScrollDeltas(event)
             return Unmanaged.passUnretained(event)
         }
@@ -218,13 +214,19 @@ private final class MouseEventTap {
     }
 
     private func reverseScrollDeltas(_ event: CGEvent) {
-        for field in [CGEventField.scrollWheelEventDeltaAxis1, .scrollWheelEventDeltaAxis2,
-                      .scrollWheelEventPointDeltaAxis1, .scrollWheelEventPointDeltaAxis2] {
-            event.setIntegerValueField(field, value: -event.getIntegerValueField(field))
-        }
-        for field in [CGEventField.scrollWheelEventFixedPtDeltaAxis1, .scrollWheelEventFixedPtDeltaAxis2] {
-            event.setDoubleValueField(field, value: -event.getDoubleValueField(field))
-        }
+        let line1 = event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
+        let line2 = event.getIntegerValueField(.scrollWheelEventDeltaAxis2)
+        let fixed1 = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
+        let fixed2 = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2)
+        let point1 = event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1)
+        let point2 = event.getIntegerValueField(.scrollWheelEventPointDeltaAxis2)
+
+        event.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: -line1)
+        event.setIntegerValueField(.scrollWheelEventDeltaAxis2, value: -line2)
+        event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: -fixed1)
+        event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2, value: -fixed2)
+        event.setIntegerValueField(.scrollWheelEventPointDeltaAxis1, value: -point1)
+        event.setIntegerValueField(.scrollWheelEventPointDeltaAxis2, value: -point2)
     }
 
     private func handleSideButton(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
@@ -232,23 +234,38 @@ private final class MouseEventTap {
         guard button == 3 || button == 4 else { return Unmanaged.passUnretained(event) }
 
         if type == .otherMouseDown {
-            guard sideButtonsEnabled else { return Unmanaged.passUnretained(event) }
-            if matchedButtons[button] != nil { return nil }
-            guard let processID = NSWorkspace.shared.frontmostApplication?.processIdentifier,
-                  postShortcut(for: button, to: processID) else { return Unmanaged.passUnretained(event) }
-            matchedButtons[button] = processID
+            guard sideButtonsEnabled,
+                  let application = NSWorkspace.shared.frontmostApplication,
+                  let bundleIdentifier = application.bundleIdentifier,
+                  sideButtonShortcutBundleIDs.contains(bundleIdentifier) else {
+                return Unmanaged.passUnretained(event)
+            }
+            if matchedButtons.contains(button) { return nil }
+            guard postShortcut(for: button, to: application.processIdentifier) else {
+                return Unmanaged.passUnretained(event)
+            }
+            matchedButtons.insert(button)
             return nil
         }
 
-        guard matchedButtons.removeValue(forKey: button) != nil else { return Unmanaged.passUnretained(event) }
-        DispatchQueue.main.async { [weak self] in self?.reconcile() }
+        guard matchedButtons.remove(button) != nil else { return Unmanaged.passUnretained(event) }
+        if !sideButtonsEnabled && matchedButtons.isEmpty {
+            performOnEventThread { [weak self] in self?.reconcile() }
+        }
         return nil
     }
 
     private func postShortcut(for button: Int64, to processID: pid_t) -> Bool {
-        let keyCode = CGKeyCode(button == 3 ? kVK_ANSI_LeftBracket : kVK_ANSI_RightBracket)
-        guard let down = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: true),
-              let up = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: false) else { return false }
+        let isBack = button == 3
+        let keyCode = CGKeyCode(isBack ? kVK_ANSI_LeftBracket : kVK_ANSI_RightBracket)
+        let unicode = Array((isBack ? "[" : "]").utf16)
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let down = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: true),
+              let up = CGEvent(keyboardEventSource: source, virtualKey: keyCode, keyDown: false) else { return false }
+        unicode.withUnsafeBufferPointer { characters in
+            down.keyboardSetUnicodeString(stringLength: characters.count, unicodeString: characters.baseAddress)
+            up.keyboardSetUnicodeString(stringLength: characters.count, unicodeString: characters.baseAddress)
+        }
         down.flags = .maskCommand
         up.flags = .maskCommand
         down.postToPid(processID)

@@ -68,7 +68,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let mouseHeader = NSMenuItem(title: "Mouse", action: nil, keyEquivalent: "")
         mouseHeader.isEnabled = false
         menu.addItem(mouseHeader)
-        menu.addItem(mouseFeatures.linearPointer.makeMenuItem())
         menu.addItem(mouseFeatures.windowsScrollDirection.makeMenuItem())
         menu.addItem(mouseFeatures.sideButtonsBackForward.makeMenuItem())
 
