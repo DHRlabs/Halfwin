@@ -3,6 +3,7 @@ import ServiceManagement
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let keepAwake = KeepAwake()
+    private let mouseFeatures = MouseFeatures()
     private let snapSettings = SnapSettings.shared
     private lazy var snapManager = SnapManager(settings: snapSettings)
     private let layoutMenuSettings = LayoutMenuSettings.shared
@@ -32,18 +33,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         configureWindowExtras()
         keepAwake.onChange = { [weak self] in self?.updateUI() }
         keepAwake.refresh()
+        mouseFeatures.start()
         snapManager.refreshPermission()
         layoutMenuManager.refreshPermission()
         updateUI()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        mouseFeatures.stop()
         keepAwake.stop()
         windowExtrasManager.stop()
     }
 
     func menuWillOpen(_ menu: NSMenu) {
         keepAwake.refresh()
+        mouseFeatures.refreshPermission()
         snapManager.refreshPermission()
         layoutMenuManager.refreshPermission()
         windowExtrasManager.refreshPermission()
@@ -79,6 +83,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(titleBarSwitch.makeMenuItem())
         menu.addItem(showDesktopSwitch.makeMenuItem())
         menu.addItem(commandArrowSwitch.makeMenuItem())
+
+        menu.addItem(.separator())
+
+        let mouseHeader = NSMenuItem(title: "Mouse", action: nil, keyEquivalent: "")
+        mouseHeader.isEnabled = false
+        menu.addItem(mouseHeader)
+        menu.addItem(mouseFeatures.windowsScrollDirection.makeMenuItem())
+        menu.addItem(mouseFeatures.sideButtonsBackForward.makeMenuItem())
 
         menu.addItem(.separator())
 
