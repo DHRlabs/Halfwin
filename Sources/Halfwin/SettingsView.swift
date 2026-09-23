@@ -3,6 +3,7 @@ import AppKit
 
 struct SettingsView: View {
     @ObservedObject var settings: SnapSettings
+    @ObservedObject var layoutMenuSettings: LayoutMenuSettings
 
     var body: some View {
         Form {
@@ -19,9 +20,15 @@ struct SettingsView: View {
                     settings.restoreLanceDefaults()
                 }
             }
+            Section("Layout menu") {
+                Toggle("Show a layout menu when hovering the top of a display", isOn: $layoutMenuSettings.enabled)
+                Stepper(value: $layoutMenuSettings.dwellDelay, in: 0.1...1.5, step: 0.05) {
+                    Text("Dwell delay: \(layoutMenuSettings.dwellDelay, specifier: "%.2f")s")
+                }
+            }
         }
         .formStyle(.grouped)
-        .frame(width: 420, height: 420)
+        .frame(width: 420, height: 520)
     }
 
     private func binding(for position: SnapPosition) -> Binding<SnapAction> {
@@ -34,15 +41,17 @@ struct SettingsView: View {
 
 /// Hosts `SettingsView` in a plain `NSWindow`, opened from the menu (Cmd-,).
 final class SettingsWindowController: NSWindowController {
-    convenience init(settings: SnapSettings) {
+    convenience init(settings: SnapSettings, layoutMenuSettings: LayoutMenuSettings) {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 420),
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 520),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
         window.title = "Halfwin Settings"
-        window.contentViewController = NSHostingController(rootView: SettingsView(settings: settings))
+        window.contentViewController = NSHostingController(
+            rootView: SettingsView(settings: settings, layoutMenuSettings: layoutMenuSettings)
+        )
         window.center()
         self.init(window: window)
     }
