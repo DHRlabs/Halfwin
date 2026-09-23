@@ -12,7 +12,6 @@ private let sideButtonShortcutBundleIDs: Set<String> = [
     "com.apple.systempreferences",
     "com.apple.AppStore",
     "com.apple.Music",
-    "com.apple.Notes",
     "com.apple.helpviewer"
 ]
 
@@ -25,11 +24,16 @@ final class MouseFeatures {
     private var activationObserver: NSObjectProtocol?
 
     init() {
+        eventTap.updateFrontmostApplication(NSWorkspace.shared.frontmostApplication)
         windowsScrollDirection.onChange = { [weak self] _ in self?.refreshPermission() }
         sideButtonsBackForward.onChange = { [weak self] _ in self?.refreshPermission() }
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.refreshPermission() }
+        ) { [weak self] notification in
+            let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication
+            self?.eventTap.updateFrontmostApplication(application)
+            self?.refreshPermission()
+        }
     }
 
     func start() {
@@ -89,6 +93,8 @@ private final class MouseEventTap {
     private var sideButtonsEnabled = false
     private var accessibilityGranted = false
     private var matchedButtons: Set<Int64> = []
+    private var frontmostBundleIdentifier: String?
+    private var frontmostProcessIdentifier: pid_t?
 
     init() {
         thread.start()
@@ -107,6 +113,15 @@ private final class MouseEventTap {
         }
     }
 
+    func updateFrontmostApplication(_ application: NSRunningApplication?) {
+        let bundleIdentifier = application?.bundleIdentifier
+        let processIdentifier = application?.processIdentifier
+        performOnEventThread { [weak self] in
+            self?.frontmostBundleIdentifier = bundleIdentifier
+            self?.frontmostProcessIdentifier = processIdentifier
+        }
+    }
+
     func stop() {
         performOnEventThread { [weak self] in
             guard let self else { return }
@@ -114,6 +129,7 @@ private final class MouseEventTap {
             self.matchedButtons.removeAll()
             self.stopTap()
             if let runLoop = self.runLoop { CFRunLoopStop(runLoop) }
+            self.runLoop = nil
         }
     }
 
@@ -189,10 +205,10 @@ private final class MouseEventTap {
 
     private func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            matchedButtons.removeAll()
             let permissionWasGranted = accessibilityGranted
             accessibilityGranted = Permissions.accessibilityGranted
             if !accessibilityGranted {
-                matchedButtons.removeAll()
                 stopTap()
             } else {
                 if !permissionWasGranted { stopTap() }
@@ -234,14 +250,17 @@ private final class MouseEventTap {
         guard button == 3 || button == 4 else { return Unmanaged.passUnretained(event) }
 
         if type == .otherMouseDown {
+            let wasMatched = matchedButtons.remove(button) != nil
+            if wasMatched && !sideButtonsEnabled && matchedButtons.isEmpty {
+                performOnEventThread { [weak self] in self?.reconcile() }
+            }
             guard sideButtonsEnabled,
-                  let application = NSWorkspace.shared.frontmostApplication,
-                  let bundleIdentifier = application.bundleIdentifier,
-                  sideButtonShortcutBundleIDs.contains(bundleIdentifier) else {
+                  let bundleIdentifier = frontmostBundleIdentifier,
+                  sideButtonShortcutBundleIDs.contains(bundleIdentifier),
+                  let processIdentifier = frontmostProcessIdentifier else {
                 return Unmanaged.passUnretained(event)
             }
-            if matchedButtons.contains(button) { return nil }
-            guard postShortcut(for: button, to: application.processIdentifier) else {
+            guard postShortcut(for: button, to: processIdentifier) else {
                 return Unmanaged.passUnretained(event)
             }
             matchedButtons.insert(button)
