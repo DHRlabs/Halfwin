@@ -3,6 +3,9 @@ import ServiceManagement
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let keepAwake = KeepAwake()
+    private let snapSettings = SnapSettings.shared
+    private lazy var snapManager = SnapManager(settings: snapSettings)
+    private lazy var settingsWindowController = SettingsWindowController(settings: snapSettings)
     private let menu = NSMenu()
     private var statusItem: NSStatusItem!
     private var statusLine: NSMenuItem!
@@ -21,6 +24,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
         keepAwake.onChange = { [weak self] in self?.updateUI() }
         keepAwake.refresh()
+        snapManager.refreshPermission()
         updateUI()
     }
 
@@ -30,6 +34,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         keepAwake.refresh()
+        snapManager.refreshPermission()
     }
 
     private func buildMenu() {
@@ -70,6 +75,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         permissionsMenu.addItem(screenRecordingItem)
         permissionsItem.submenu = permissionsMenu
         menu.addItem(permissionsItem)
+
+        menu.addItem(.separator())
+        let settingsItem = NSMenuItem(title: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        settingsItem.target = self
+        menu.addItem(settingsItem)
 
         menu.addItem(.separator())
         let quit = NSMenuItem(title: "Quit Halfwin", action: #selector(quit), keyEquivalent: "q")
@@ -113,6 +123,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         Permissions.requestScreenRecording()
         updateUI()
     }
+
+    @objc private func openSettings() { settingsWindowController.show() }
 
     @objc private func quit() { NSApplication.shared.terminate(nil) }
 
