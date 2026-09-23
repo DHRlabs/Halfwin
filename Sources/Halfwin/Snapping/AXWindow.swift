@@ -63,6 +63,17 @@ struct AXWindow {
         return nil
     }
 
+    /// The focused window of the frontmost app, the way a menu-driven layout
+    /// pick resolves its target instead of a title-bar drag.
+    static func frontmostFocusedWindow() -> AXWindow? {
+        guard let app = NSWorkspace.shared.frontmostApplication else { return nil }
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, 0.1)
+        guard let focused: AXUIElement = objectAttribute(appElement, kAXFocusedWindowAttribute) else { return nil }
+        AXUIElementSetMessagingTimeout(focused, 0.1)
+        return AXWindow(element: focused)
+    }
+
     private static func role(of element: AXUIElement) -> String? {
         var value: AnyObject?
         guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &value) == .success else { return nil }
