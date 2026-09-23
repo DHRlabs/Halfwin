@@ -3,6 +3,7 @@ import ServiceManagement
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let keepAwake = KeepAwake()
+    private let mouseFeatures = MouseFeatures()
     private let snapSettings = SnapSettings.shared
     private lazy var snapManager = SnapManager(settings: snapSettings)
     private let snapAssistManager = SnapAssistManager()
@@ -11,6 +12,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let snapGroupsSwitch = FeatureSwitch(key: "snapGroups", title: "Snap Groups", defaultOn: true)
     private let layoutMenuSettings = LayoutMenuSettings.shared
     private lazy var layoutMenuManager = LayoutMenuManager(settings: layoutMenuSettings)
+    private lazy var windowExtrasManager = WindowExtrasManager()
+    private let greenButtonSwitch = FeatureSwitch(key: "green-button-maximizes", title: "Green button maximizes", defaultOn: true)
+    private let titleBarSwitch = FeatureSwitch(key: "title-bar-double-click-maximizes", title: "Double-click title bar maximizes", defaultOn: true)
+    private let showDesktopSwitch = FeatureSwitch(key: "show-desktop-corner", title: "Show desktop corner", defaultOn: true)
+    private let commandArrowSwitch = FeatureSwitch(key: "command-arrow-snapping", title: "Command-arrow snapping", defaultOn: true)
     private lazy var settingsWindowController = SettingsWindowController(settings: snapSettings, layoutMenuSettings: layoutMenuSettings)
     private let menu = NSMenu()
     private var statusItem: NSStatusItem!
@@ -44,8 +50,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         buildMenu()
         menu.delegate = self
         statusItem.menu = menu
+        configureWindowExtras()
         keepAwake.onChange = { [weak self] in self?.updateUI() }
         keepAwake.refresh()
+        mouseFeatures.start()
         snapManager.refreshPermission()
         layoutMenuManager.refreshPermission()
         updateUI()
@@ -56,17 +64,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             NSWorkspace.shared.notificationCenter.removeObserver(activationRefreshObserver)
             self.activationRefreshObserver = nil
         }
+        mouseFeatures.stop()
         keepAwake.stop()
+        windowExtrasManager.stop()
         snapGroupsManager.stop()
         snapAssistManager.setEnabled(false)
     }
 
     func menuWillOpen(_ menu: NSMenu) {
         keepAwake.refresh()
+        mouseFeatures.refreshPermission()
         snapManager.refreshPermission()
         layoutMenuManager.refreshPermission()
         snapAssistManager.refreshPermission()
         snapGroupsManager.refreshPermission()
+        windowExtrasManager.refreshPermission()
     }
 
     private func buildMenu() {
@@ -90,6 +102,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let lidDurationParent = NSMenuItem(title: "Keep Awake With Lid Closed For…", action: nil, keyEquivalent: "")
         lidDurationParent.submenu = makeDurations(#selector(startLidTimed(_:)), store: &lidDurationItems)
         menu.addItem(lidDurationParent)
+
+        menu.addItem(.separator())
+        let windowsHeader = NSMenuItem(title: "Windows", action: nil, keyEquivalent: "")
+        windowsHeader.isEnabled = false
+        menu.addItem(windowsHeader)
+        menu.addItem(greenButtonSwitch.makeMenuItem())
+        menu.addItem(titleBarSwitch.makeMenuItem())
+        menu.addItem(showDesktopSwitch.makeMenuItem())
+        menu.addItem(commandArrowSwitch.makeMenuItem())
+
+        menu.addItem(.separator())
+
+        let mouseHeader = NSMenuItem(title: "Mouse", action: nil, keyEquivalent: "")
+        mouseHeader.isEnabled = false
+        menu.addItem(mouseHeader)
+        menu.addItem(mouseFeatures.windowsScrollDirection.makeMenuItem())
+        menu.addItem(mouseFeatures.sideButtonsBackForward.makeMenuItem())
 
         menu.addItem(.separator())
 
@@ -124,6 +153,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         let quit = NSMenuItem(title: "Quit Halfwin", action: #selector(quit), keyEquivalent: "q")
         quit.target = self
         menu.addItem(quit)
+    }
+
+    private func configureWindowExtras() {
+        greenButtonSwitch.onChange = { [weak self] in self?.windowExtrasManager.setGreenButtonEnabled($0) }
+        titleBarSwitch.onChange = { [weak self] in self?.windowExtrasManager.setTitleBarDoubleClickEnabled($0) }
+        showDesktopSwitch.onChange = { [weak self] in self?.windowExtrasManager.setShowDesktopEnabled($0) }
+        commandArrowSwitch.onChange = { [weak self] in self?.windowExtrasManager.setCommandArrowEnabled($0) }
+        greenButtonSwitch.start()
+        titleBarSwitch.start()
+        showDesktopSwitch.start()
+        commandArrowSwitch.start()
     }
 
     private func makeDurations(_ action: Selector, store: inout [NSMenuItem]) -> NSMenu {
