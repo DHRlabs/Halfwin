@@ -15,10 +15,18 @@ final class KeyboardExtras {
     private var lastWindowEnabled = false
     private var permissionTimer: Timer?
     private var pasteboardTimer: Timer?
+    private var pasteboardPollingInterval: TimeInterval?
     private var observedPasteboardChangeCount: Int?
     private var suppressedHistoryChangeCount: Int?
     private var clipboardRunning = false
-    private var cutState: CutState?
+    private var runtimeRunning = false
+    var onCutPendingChange: ((Bool) -> Void)?
+    private var cutState: CutState? {
+        didSet {
+            onCutPendingChange?(cutState != nil)
+            refreshPasteboardTimer()
+        }
+    }
     private var pendingFinderPasteID: UUID?
     private var pastePress: PastePress?
     private var pendingExtraPasteKeyUps = 0
@@ -45,6 +53,22 @@ final class KeyboardExtras {
     }
 
     private static let syntheticEventMarker: Int64 = 0x48414C4657494E
+    private static let lastWindowExcludedBundleIdentifiers: Set<String> = [
+        "com.apple.finder",
+        "com.dhrlabs.halfwin",
+        "com.apple.Music",
+        "com.apple.mail",
+        "com.apple.MobileSMS",
+        "com.apple.iCal",
+        "com.apple.Notes",
+        "com.apple.reminders",
+        "com.apple.podcasts",
+        "com.apple.TV",
+        "com.apple.Photos",
+        "com.apple.systempreferences",
+        "com.apple.ActivityMonitor",
+        "com.apple.Terminal" // Terminal keeps sessions alive after its last window closes.
+    ]
     private static let eventTapCallback: CGEventTapCallBack = { _, type, event, userInfo in
         guard let userInfo else { return Unmanaged.passUnretained(event) }
         let controller = Unmanaged<KeyboardExtras>.fromOpaque(userInfo).takeUnretainedValue()
@@ -84,7 +108,7 @@ final class KeyboardExtras {
         }
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.refreshPermission() }
+        ) { [weak self] _ in self?.applicationDidActivate() }
     }
 
     func addMenuItems(to menu: NSMenu) {
@@ -139,6 +163,7 @@ final class KeyboardExtras {
             stopRuntime()
             return
         }
+        runtimeRunning = true
         if clipboardEnabled && !clipboardRunning {
             clipboardHistory.start()
             clipboardRunning = true
@@ -146,21 +171,11 @@ final class KeyboardExtras {
             clipboardHistory.stop()
             clipboardRunning = false
         }
-        if clipboardEnabled || cutPasteEnabled {
-            if pasteboardTimer == nil {
-                observedPasteboardChangeCount = NSPasteboard.general.changeCount
-                pasteboardTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-                    self?.checkPasteboard()
-                }
-            }
-        } else {
-            pasteboardTimer?.invalidate()
-            pasteboardTimer = nil
-            observedPasteboardChangeCount = nil
-        }
+        refreshPasteboardTimer()
     }
 
     private func stopRuntime() {
+        runtimeRunning = false
         if let eventTap {
             CGEvent.tapEnable(tap: eventTap, enable: false)
             CFMachPortInvalidate(eventTap)
@@ -172,6 +187,7 @@ final class KeyboardExtras {
         eventTapSource = nil
         pasteboardTimer?.invalidate()
         pasteboardTimer = nil
+        pasteboardPollingInterval = nil
         observedPasteboardChangeCount = nil
         suppressedHistoryChangeCount = nil
         cutState = nil
@@ -183,11 +199,45 @@ final class KeyboardExtras {
         clipboardRunning = false
     }
 
+    private func refreshPasteboardTimer() {
+        guard runtimeRunning, clipboardEnabled || cutPasteEnabled else {
+            pasteboardTimer?.invalidate()
+            pasteboardTimer = nil
+            pasteboardPollingInterval = nil
+            observedPasteboardChangeCount = nil
+            return
+        }
+        let interval: TimeInterval = cutState?.awaitingFileCopy == true ? 0.05 : 0.5
+        guard pasteboardTimer == nil || pasteboardPollingInterval != interval else { return }
+        pasteboardTimer?.invalidate()
+        if pasteboardTimer == nil { observedPasteboardChangeCount = NSPasteboard.general.changeCount }
+        pasteboardPollingInterval = interval
+        pasteboardTimer = Timer.scheduledTimer(withTimeInterval: interval, repeats: true) { [weak self] _ in
+            self?.checkPasteboard()
+        }
+    }
+
+    private func applicationDidActivate() {
+        refreshPermission()
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        if clipboardHistory.isPickerVisible,
+           pastePress?.application?.processIdentifier != frontmost?.processIdentifier {
+            clipboardHistory.cancelPicker()
+        }
+        if let press = pastePress,
+           press.application?.processIdentifier != frontmost?.processIdentifier {
+            discardPendingPaste()
+        }
+        if !isFinder(frontmost) { cutState = nil }
+    }
+
     private func startEventTap() -> Bool {
         guard eventTap == nil else { return true }
         let mask = (CGEventMask(1) << CGEventType.keyDown.rawValue)
             | (CGEventMask(1) << CGEventType.keyUp.rawValue)
             | (CGEventMask(1) << CGEventType.leftMouseDown.rawValue)
+            | (CGEventMask(1) << CGEventType.rightMouseDown.rawValue)
+            | (CGEventMask(1) << CGEventType.otherMouseDown.rawValue)
         guard let tap = CGEvent.tapCreate(tap: .cgSessionEventTap, place: .headInsertEventTap,
                                           options: .defaultTap, eventsOfInterest: mask,
                                           callback: Self.eventTapCallback,
@@ -212,6 +262,13 @@ final class KeyboardExtras {
             return Unmanaged.passUnretained(event)
         }
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let press = pastePress, !press.pickerShown,
+               (press.releasedAt ?? ProcessInfo.processInfo.systemUptime) - press.startedAt < 0.45 {
+                let queuedTargets = queuedPasteTargets
+                replayPaste(to: press.application, flags: .maskCommand) { [weak self] in
+                    self?.replayQueuedPastes(queuedTargets, at: 0)
+                }
+            }
             swallowedKeyUps.removeAll()
             pendingExtraPasteKeyUps = 0
             pastePress = nil
@@ -220,9 +277,17 @@ final class KeyboardExtras {
             if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
             return Unmanaged.passUnretained(event)
         }
-        if type == .leftMouseDown {
-            if lastWindowEnabled, let application = applicationClosingUnderPointer() {
-                checkForLastWindow(of: application)
+        if type == .leftMouseDown || type == .rightMouseDown || type == .otherMouseDown {
+            if clipboardHistory.isPickerVisible {
+                clipboardHistory.dismissPickerIfOutside(NSEvent.mouseLocation)
+            }
+            if type == .leftMouseDown, lastWindowEnabled {
+                let point = NSEvent.mouseLocation
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.lastWindowEnabled,
+                          let application = self.applicationClosingUnderPointer(at: point) else { return }
+                    self.checkForLastWindow(of: application)
+                }
             }
             return Unmanaged.passUnretained(event)
         }
@@ -261,7 +326,19 @@ final class KeyboardExtras {
             return Unmanaged.passUnretained(event)
         }
 
+        let flags = event.flags
+        let application = NSWorkspace.shared.frontmostApplication
+        if keyCode == 53, isFinder(application) { cancelFinderCut() }
+        if keyCode == 9,
+           flags.intersection(Self.shortcutModifierFlags) == [.maskCommand, .maskAlternate] {
+            cancelFinderCut()
+        }
+
         if clipboardHistory.isPickerVisible {
+            if keyCode == 9, isPlainCommand(flags),
+               event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
+                return nil
+            }
             switch keyCode {
             case 123, 126: clipboardHistory.moveSelection(-1)
             case 124, 125: clipboardHistory.moveSelection(1)
@@ -273,12 +350,25 @@ final class KeyboardExtras {
             return nil
         }
 
+        if let press = pastePress, !press.pickerShown, keyCode != 9,
+           ProcessInfo.processInfo.systemUptime - press.startedAt < 0.45 {
+            let queuedTargets = queuedPasteTargets
+            queuedPasteTargets.removeAll()
+            pendingFinderPasteID = nil
+            pastePress = nil
+            swallowedKeyUps.insert(keyCode)
+            replayPaste(to: press.application, flags: .maskCommand) { [weak self] in
+                self?.replayQueuedPastes(queuedTargets, at: 0) { [weak self] in
+                    self?.postKeyCombo(keyCode, flags: flags)
+                }
+            }
+            return nil
+        }
+
         guard event.getIntegerValueField(.keyboardEventAutorepeat) == 0 else {
             if swallowedKeyUps.contains(keyCode) || (pastePress != nil && keyCode == 9) { return nil }
             return Unmanaged.passUnretained(event)
         }
-        let flags = event.flags
-        let application = NSWorkspace.shared.frontmostApplication
 
         if keyCode == 9, isPlainCommand(flags), pendingFinderPasteID != nil {
             queuedPasteTargets.append(application)
@@ -288,7 +378,6 @@ final class KeyboardExtras {
         }
 
         if cutPasteEnabled, keyCode == 9, isPlainCommand(flags), isFinder(application) {
-            checkPasteboard()
             if let application, cutState != nil {
                 var press = makePastePress(for: application)
                 press.finderPasteDecisionPending = true
@@ -300,10 +389,9 @@ final class KeyboardExtras {
             }
         }
         if cutPasteEnabled, keyCode == 7, isPlainCommand(flags), let application, isFinder(application) {
-            let changeCountAtCut = NSPasteboard.general.changeCount
             swallowedKeyUps.insert(keyCode)
             DispatchQueue.main.async { [weak self] in
-                self?.handleFinderCut(in: application, changeCountAtCut: changeCountAtCut)
+                self?.handleFinderCut(in: application)
             }
             return nil
         }
@@ -316,10 +404,13 @@ final class KeyboardExtras {
             return nil
         }
         if lastWindowEnabled, keyCode == 13, isPlainCommand(flags),
-           let application, shouldMonitor(application) {
-            swallowedKeyUps.insert(keyCode)
-            DispatchQueue.main.async { [weak self] in self?.handleLastWindowShortcut(in: application) }
-            return nil
+           let application, shouldMonitor(application),
+           let recordedCount = windowCount(for: application), recordedCount > 0 {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.isFrontmost(application), self.lastWindowEnabled else { return }
+                self.scheduleLastWindowCheck(of: application, recordedCount: recordedCount)
+            }
+            return Unmanaged.passUnretained(event)
         }
         if clipboardEnabled, keyCode == 9, isPlainCommand(flags) {
             let press = makePastePress(for: application)
@@ -338,7 +429,15 @@ final class KeyboardExtras {
     }
 
     private func handleFinderPaste(for id: UUID) {
-        guard var press = pastePress, press.id == id, let application = press.application else { return }
+        guard let initialPress = pastePress, initialPress.id == id,
+              let initialApplication = initialPress.application else { return }
+        guard isFrontmost(initialApplication) else {
+            discardPendingPaste()
+            return
+        }
+        checkPasteboard()
+        guard var press = pastePress, press.id == id, pendingFinderPasteID == id,
+              let application = press.application, isFrontmost(application) else { return }
         let textFieldFocused = finderTextFieldIsFocused(in: application)
         press.finderPasteDecisionPending = false
         pastePress = press
@@ -387,16 +486,18 @@ final class KeyboardExtras {
         }
     }
 
-    private func handleFinderCut(in application: NSRunningApplication, changeCountAtCut: Int) {
-        guard !application.isTerminated else { return }
+    private func handleFinderCut(in application: NSRunningApplication) {
+        guard isFrontmost(application) else { return }
         guard cutPasteEnabled else {
             replayKeyCombo(to: application, keyCode: 7, flags: .maskCommand)
             return
         }
         checkPasteboard()
         if let urls = selectedFinderFileURLs(in: application), !urls.isEmpty {
+            guard isFrontmost(application), cutPasteEnabled else { return }
+            let changeCountBeforeCopy = NSPasteboard.general.changeCount
             cutState = CutState(expectedURLs: Set(urls.map(\.standardizedFileURL)),
-                                changeCountAtCut: changeCountAtCut,
+                                changeCountAtCut: changeCountBeforeCopy,
                                 startedAt: ProcessInfo.processInfo.systemUptime)
             postKeyCombo(8, flags: .maskCommand)
         } else {
@@ -405,7 +506,7 @@ final class KeyboardExtras {
     }
 
     private func handleFinderEnter(in application: NSRunningApplication, keyCode: CGKeyCode) {
-        guard !application.isTerminated else { return }
+        guard isFrontmost(application) else { return }
         if finderEnterEnabled, selectedFinderFileURLs(in: application) != nil {
             replayKeyCombo(to: application, keyCode: 31, flags: .maskCommand)
         } else {
@@ -413,23 +514,15 @@ final class KeyboardExtras {
         }
     }
 
-    private func handleLastWindowShortcut(in application: NSRunningApplication) {
-        guard !application.isTerminated else { return }
-        guard lastWindowEnabled, shouldMonitor(application),
-              let recordedCount = windowCount(for: application), recordedCount > 0 else {
-            replayKeyCombo(to: application, keyCode: 13, flags: .maskCommand)
-            return
-        }
-        replayKeyCombo(to: application, keyCode: 13, flags: .maskCommand) { [weak self] in
-            self?.scheduleLastWindowCheck(of: application, recordedCount: recordedCount)
-        }
-    }
-
     private func showPickerAfterHold(for id: UUID) {
         guard let press = pastePress, press.id == id else { return }
         let remaining = max(0, press.startedAt + 0.45 - ProcessInfo.processInfo.systemUptime)
         DispatchQueue.main.asyncAfter(deadline: .now() + remaining) { [weak self] in
-            guard let self, self.pastePress?.id == id else { return }
+            guard let self, let press = self.pastePress, press.id == id else { return }
+            guard self.isFrontmost(press.application) else {
+                self.discardPendingPaste()
+                return
+            }
             if self.pendingFinderPasteID == id {
                 self.checkPasteboard()
                 guard self.pendingFinderPasteID == id else { return }
@@ -483,6 +576,10 @@ final class KeyboardExtras {
             }
             return
         }
+        guard isFrontmost(press.application) else {
+            discardPendingPaste()
+            return
+        }
         let targetApplication = press.application
         let shown = clipboardHistory.showPicker(at: NSEvent.mouseLocation, onChoose: { [weak self] entry in
             guard let self else { return }
@@ -497,7 +594,6 @@ final class KeyboardExtras {
             guard let self else { return }
             self.pendingFinderPasteID = nil
             self.pastePress = nil
-            self.restore(targetApplication)
             self.replayQueuedPastes()
         })
         press.pickerShown = shown
@@ -540,29 +636,37 @@ final class KeyboardExtras {
         }
     }
 
+    private func cancelFinderCut() {
+        guard cutState != nil else { return }
+        cutState = nil
+        if pendingFinderPasteID != nil {
+            resolvePendingFinderPasteWithoutClipboardChange()
+        }
+    }
+
     private func checkPasteboard() {
         let pasteboard = NSPasteboard.general
         let changeCount = pasteboard.changeCount
+        if let cutState,
+           ProcessInfo.processInfo.systemUptime - cutState.startedAt >= 60 {
+            self.cutState = nil
+            resolvePendingFinderPasteWithoutClipboardChange()
+        }
         guard let previous = observedPasteboardChangeCount else {
             observedPasteboardChangeCount = changeCount
             return
         }
-        guard changeCount != previous else {
-            if let cutState, cutState.awaitingFileCopy,
-               ProcessInfo.processInfo.systemUptime - cutState.startedAt > 2 {
-                self.cutState = nil
-                resolvePendingFinderPasteWithoutClipboardChange()
-            }
-            return
-        }
+        guard changeCount != previous else { return }
         observedPasteboardChangeCount = changeCount
         if let cutState {
             let isExpectedCopy = cutState.awaitingFileCopy
                 && changeCount == cutState.changeCountAtCut &+ 1
-                && ProcessInfo.processInfo.systemUptime - cutState.startedAt <= 2
+                && ProcessInfo.processInfo.systemUptime - cutState.startedAt < 60
                 && fileURLs(on: pasteboard) == cutState.expectedURLs
             if isExpectedCopy {
-                self.cutState?.awaitingFileCopy = false
+                var updatedCutState = cutState
+                updatedCutState.awaitingFileCopy = false
+                self.cutState = updatedCutState
                 if let id = pendingFinderPasteID, let press = pastePress, press.id == id,
                    !press.finderPasteDecisionPending {
                     let heldLongEnough = (press.releasedAt ?? ProcessInfo.processInfo.systemUptime)
@@ -593,33 +697,44 @@ final class KeyboardExtras {
     private func scheduleLastWindowCheck(of application: NSRunningApplication, recordedCount: Int) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
             guard let self, recordedCount > 0, !application.isTerminated,
-                  self.lastWindowEnabled, self.windowCount(for: application) == 0 else { return }
-            application.terminate()
+                  self.lastWindowEnabled else { return }
+            let countAfterFirstCheck = self.windowCount(for: application)
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
+                guard let self, recordedCount > 0, !application.isTerminated,
+                      self.lastWindowEnabled,
+                      countAfterFirstCheck == 0,
+                      self.windowCount(for: application) == 0 else { return }
+                application.terminate()
+            }
         }
     }
 
     private func shouldMonitor(_ application: NSRunningApplication) -> Bool {
         application.activationPolicy == .regular
             && application.processIdentifier != NSRunningApplication.current.processIdentifier
-            && application.bundleIdentifier != "com.apple.finder"
-            && application.bundleIdentifier != Bundle.main.bundleIdentifier
+            && !Self.lastWindowExcludedBundleIdentifiers.contains(application.bundleIdentifier ?? "")
     }
 
     private func windowCount(for application: NSRunningApplication) -> Int? {
-        let element = AXUIElementCreateApplication(application.processIdentifier)
-        AXUIElementSetMessagingTimeout(element, 0.15)
-        let windows: [AXUIElement]? = attribute(element, kAXWindowsAttribute as String)
-        return windows?.count
+        guard let windows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] else {
+            return nil
+        }
+        return windows.reduce(into: 0) { count, window in
+            guard let ownerPID = window[kCGWindowOwnerPID as String] as? Int,
+                  ownerPID == Int(application.processIdentifier),
+                  let layer = window[kCGWindowLayer as String] as? Int,
+                  layer == 0 else { return }
+            count += 1
+        }
     }
 
-    private func applicationClosingUnderPointer() -> NSRunningApplication? {
-        let point = NSEvent.mouseLocation
+    private func applicationClosingUnderPointer(at point: NSPoint) -> NSRunningApplication? {
         guard let window = AXWindow.windowUnderCursor(at: point),
+              let pid = window.processIdentifier,
+              pid != NSRunningApplication.current.processIdentifier,
               let closeButton: AXUIElement = attribute(window.element, kAXCloseButtonAttribute as String) else { return nil }
         AXUIElementSetMessagingTimeout(closeButton, 0.1)
         guard let frame = AXWindow(element: closeButton).frame, frame.contains(point) else { return nil }
-        var pid: pid_t = 0
-        guard AXUIElementGetPid(window.element, &pid) == .success else { return nil }
         return NSRunningApplication(processIdentifier: pid)
     }
 
@@ -704,18 +819,27 @@ final class KeyboardExtras {
     }
 
     private func isPlainCommand(_ flags: CGEventFlags) -> Bool {
-        let ignored: CGEventFlags = [.maskSecondaryFn, .maskAlphaShift, .maskNumericPad]
-        return flags.subtracting(ignored) == .maskCommand
+        flags.intersection(Self.shortcutModifierFlags) == .maskCommand
     }
 
     private func isUnmodified(_ flags: CGEventFlags) -> Bool {
-        let ignored: CGEventFlags = [.maskSecondaryFn, .maskAlphaShift, .maskNumericPad]
-        return flags.subtracting(ignored).isEmpty
+        flags.intersection(Self.shortcutModifierFlags).isEmpty
     }
 
-    private func restore(_ application: NSRunningApplication?) {
-        application?.activate(options: [.activateAllWindows])
+    private func isFrontmost(_ application: NSRunningApplication?) -> Bool {
+        guard let application, !application.isTerminated else { return false }
+        return NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier
     }
+
+    private func discardPendingPaste() {
+        pendingFinderPasteID = nil
+        pastePress = nil
+        queuedPasteTargets.removeAll()
+    }
+
+    private static let shortcutModifierFlags: CGEventFlags = [
+        .maskShift, .maskControl, .maskAlternate, .maskCommand
+    ]
 
     private func replayQueuedPastes() {
         let targets = queuedPasteTargets
@@ -723,10 +847,14 @@ final class KeyboardExtras {
         replayQueuedPastes(targets, at: 0)
     }
 
-    private func replayQueuedPastes(_ targets: [NSRunningApplication?], at index: Int) {
-        guard targets.indices.contains(index) else { return }
+    private func replayQueuedPastes(_ targets: [NSRunningApplication?], at index: Int,
+                                    completion: (() -> Void)? = nil) {
+        guard targets.indices.contains(index) else {
+            completion?()
+            return
+        }
         replayPaste(to: targets[index], flags: .maskCommand) { [weak self] in
-            self?.replayQueuedPastes(targets, at: index + 1)
+            self?.replayQueuedPastes(targets, at: index + 1, completion: completion)
         }
     }
 
@@ -737,37 +865,15 @@ final class KeyboardExtras {
 
     private func replayKeyCombo(to application: NSRunningApplication?, keyCode: CGKeyCode, flags: CGEventFlags,
                                 completion: (() -> Void)? = nil) {
-        guard let application else {
-            postKeyCombo(keyCode, flags: flags)
-            completion?()
-            return
-        }
-        guard !application.isTerminated else {
-            completion?()
-            return
-        }
-        guard NSWorkspace.shared.frontmostApplication?.processIdentifier != application.processIdentifier else {
-            postKeyCombo(keyCode, flags: flags)
-            completion?()
-            return
-        }
-        restore(application)
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
-            guard let self else { return }
-            guard !application.isTerminated,
-                  NSWorkspace.shared.frontmostApplication?.processIdentifier == application.processIdentifier else {
-                completion?()
-                return
-            }
-            self.postKeyCombo(keyCode, flags: flags)
-            completion?()
-        }
+        guard let application, isFrontmost(application) else { return }
+        postKeyCombo(keyCode, flags: flags)
+        completion?()
     }
 
     private func postKeyCombo(_ keyCode: CGKeyCode, flags: CGEventFlags) {
         for isDown in [true, false] {
             guard let event = CGEvent(keyboardEventSource: nil, virtualKey: keyCode, keyDown: isDown) else { continue }
-            event.flags = flags
+            event.flags = flags.intersection(Self.shortcutModifierFlags)
             event.setIntegerValueField(.eventSourceUserData, value: Self.syntheticEventMarker)
             event.post(tap: .cghidEventTap)
         }

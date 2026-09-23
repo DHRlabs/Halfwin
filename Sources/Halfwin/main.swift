@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var durationItems: [NSMenuItem] = []
     private var lidItem: NSMenuItem!
     private var lidDurationItems: [NSMenuItem] = []
+    private var hasPendingFinderCut = false
     private var loginItem: NSMenuItem!
     private var accessibilityItem: NSMenuItem!
     private var screenRecordingItem: NSMenuItem!
@@ -48,6 +49,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         snapGroupsSwitch.start()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
+        keyboardExtras.onCutPendingChange = { [weak self] pending in
+            guard let self else { return }
+            self.hasPendingFinderCut = pending
+            self.updateStatusTitle()
+        }
         buildMenu()
         menu.delegate = self
         statusItem.menu = menu
@@ -221,7 +227,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             image.isTemplate = true
             statusItem.button?.image = image
         }
-        statusItem.button?.title = "hfWn"
+        updateStatusTitle()
         statusItem.button?.imagePosition = .imageLeft
 
         awakeItem.state = keepAwake.isPlainAwake ? .on : .off
@@ -238,6 +244,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         accessibilityItem.isEnabled = !Permissions.accessibilityGranted
         screenRecordingItem.title = "Screen Recording: \(Permissions.screenRecordingGranted ? "Granted" : "Not Granted")"
         screenRecordingItem.isEnabled = !Permissions.screenRecordingGranted
+    }
+
+    private func updateStatusTitle() {
+        statusItem.button?.title = hasPendingFinderCut ? "✂︎ hfWn" : "hfWn"
     }
 }
 
