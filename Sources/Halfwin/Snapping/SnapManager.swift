@@ -1,4 +1,5 @@
 import AppKit
+import Combine
 
 /// Watches title-bar drags system-wide and snaps the dragged window to a
 /// Rectangle-style edge/corner zone on release. Adapted from the shape of
@@ -19,22 +20,48 @@ final class SnapManager {
 
     private var draggedWindow: AXWindow?
     private var initialFrame: CGRect?
+    private var lockedSize: CGSize?
     private var isWindowMoving = false
     private var cancelled = false
     private var currentZone: Zone?
+    private var cancellables = Set<AnyCancellable>()
+    private var permissionTimer: Timer?
 
-    /// Pre-snap sizes for windows Halfwin has snapped, so a later drag can
-    /// restore them (Rectangle's `unsnapRestore`). Keyed by the AX element,
-    /// not a window id — this port never needs a CGWindowID.
-    private var snappedSizes: [AXWindow: CGSize] = [:]
+    /// Pre-snap target and size for windows Halfwin has snapped, so a later
+    /// drag can restore them (Rectangle's `unsnapRestore`) but only when that
+    /// drag starts from the same snapped frame — otherwise the entry is
+    /// stale (the window moved another way since) and is dropped. Keyed by
+    /// the AX element, not a window id — this port never needs a CGWindowID.
+    private var snappedInfo: [AXWindow: (target: CGRect, preSnapSize: CGSize)] = [:]
 
     init(settings: SnapSettings) {
         self.settings = settings
+        settings.$dragSnappingEnabled
+            .sink { [weak self] _ in
+                // @Published fires before the stored value changes, so hop
+                // to the next run-loop turn before reacting to it.
+                DispatchQueue.main.async { self?.refreshPermission() }
+            }
+            .store(in: &cancellables)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.refreshPermission() }
     }
 
     /// Starts (or stops) the monitor to match Accessibility permission and
     /// the Settings toggle. Safe to call repeatedly.
     func refreshPermission() {
+        if Permissions.accessibilityGranted {
+            permissionTimer?.invalidate()
+            permissionTimer = nil
+        } else if permissionTimer == nil {
+            // Accessibility isn't granted yet: poll lightly so a grant made
+            // while the app sits in the background still takes effect
+            // without waiting for the menu to reopen.
+            permissionTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+                self?.refreshPermission()
+            }
+        }
         if Permissions.accessibilityGranted && settings.dragSnappingEnabled {
             start()
         } else {
@@ -53,10 +80,12 @@ final class SnapManager {
     private func stop() {
         if let monitor { NSEvent.removeMonitor(monitor) }
         monitor = nil
+        footprint.hide()
         resetDrag()
     }
 
     private func handle(_ event: NSEvent) {
+        guard settings.dragSnappingEnabled else { return }
         switch event.type {
         case .keyDown:
             guard event.keyCode == 53 else { return } // Escape
@@ -76,26 +105,44 @@ final class SnapManager {
 
     private func beginDrag() {
         resetDrag()
+        pruneUnreadableSnapInfo()
         let cursor = NSEvent.mouseLocation
         draggedWindow = AXWindow.windowUnderCursor(at: cursor)
         initialFrame = draggedWindow?.frame
     }
 
+    /// Windows Halfwin can no longer read (closed, or the AX call timed out)
+    /// have nothing to restore to; drop them so the table doesn't grow
+    /// forever.
+    private func pruneUnreadableSnapInfo() {
+        for window in snappedInfo.keys where window.frame == nil {
+            snappedInfo.removeValue(forKey: window)
+        }
+    }
+
     private func continueDrag() {
-        guard !cancelled, let draggedWindow, let initialFrame, let frame = draggedWindow.frame else { return }
+        guard !cancelled, let draggedWindow, let initialFrame else { return }
 
         if !isWindowMoving {
+            guard let frame = draggedWindow.frame else { return }
             // Only a move: the size Halfwin observed at mouse-down is unchanged
             // while the origin has. A resize, or no movement yet, does nothing.
             guard frame.size == initialFrame.size, frame.origin != initialFrame.origin else { return }
             isWindowMoving = true
-            if let preSnapSize = snappedSizes.removeValue(forKey: draggedWindow) {
-                restoreSize(preSnapSize, current: frame, window: draggedWindow)
+            lockedSize = frame.size
+            // A move confirmed: this is the one AX frame read this drag needs
+            // (besides the drop). Restore only if this drag actually started
+            // from the frame Halfwin snapped it to — otherwise the entry is
+            // stale and stays dropped from pruneUnreadableSnapInfo/here.
+            if let info = snappedInfo.removeValue(forKey: draggedWindow), isClose(initialFrame, info.target, tolerance: 1) {
+                restoreSize(info.preSnapSize, current: frame, window: draggedWindow)
+                lockedSize = info.preSnapSize
             }
         }
 
+        guard let size = lockedSize else { return }
         let cursor = NSEvent.mouseLocation
-        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(cursor) }),
+        guard let screen = NSScreen.screens.first(where: { NSMouseInRect(cursor, $0.frame, false) }),
               let position = SnapGeometry.position(for: cursor, in: screen.frame) else {
             footprint.hide()
             currentZone = nil
@@ -114,7 +161,7 @@ final class SnapManager {
         currentZone = zone
 
         if let rect = SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
-                                         currentWindowFrame: frame, portrait: screen.frame.isPortrait) {
+                                         currentWindowFrame: CGRect(origin: .zero, size: size), portrait: screen.frame.isPortrait) {
             footprint.show(in: rect)
         } else {
             footprint.hide()
@@ -128,8 +175,13 @@ final class SnapManager {
               let draggedWindow, let frame = draggedWindow.frame else { return }
         guard let target = SnapGeometry.frame(for: zone.action, visibleFrame: zone.screen.visibleFrame,
                                               currentWindowFrame: frame, portrait: zone.screen.frame.isPortrait) else { return }
-        snappedSizes[draggedWindow] = frame.size
         draggedWindow.setFrame(target)
+        // Only remember this as a real snap if the window actually landed
+        // there — a failed AX write shouldn't let a later drag "restore" to
+        // a size it was never snapped from.
+        if let readBack = draggedWindow.frame, isClose(readBack, target, tolerance: 2) {
+            snappedInfo[draggedWindow] = (target: target, preSnapSize: frame.size)
+        }
     }
 
     private func resetDrag() {
@@ -163,10 +215,19 @@ final class SnapManager {
     private func restoreSize(_ size: CGSize, current: CGRect, window: AXWindow) {
         let cursor = NSEvent.mouseLocation
         var restored = CGRect(origin: current.origin, size: size)
+        // Keep the top edge fixed (AppKit coords: origin is bottom-left) so
+        // the title bar stays where the window was, instead of the drop
+        // dragging the top edge down with the shrinking bottom.
+        restored.origin.y = current.maxY - size.height
         let inset = min(32, size.width / 2)
         let neededShift = cursor.x - current.minX - (size.width - inset)
         restored.origin.x += min(max(0, neededShift), max(0, current.width - size.width))
         window.setFrame(restored)
+    }
+
+    private func isClose(_ a: CGRect, _ b: CGRect, tolerance: CGFloat) -> Bool {
+        abs(a.minX - b.minX) <= tolerance && abs(a.minY - b.minY) <= tolerance &&
+            abs(a.width - b.width) <= tolerance && abs(a.height - b.height) <= tolerance
     }
 }
 
