@@ -50,6 +50,11 @@ final class ClipboardHistory {
         "com.apple.keychainaccess",
         "com.apple.Passwords"
     ]
+    private static var passwordManagerIsFrontmost: Bool {
+        passwordManagerBundleIdentifiers.contains(
+            NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
+        )
+    }
 
     private(set) var entries: [ClipboardEntry] = []
     private(set) var isPickerVisible = false
@@ -87,15 +92,14 @@ final class ClipboardHistory {
     }
 
     func consumePasswordManagerActivation() -> Bool {
+        guard !Self.passwordManagerIsFrontmost else { return true }
         defer { passwordManagerActiveSinceLastPoll = false }
         return passwordManagerActiveSinceLastPoll
     }
 
     func capture(from pasteboard: NSPasteboard) {
         let changeCount = pasteboard.changeCount
-        guard !Self.passwordManagerBundleIdentifiers.contains(
-            NSWorkspace.shared.frontmostApplication?.bundleIdentifier ?? ""
-        ) else { return }
+        guard !Self.passwordManagerIsFrontmost else { return }
         let types = pasteboard.types ?? []
         guard !types.contains(where: { Self.excludedPasteboardTypes.contains($0.rawValue) }) else { return }
 
