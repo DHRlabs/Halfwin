@@ -18,6 +18,7 @@ final class KeyboardExtras {
     private var pasteboardPollingInterval: TimeInterval?
     private var observedPasteboardChangeCount: Int?
     private var suppressedHistoryChangeCount: Int?
+    private var cachedQualifyingWindowCounts: [pid_t: Int]?
     private var clipboardRunning = false
     private var runtimeRunning = false
     var onCutPendingChange: ((Bool) -> Void)?
@@ -53,6 +54,7 @@ final class KeyboardExtras {
     }
 
     private static let syntheticEventMarker: Int64 = 0x48414C4657494E
+    private static let rolloverEventMarker: Int64 = 0x48414C46524F4C
     private static let lastWindowExcludedBundleIdentifiers: Set<String> = [
         "com.apple.finder",
         "com.dhrlabs.halfwin",
@@ -175,6 +177,12 @@ final class KeyboardExtras {
             clipboardRunning = false
         }
         refreshPasteboardTimer()
+        if lastWindowEnabled, cachedQualifyingWindowCounts == nil {
+            DispatchQueue.main.async { [weak self] in
+                guard let self, self.runtimeRunning, self.lastWindowEnabled else { return }
+                _ = self.refreshCGWindowSnapshot()
+            }
+        }
     }
 
     private func stopRuntime() {
@@ -193,6 +201,7 @@ final class KeyboardExtras {
         pasteboardPollingInterval = nil
         observedPasteboardChangeCount = nil
         suppressedHistoryChangeCount = nil
+        cachedQualifyingWindowCounts = nil
         cutState = nil
         pendingFinderPasteID = nil
         pastePress = nil
@@ -261,9 +270,11 @@ final class KeyboardExtras {
     }
 
     private func handle(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
-        if event.getIntegerValueField(.eventSourceUserData) == Self.syntheticEventMarker {
+        let eventMarker = event.getIntegerValueField(.eventSourceUserData)
+        if eventMarker == Self.syntheticEventMarker {
             return Unmanaged.passUnretained(event)
         }
+        let isRolloverRepost = eventMarker == Self.rolloverEventMarker
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             if let press = pastePress, !press.pickerShown,
                (press.releasedAt ?? ProcessInfo.processInfo.systemUptime) - press.startedAt < 0.45 {
@@ -288,10 +299,13 @@ final class KeyboardExtras {
                 let point = NSEvent.mouseLocation
                 DispatchQueue.main.async { [weak self] in
                     guard let self, self.lastWindowEnabled,
+                          !NSApp.windows.contains(where: { $0.isVisible && $0.frame.contains(point) }),
                           NSWorkspace.shared.frontmostApplication?.processIdentifier
-                            != NSRunningApplication.current.processIdentifier,
-                          let application = self.applicationClosingUnderPointer(at: point) else { return }
-                    self.checkForLastWindow(of: application)
+                            != NSRunningApplication.current.processIdentifier else { return }
+                    guard self.refreshCGWindowSnapshot() != nil,
+                          let application = self.applicationClosingUnderPointer(at: point),
+                          let recordedCount = self.windowCount(for: application), recordedCount > 0 else { return }
+                    self.checkForLastWindow(of: application, recordedCount: recordedCount)
                 }
             }
             return Unmanaged.passUnretained(event)
@@ -355,11 +369,24 @@ final class KeyboardExtras {
             return nil
         }
 
-        if let press = pastePress, !press.pickerShown, keyCode != 9,
+        if !isRolloverRepost, let press = pastePress, !press.pickerShown, keyCode != 9,
            ProcessInfo.processInfo.systemUptime - press.startedAt < 0.45 {
             if pendingFinderPasteID == press.id {
-                resolvePendingFinderPaste(matched: cutState?.awaitingFileCopy == false)
-                repostKeyDown(event)
+                if cutState?.awaitingFileCopy == true || press.finderPasteDecisionPending {
+                    let queuedTargets = queuedPasteTargets
+                    queuedPasteTargets.removeAll()
+                    pendingFinderPasteID = nil
+                    pastePress = nil
+                    cutState = nil
+                    replayPaste(to: press.application, flags: .maskCommand) { [weak self] in
+                        self?.replayQueuedPastes(queuedTargets, at: 0) { [weak self] in
+                            self?.repostKeyDown(event)
+                        }
+                    }
+                } else {
+                    resolvePendingFinderPaste(matched: cutState?.awaitingFileCopy == false)
+                    repostKeyDown(event)
+                }
                 return nil
             }
             let queuedTargets = queuedPasteTargets
@@ -413,10 +440,11 @@ final class KeyboardExtras {
             return nil
         }
         if lastWindowEnabled, keyCode == 13, isPlainCommand(flags),
-           let application, shouldMonitor(application) {
+           let application, shouldMonitor(application),
+           let recordedCount = windowCount(for: application), recordedCount > 0 {
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.isFrontmost(application), self.lastWindowEnabled else { return }
-                self.checkForLastWindow(of: application)
+                self.checkForLastWindow(of: application, recordedCount: recordedCount)
             }
             return Unmanaged.passUnretained(event)
         }
@@ -655,7 +683,6 @@ final class KeyboardExtras {
     private func checkPasteboard() {
         let pasteboard = NSPasteboard.general
         let changeCount = pasteboard.changeCount
-        let passwordManagerWasActive = clipboardHistory.consumePasswordManagerActivation()
         if let cutState,
            ProcessInfo.processInfo.systemUptime - cutState.startedAt >= 60 {
             self.cutState = nil
@@ -667,6 +694,7 @@ final class KeyboardExtras {
         }
         guard changeCount != previous else { return }
         observedPasteboardChangeCount = changeCount
+        let passwordManagerWasActive = clipboardHistory.consumePasswordManagerActivation()
         if let cutState {
             let isExpectedCopy = cutState.awaitingFileCopy
                 && changeCount == cutState.changeCountAtCut &+ 1
@@ -698,8 +726,8 @@ final class KeyboardExtras {
         }
     }
 
-    private func checkForLastWindow(of application: NSRunningApplication) {
-        guard shouldMonitor(application) else { return }
+    private func checkForLastWindow(of application: NSRunningApplication, recordedCount: Int) {
+        guard shouldMonitor(application), recordedCount > 0 else { return }
         scheduleLastWindowCheck(of: application)
     }
 
@@ -733,25 +761,41 @@ final class KeyboardExtras {
             guard let windowRole = role(of: window) else { return false }
             if windowRole == kAXWindowRole as String { return false }
         }
-        guard let cgWindows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] else {
-            return false
-        }
+        guard let counts = refreshCGWindowSnapshot() else { return false }
         // Closed windows retained by an app can block quitting; this fail-safe false negative is acceptable.
-        return Self.qualifyingCGWindowCount(cgWindows, pid: application.processIdentifier) == 0
+        return counts[application.processIdentifier, default: 0] == 0
     }
 
-    private static func qualifyingCGWindowCount(_ windows: [[String: Any]], pid: pid_t) -> Int {
-        windows.reduce(into: 0) { count, window in
+    private func refreshCGWindowSnapshot() -> [pid_t: Int]? {
+        guard let windows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] else {
+            cachedQualifyingWindowCounts = nil
+            return nil
+        }
+        let counts = Self.qualifyingCGWindowCounts(windows)
+        cachedQualifyingWindowCounts = counts
+        return counts
+    }
+
+    private func windowCount(for application: NSRunningApplication) -> Int? {
+        guard let cachedQualifyingWindowCounts else { return nil }
+        return cachedQualifyingWindowCounts[application.processIdentifier, default: 0]
+    }
+
+    private static func qualifyingCGWindowCounts(_ windows: [[String: Any]]) -> [pid_t: Int] {
+        windows.reduce(into: [:]) { counts, window in
             guard let ownerPID = window[kCGWindowOwnerPID as String] as? Int,
-                  ownerPID == Int(pid),
                   let layer = window[kCGWindowLayer as String] as? Int, layer == 0,
                   let alpha = window[kCGWindowAlpha as String] as? Double, alpha > 0,
                   let bounds = window[kCGWindowBounds as String] as? NSDictionary,
                   let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary),
-                  frame.width >= 200, frame.height >= 200,
+                  frame.width >= 100, frame.height >= 100,
                   !(frame.width == 500 && frame.height == 500) else { return }
-            count += 1
+            counts[pid_t(ownerPID), default: 0] += 1
         }
+    }
+
+    private static func qualifyingCGWindowCount(_ windows: [[String: Any]], pid: pid_t) -> Int {
+        qualifyingCGWindowCounts(windows)[pid, default: 0]
     }
 
     private static func selfCheck() {
@@ -772,8 +816,10 @@ final class KeyboardExtras {
             window(width: 1, height: 1)
         ]
         let realWindow = window(width: 800, height: 600)
+        let smallWindow = window(width: 100, height: 100)
         assert(qualifyingCGWindowCount(stubs, pid: pid) == 0)
         assert(qualifyingCGWindowCount([realWindow], pid: pid) == 1)
+        assert(qualifyingCGWindowCount([smallWindow], pid: pid) == 1)
         assert(qualifyingCGWindowCount(stubs + [realWindow], pid: pid) == 1)
     }
 
@@ -922,7 +968,7 @@ final class KeyboardExtras {
 
     private func repostKeyDown(_ event: CGEvent) {
         guard let replayedEvent = event.copy() else { return }
-        replayedEvent.setIntegerValueField(.eventSourceUserData, value: Self.syntheticEventMarker)
+        replayedEvent.setIntegerValueField(.eventSourceUserData, value: Self.rolloverEventMarker)
         replayedEvent.post(tap: .cghidEventTap)
     }
 
