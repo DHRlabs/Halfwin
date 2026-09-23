@@ -24,6 +24,7 @@ final class DockPreviewManager {
     private var hoverTimer: Timer?
     private var hideTimer: Timer?
     private var pointerTimer: Timer?
+    private var clickMonitor: Any?
     private var observer: AXObserver?
     private var observedList: AXUIElement?
     private var observerSource: CFRunLoopSource?
@@ -79,6 +80,14 @@ final class DockPreviewManager {
     private func startRuntime() {
         guard !running else { return }
         running = true
+        clickMonitor = NSEvent.addGlobalMonitorForEvents(matching: .leftMouseDown) { [weak self] _ in
+            DispatchQueue.main.async { [weak self] in
+                MainActor.assumeIsolated {
+                    guard let self, self.isShowing else { return }
+                    self.hidePreview()
+                }
+            }
+        }
         dockProcessTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated { self?.checkDockProcess() }
         }
@@ -92,9 +101,14 @@ final class DockPreviewManager {
         dockProcessTimer = nil
         dockRetryTimer?.invalidate()
         dockRetryTimer = nil
+        if let clickMonitor {
+            NSEvent.removeMonitor(clickMonitor)
+            self.clickMonitor = nil
+        }
         stopDockObserver()
         dockPID = nil
         dockRestartPending = false
+        thumbnailCache.removeAll()
         hidePreview()
     }
 
@@ -198,13 +212,20 @@ final class DockPreviewManager {
     func dockSelectionChanged() {
         guard running, let observedList else { return }
         let pointer = NSEvent.mouseLocation
-        guard let listFrame = AXWindow.frame(of: observedList), listFrame.contains(pointer),
+        AXUIElementSetMessagingTimeout(observedList, 0.1)
+        guard let listFrame = AXWindow.frame(of: observedList),
+              let screen = NSScreen.screens.first(where: { $0.frame.intersects(listFrame) }) else {
+            clearSelection()
+            scheduleHide()
+            return
+        }
+        let orientation: String? = attribute(observedList, kAXOrientationAttribute)
+        guard frameExtendedToDockEdge(listFrame, dockListFrame: listFrame, screenFrame: screen.frame, orientation: orientation).contains(pointer),
               !isShowing || !panel.frame.contains(pointer) else {
             clearSelection()
             scheduleHide()
             return
         }
-        AXUIElementSetMessagingTimeout(observedList, 0.1)
         guard let items: [AXUIElement] = attribute(observedList, kAXSelectedChildrenAttribute),
               let item = items.first else {
             clearSelection()
@@ -212,6 +233,11 @@ final class DockPreviewManager {
             return
         }
         AXUIElementSetMessagingTimeout(item, 0.1)
+        if let isRunning: NSNumber = attribute(item, kAXIsApplicationRunningAttribute), isRunning.intValue == 0 {
+            clearSelection()
+            scheduleHide()
+            return
+        }
         guard AXWindow.frame(of: item) != nil else {
             clearSelection()
             scheduleHide()
@@ -247,9 +273,23 @@ final class DockPreviewManager {
                 guard let self, let current = self.selection, current.token == next.token else { return }
                 self.hoverTimer = nil
                 let pointer = NSEvent.mouseLocation
-                guard let list = self.observedList,
-                      let listFrame = AXWindow.frame(of: list), listFrame.contains(pointer),
-                      let itemFrame = AXWindow.frame(of: current.item), itemFrame.contains(pointer),
+                guard let list = self.observedList else {
+                    self.clearSelection()
+                    self.scheduleHide()
+                    return
+                }
+                AXUIElementSetMessagingTimeout(list, 0.1)
+                AXUIElementSetMessagingTimeout(current.item, 0.1)
+                guard let listFrame = AXWindow.frame(of: list),
+                      let screen = NSScreen.screens.first(where: { $0.frame.intersects(listFrame) }),
+                      let itemFrame = AXWindow.frame(of: current.item) else {
+                    self.clearSelection()
+                    self.scheduleHide()
+                    return
+                }
+                let orientation: String? = self.attribute(list, kAXOrientationAttribute)
+                guard self.frameExtendedToDockEdge(listFrame, dockListFrame: listFrame, screenFrame: screen.frame, orientation: orientation).contains(pointer),
+                      self.frameExtendedToDockEdge(itemFrame, dockListFrame: listFrame, screenFrame: screen.frame, orientation: orientation).contains(pointer),
                       !self.isShowing || !self.panel.frame.contains(pointer) else {
                     self.clearSelection()
                     self.scheduleHide()
@@ -271,15 +311,21 @@ final class DockPreviewManager {
         captureTask = nil
         generation += 1
         let captureGeneration = generation
-        guard let list = observedList,
-              let listFrame = AXWindow.frame(of: list),
+        guard let list = observedList else {
+            hidePreview()
+            return
+        }
+        AXUIElementSetMessagingTimeout(list, 0.1)
+        AXUIElementSetMessagingTimeout(selection.item, 0.1)
+        guard let listFrame = AXWindow.frame(of: list),
+              let itemFrame = AXWindow.frame(of: selection.item),
               let screen = NSScreen.screens.first(where: { $0.frame.intersects(listFrame) }) else {
             hidePreview()
             return
         }
 
         let visibleFrames = onScreenFrames(processID: selection.app.processIdentifier)
-        let hiddenApp = visibleFrames.isEmpty
+        let hiddenApp = selection.app.isHidden
         var usedWindowIDs = Set<CGWindowID>()
         var tileItems: [DockPreviewItem] = []
         var nextWindows: [Int: AXWindow] = [:]
@@ -310,7 +356,7 @@ final class DockPreviewManager {
         isShowing = true
         let orientation: String? = attribute(list, kAXOrientationAttribute)
         let edge = dockEdge(for: listFrame, screen: screen.frame, orientation: orientation)
-        panel.show(items: tileItems, edge: edge, anchor: listFrame, screenFrame: screen.frame)
+        panel.show(items: tileItems, edge: edge, dockFrame: listFrame, itemFrame: itemFrame, screenFrame: screen.frame)
         startPointerTimer()
         captureThumbnails(screenshotIDs, generation: captureGeneration)
     }
@@ -354,6 +400,7 @@ final class DockPreviewManager {
 
     private func selectWindow(_ id: Int) {
         guard let app = activeApp, let window = windows[id] else { return }
+        if app.isHidden { app.unhide() }
         window.restoreAndRaise(in: app)
         hidePreview()
     }
@@ -375,8 +422,12 @@ final class DockPreviewManager {
     }
 
     private func pointerIsOverDock(_ pointer: CGPoint) -> Bool {
-        guard let observedList, let listFrame = AXWindow.frame(of: observedList) else { return false }
-        return listFrame.contains(pointer)
+        guard let observedList else { return false }
+        AXUIElementSetMessagingTimeout(observedList, 0.1)
+        guard let listFrame = AXWindow.frame(of: observedList),
+              let screen = NSScreen.screens.first(where: { $0.frame.intersects(listFrame) }) else { return false }
+        let orientation: String? = attribute(observedList, kAXOrientationAttribute)
+        return frameExtendedToDockEdge(listFrame, dockListFrame: listFrame, screenFrame: screen.frame, orientation: orientation).contains(pointer)
     }
 
     private func scheduleHide() {
@@ -433,6 +484,25 @@ final class DockPreviewManager {
         let leftDistance = abs(listFrame.minX - screen.minX)
         let rightDistance = abs(screen.maxX - listFrame.maxX)
         return leftDistance <= rightDistance ? .left : .right
+    }
+
+    private func frameExtendedToDockEdge(
+        _ frame: CGRect,
+        dockListFrame: CGRect,
+        screenFrame: CGRect,
+        orientation: String?
+    ) -> CGRect {
+        switch dockEdge(for: dockListFrame, screen: screenFrame, orientation: orientation) {
+        case .bottom:
+            let minY = min(frame.minY, screenFrame.minY)
+            return CGRect(x: frame.minX, y: minY, width: frame.width, height: frame.maxY - minY)
+        case .left:
+            let minX = min(frame.minX, screenFrame.minX)
+            return CGRect(x: minX, y: frame.minY, width: frame.maxX - minX, height: frame.height)
+        case .right:
+            let maxX = max(frame.maxX, screenFrame.maxX)
+            return CGRect(x: frame.minX, y: frame.minY, width: maxX - frame.minX, height: frame.height)
+        }
     }
 
     private func attribute<T>(_ element: AXUIElement, _ name: String) -> T? {

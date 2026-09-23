@@ -45,8 +45,8 @@ final class DockPreviewPanel {
         })
     }
 
-    /// `anchor` and `screenFrame` use AppKit's global screen coordinates.
-    func show(items: [DockPreviewItem], edge: DockPreviewEdge, anchor: CGRect, screenFrame: CGRect) {
+    /// `dockFrame`, `itemFrame`, and `screenFrame` use AppKit's global screen coordinates.
+    func show(items: [DockPreviewItem], edge: DockPreviewEdge, dockFrame: CGRect, itemFrame: CGRect, screenFrame: CGRect) {
         guard !items.isEmpty else {
             hide()
             return
@@ -60,14 +60,14 @@ final class DockPreviewPanel {
         let size = panelSize(for: items.count, horizontalDock: horizontalDock, screenFrame: screenFrame)
         state.viewportSize = CGSize(width: max(0, size.width - 16), height: max(0, size.height - 16))
 
-        var origin = CGPoint(x: anchor.midX - size.width / 2, y: anchor.midY - size.height / 2)
+        var origin: CGPoint
         switch edge {
         case .bottom:
-            origin.y = anchor.maxY + 8
+            origin = CGPoint(x: itemFrame.midX - size.width / 2, y: dockFrame.maxY + 8)
         case .left:
-            origin.x = anchor.maxX + 8
+            origin = CGPoint(x: dockFrame.maxX + 8, y: itemFrame.midY - size.height / 2)
         case .right:
-            origin.x = anchor.minX - size.width - 8
+            origin = CGPoint(x: dockFrame.minX - size.width - 8, y: itemFrame.midY - size.height / 2)
         }
         origin.x = min(max(origin.x, screenFrame.minX), screenFrame.maxX - size.width)
         origin.y = min(max(origin.y, screenFrame.minY), screenFrame.maxY - size.height)

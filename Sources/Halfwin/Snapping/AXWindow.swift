@@ -41,7 +41,6 @@ struct AXWindow {
     }
 
     static func frame(of element: AXUIElement) -> CGRect? {
-        AXUIElementSetMessagingTimeout(element, 0.1)
         guard let position: AXValue = objectAttribute(element, kAXPositionAttribute),
               let size: AXValue = objectAttribute(element, kAXSizeAttribute) else { return nil }
         var point = CGPoint.zero
