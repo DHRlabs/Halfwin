@@ -3,6 +3,7 @@ import ServiceManagement
 
 final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let keepAwake = KeepAwake()
+    private let keyboardExtras = KeyboardExtras()
     private let snapSettings = SnapSettings.shared
     private lazy var snapManager = SnapManager(settings: snapSettings)
     private lazy var settingsWindowController = SettingsWindowController(settings: snapSettings)
@@ -25,16 +26,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         keepAwake.onChange = { [weak self] in self?.updateUI() }
         keepAwake.refresh()
         snapManager.refreshPermission()
+        keyboardExtras.start()
         updateUI()
     }
 
     func applicationWillTerminate(_ notification: Notification) {
         keepAwake.stop()
+        keyboardExtras.stop()
     }
 
     func menuWillOpen(_ menu: NSMenu) {
         keepAwake.refresh()
         snapManager.refreshPermission()
+        keyboardExtras.refreshPermission()
     }
 
     private func buildMenu() {
@@ -59,6 +63,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         lidDurationParent.submenu = makeDurations(#selector(startLidTimed(_:)), store: &lidDurationItems)
         menu.addItem(lidDurationParent)
 
+        menu.addItem(.separator())
+        keyboardExtras.addMenuItems(to: menu)
         menu.addItem(.separator())
 
         loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLogin), keyEquivalent: "")
