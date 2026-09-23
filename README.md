@@ -10,6 +10,12 @@ Halfwin is being built. Planned features:
 - **Dock previews**: hover a Dock icon to see that app's open windows.
 - **Keep awake**: stop your Mac from sleeping, even with the lid closed.
 
+## Build from source
+
+```sh
+bash Scripts/build.sh
+```
+
 ## License
 
 MIT, see [LICENSE](LICENSE).
