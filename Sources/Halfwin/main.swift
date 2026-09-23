@@ -8,8 +8,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private lazy var snapManager = SnapManager(settings: snapSettings)
     private let snapAssistManager = SnapAssistManager()
     private let snapGroupsManager = SnapGroupsManager()
+    private lazy var dockPreviewsManager = MainActor.assumeIsolated { DockPreviewManager() }
     private let snapAssistSwitch = FeatureSwitch(key: "snapAssist", title: "Snap Assist", defaultOn: true)
     private let snapGroupsSwitch = FeatureSwitch(key: "snapGroups", title: "Snap Groups", defaultOn: true)
+    private let dockPreviewsSwitch = FeatureSwitch(key: "dock-previews", title: "Dock previews", defaultOn: true)
     private let layoutMenuSettings = LayoutMenuSettings.shared
     private lazy var layoutMenuManager = LayoutMenuManager(settings: layoutMenuSettings)
     private lazy var windowExtrasManager = WindowExtrasManager()
@@ -36,6 +38,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ) { [weak self] _ in
             self?.snapAssistManager.refreshPermission()
             self?.snapGroupsManager.refreshPermission()
+            MainActor.assumeIsolated { self?.dockPreviewsManager.refreshPermission() }
         }
         SnapEvents.handler = { [weak self] window, action, screen in
             self?.snapAssistManager.didSnap(window: window, action: action, screen: screen)
@@ -43,8 +46,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         snapAssistSwitch.onChange = { [weak self] in self?.snapAssistManager.setEnabled($0) }
         snapGroupsSwitch.onChange = { [weak self] in self?.snapGroupsManager.setEnabled($0) }
+        dockPreviewsSwitch.onChange = { [weak self] in self?.dockPreviewsManager.setEnabled($0) }
         snapAssistSwitch.start()
         snapGroupsSwitch.start()
+        dockPreviewsSwitch.start()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         buildMenu()
@@ -67,6 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         mouseFeatures.stop()
         keepAwake.stop()
         windowExtrasManager.stop()
+        dockPreviewsManager.stop()
         snapGroupsManager.stop()
         snapAssistManager.setEnabled(false)
     }
@@ -79,6 +85,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         snapAssistManager.refreshPermission()
         snapGroupsManager.refreshPermission()
         windowExtrasManager.refreshPermission()
+        dockPreviewsManager.refreshPermission()
     }
 
     private func buildMenu() {
@@ -127,6 +134,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(snappingHeader)
         menu.addItem(snapAssistSwitch.makeMenuItem())
         menu.addItem(snapGroupsSwitch.makeMenuItem())
+        menu.addItem(.separator())
+        let dockHeader = NSMenuItem(title: "Dock", action: nil, keyEquivalent: "")
+        dockHeader.isEnabled = false
+        menu.addItem(dockHeader)
+        menu.addItem(dockPreviewsSwitch.makeMenuItem())
         menu.addItem(.separator())
 
         loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLogin), keyEquivalent: "")
