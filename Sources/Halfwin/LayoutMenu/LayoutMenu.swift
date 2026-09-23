@@ -24,16 +24,17 @@ final class LayoutMenuSettings: ObservableObject {
 
     private init() {
         enabled = defaults.object(forKey: enabledKey) == nil ? true : defaults.bool(forKey: enabledKey)
-        dwellDelay = defaults.object(forKey: dwellKey) as? Double ?? Self.defaultDwellDelay
+        let saved = defaults.object(forKey: dwellKey) as? Double ?? Self.defaultDwellDelay
+        dwellDelay = min(max(saved, 0.1), 1.5)
     }
 }
 
 /// A single tile in the layout menu. Most map straight to a `SnapAction`;
-/// `restore` and the two-zone `bigLeftStack` don't fit that enum, so they're
-/// handled locally.
+/// `restore` doesn't fit that enum (it replays a remembered frame instead of
+/// computing one), so it's handled locally. The big-left-stack thumbnail's
+/// three zones bypass this enum entirely and post a `SnapAction` directly.
 enum LayoutPreset: Equatable {
     case leftHalf, rightHalf, center, restore, maximize
-    case bigLeftStack
 }
 
 /// Windows 11-style layout menu: hover the top-center of a display, pick a
@@ -63,15 +64,23 @@ final class LayoutMenuManager {
     /// from where this menu last put it.
     private var lastMoved: [AXWindow: (target: CGRect, preMove: CGRect)] = [:]
 
+    /// True right after Escape or a pick dismisses the panel while the
+    /// pointer is still inside the trigger strip: suppresses re-arming the
+    /// dwell timer until the pointer actually leaves, so the panel doesn't
+    /// pop right back up.
+    private var suppressRearmUntilLeave = false
+
     private static let triggerHalfWidth: CGFloat = 100
     private static let triggerHeight: CGFloat = 4
-    private static let dismissGrace: CGFloat = 24
 
     init(settings: LayoutMenuSettings) {
         self.settings = settings
         settings.$enabled
             .sink { [weak self] _ in DispatchQueue.main.async { self?.refreshPermission() } }
             .store(in: &cancellables)
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] _ in self?.refreshPermission() }
     }
 
     /// Starts (or stops) the monitors to match Accessibility permission and
@@ -94,9 +103,13 @@ final class LayoutMenuManager {
 
     private func start() {
         guard globalMonitor == nil else { return }
-        let mask: NSEvent.EventTypeMask = [.mouseMoved, .leftMouseDown, .keyDown]
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: mask) { [weak self] in self?.handle($0) }
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: mask) { [weak self] event in
+        // .leftMouseDown only goes on the global mask: a local .leftMouseDown
+        // fires (and would hide the panel) before AppKit delivers the
+        // matching mouse-up as a SwiftUI tap on the panel's own tiles.
+        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDown, .keyDown]) {
+            [weak self] in self?.handle($0)
+        }
+        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .keyDown]) { [weak self] event in
             self?.handle(event)
             return event
         }
@@ -115,7 +128,8 @@ final class LayoutMenuManager {
         switch event.type {
         case .keyDown:
             guard event.keyCode == 53 else { return } // Escape
-            hidePanel()
+            cancelDwell()
+            hidePanel(suppressRearm: true)
         case .leftMouseDown:
             // Drag snapping owns the top edge during drags.
             cancelDwell()
@@ -134,6 +148,11 @@ final class LayoutMenuManager {
             if isNearPanelOrTrigger(cursor) { return }
             hidePanel()
             return
+        }
+
+        if suppressRearmUntilLeave {
+            if triggerScreen(for: cursor) != nil { return } // still inside the strip: keep waiting
+            suppressRearmUntilLeave = false
         }
 
         guard let screen = triggerScreen(for: cursor) else {
@@ -158,43 +177,56 @@ final class LayoutMenuManager {
         NSScreen.screens.first { screen in
             let frame = screen.frame
             guard cursor.x >= frame.minX, cursor.x <= frame.maxX else { return false }
-            guard cursor.y >= frame.maxY - Self.triggerHeight else { return false }
+            guard cursor.y >= frame.maxY - Self.triggerHeight, cursor.y <= frame.maxY else { return false }
             return abs(cursor.x - frame.midX) <= Self.triggerHalfWidth
         }
     }
 
+    /// True anywhere from the trigger strip at the top of `activeScreen` down
+    /// to the panel's bottom edge, within a band at least as wide as the
+    /// trigger strip and at least as wide as the panel — so moving from the
+    /// strip into the panel (which sits below any notch) never dismisses it,
+    /// and a stacked display below/above never reads as "near".
     private func isNearPanelOrTrigger(_ cursor: CGPoint) -> Bool {
-        let grown = panel.frame.insetBy(dx: -Self.dismissGrace, dy: -Self.dismissGrace)
-        if grown.contains(cursor) { return true }
-        // The strip between the panel and the trigger zone it dropped from.
         guard let frame = activeScreen?.frame else { return false }
-        guard cursor.x >= frame.minX, cursor.x <= frame.maxX, cursor.y >= frame.maxY - Self.triggerHeight else { return false }
-        return abs(cursor.x - frame.midX) <= Self.triggerHalfWidth
+        let halfWidth = max(Self.triggerHalfWidth, panel.frame.width / 2)
+        guard cursor.x >= frame.midX - halfWidth, cursor.x <= frame.midX + halfWidth else { return false }
+        return cursor.y >= panel.frame.minY && cursor.y <= frame.maxY
     }
 
     private func showPanel(on screen: NSScreen) {
         cancelDwell()
+        guard Permissions.accessibilityGranted else { return }
+        pruneUnreadableRestoreInfo()
         targetWindow = AXWindow.frontmostFocusedWindow()
         activeScreen = screen
         panel.show(on: screen)
     }
 
-    private func hidePanel() {
+    private func hidePanel(suppressRearm: Bool = false) {
         panel.hide()
         activeScreen = nil
         targetWindow = nil
+        suppressRearmUntilLeave = suppressRearm
+    }
+
+    /// Windows this menu can no longer read (closed, or the AX call timed
+    /// out) have nothing to restore to; drop them so the table doesn't grow
+    /// forever. Mirrors `SnapManager.pruneUnreadableSnapInfo`.
+    private func pruneUnreadableRestoreInfo() {
+        for window in lastMoved.keys where window.frame == nil {
+            lastMoved.removeValue(forKey: window)
+        }
     }
 
     private func pick(_ preset: LayoutPreset) {
-        defer { hidePanel() }
+        defer { hidePanel(suppressRearm: true) }
         guard let screen = activeScreen, let window = targetWindow, let currentFrame = window.frame else { return }
         let portrait = screen.frame.height > screen.frame.width
         let visibleFrame = screen.visibleFrame
 
         if preset == .restore {
-            guard let info = lastMoved[window] else { return } // nothing known: no-op
-            window.setFrame(info.preMove)
-            lastMoved.removeValue(forKey: window)
+            restore(window: window, currentFrame: currentFrame)
             return
         }
 
@@ -204,21 +236,22 @@ final class LayoutMenuManager {
         apply(target, to: window, currentFrame: currentFrame)
     }
 
-    /// `bigLeftStack` is one thumbnail with three separately clickable zones;
-    /// its own callback path (`pickZone`) supplies the actual `SnapAction`.
+    /// `restore` doesn't produce a `SnapAction`; the big-left-stack
+    /// thumbnail's three zones bypass this mapping entirely via
+    /// `pickStackZone`.
     private func snapAction(for preset: LayoutPreset) -> SnapAction? {
         switch preset {
         case .leftHalf: return .leftHalf
         case .rightHalf: return .rightHalf
         case .center: return .center
         case .maximize: return .maximize
-        case .restore, .bigLeftStack: return nil
+        case .restore: return nil
         }
     }
 
     /// Called for the three zones inside the big-left-stack thumbnail.
     fileprivate func pickStackZone(_ action: SnapAction) {
-        defer { hidePanel() }
+        defer { hidePanel(suppressRearm: true) }
         guard let screen = activeScreen, let window = targetWindow, let currentFrame = window.frame else { return }
         let portrait = screen.frame.height > screen.frame.width
         guard let target = SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
@@ -226,9 +259,24 @@ final class LayoutMenuManager {
         apply(target, to: window, currentFrame: currentFrame)
     }
 
-    /// Same "was this drop actually applied" bookkeeping as `SnapManager`:
-    /// remembers the pre-move frame only when the write is confirmed, and
-    /// carries the original pre-move frame forward across repeated picks.
+    /// Only sound if the window is still where this menu last put it — drop
+    /// the entry (no-op) otherwise, so "Normal" never yanks a window the
+    /// user has since moved or resized by hand.
+    private func restore(window: AXWindow, currentFrame: CGRect) {
+        guard let info = lastMoved[window], isClose(currentFrame, info.target) else {
+            lastMoved.removeValue(forKey: window)
+            return
+        }
+        window.setFrame(info.preMove)
+        lastMoved.removeValue(forKey: window)
+    }
+
+    /// Remembers the pre-move frame for "Normal", keyed off the frame
+    /// actually read back after the move (not the intended target — AX
+    /// writes can settle a point or two off, or be clamped by the app's own
+    /// min size) so a later restore-eligibility check compares against
+    /// reality. Carries the original pre-move frame forward across repeated
+    /// picks, the same way `SnapManager.snappedInfo` does.
     private func apply(_ target: CGRect, to window: AXWindow, currentFrame: CGRect) {
         let preMove: CGRect
         if let info = lastMoved[window], isClose(currentFrame, info.target) {
@@ -237,8 +285,8 @@ final class LayoutMenuManager {
             preMove = currentFrame
         }
         window.setFrame(target)
-        if let readBack = window.frame, isClose(readBack, target) {
-            lastMoved[window] = (target: target, preMove: preMove)
+        if let readBack = window.frame {
+            lastMoved[window] = (target: readBack, preMove: preMove)
         }
     }
 
@@ -263,6 +311,7 @@ private final class LayoutMenuPanel: NSPanel {
         hasShadow = true
         isReleasedWhenClosed = false
         isMovableByWindowBackground = false
+        hidesOnDeactivate = false
         collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
 
         let view = LayoutMenuView(onPick: onPick, onPickZone: onPickZone)
@@ -272,8 +321,9 @@ private final class LayoutMenuPanel: NSPanel {
     override var canBecomeKey: Bool { false }
 
     func show(on screen: NSScreen) {
-        let frame = screen.frame
-        let origin = CGPoint(x: frame.midX - Self.size.width / 2, y: frame.maxY - Self.size.height - 6)
+        // Below the menu bar (and any notch), not under it: `visibleFrame`
+        // already excludes that area, unlike `frame`.
+        let origin = CGPoint(x: screen.frame.midX - Self.size.width / 2, y: screen.visibleFrame.maxY - Self.size.height - 6)
         setFrame(CGRect(origin: origin, size: Self.size), display: true)
         orderFrontRegardless()
     }
