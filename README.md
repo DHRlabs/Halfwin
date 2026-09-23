@@ -10,6 +10,9 @@ Halfwin is being built. Planned features:
 - **Dock previews**: hover a running app's Dock icon to preview and raise its windows. Built in v0.7.
 - **Keep awake**: stop your Mac from sleeping, even with the lid closed.
 
+Live Dock thumbnails use Screen Recording permission. macOS may periodically ask you to
+approve screen capture again.
+
 ## Build from source
 
 ```sh

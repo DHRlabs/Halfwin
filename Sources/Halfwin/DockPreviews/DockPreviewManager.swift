@@ -7,29 +7,35 @@ import ScreenCaptureKit
 final class DockPreviewManager {
     private struct Selection {
         let token: Int
+        let item: AXUIElement
         let app: NSRunningApplication
-        let iconFrame: CGRect
-        let edge: DockPreviewEdge
-        let screenFrame: CGRect
+    }
+
+    private struct CachedThumbnail {
+        let image: CGImage
+        let capturedAt: Date
     }
 
     private var enabled = false
     private var running = false
     private var permissionTimer: Timer?
     private var dockRetryTimer: Timer?
+    private var dockProcessTimer: Timer?
     private var hoverTimer: Timer?
     private var hideTimer: Timer?
     private var pointerTimer: Timer?
-    private var workspaceObserver: NSObjectProtocol?
     private var observer: AXObserver?
     private var observedList: AXUIElement?
     private var observerSource: CFRunLoopSource?
+    private var dockPID: pid_t?
+    private var dockRestartPending = false
     private var selection: Selection?
-    private var selectedIconFrame: CGRect?
     private var activeApp: NSRunningApplication?
     private var windows: [Int: AXWindow] = [:]
     private var generation = 0
     private var isShowing = false
+    private var captureTask: Task<Void, Never>?
+    private var thumbnailCache: [CGWindowID: CachedThumbnail] = [:]
     private let panel = DockPreviewPanel()
 
     init() {
@@ -60,6 +66,7 @@ final class DockPreviewManager {
         permissionTimer?.invalidate()
         permissionTimer = nil
         startRuntime()
+        checkDockProcess()
     }
 
     func stop() {
@@ -72,12 +79,8 @@ final class DockPreviewManager {
     private func startRuntime() {
         guard !running else { return }
         running = true
-        workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didLaunchApplicationNotification, object: nil, queue: .main
-        ) { [weak self] note in
-            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
-                  app.bundleIdentifier == "com.apple.dock" else { return }
-            MainActor.assumeIsolated { self?.restartDockObserver() }
+        dockProcessTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            MainActor.assumeIsolated { self?.checkDockProcess() }
         }
         startDockObserver()
     }
@@ -85,26 +88,32 @@ final class DockPreviewManager {
     private func stopRuntime() {
         guard running else { return }
         running = false
-        if let workspaceObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(workspaceObserver)
-            self.workspaceObserver = nil
-        }
+        dockProcessTimer?.invalidate()
+        dockProcessTimer = nil
         dockRetryTimer?.invalidate()
         dockRetryTimer = nil
         stopDockObserver()
-        hoverTimer?.invalidate()
-        hoverTimer = nil
-        selection = nil
-        selectedIconFrame = nil
+        dockPID = nil
+        dockRestartPending = false
         hidePreview()
+    }
+
+    private func checkDockProcess() {
+        guard running else { return }
+        let currentPID = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first?.processIdentifier
+        guard currentPID != dockPID else { return }
+        dockPID = currentPID
+        restartDockObserver()
     }
 
     private func startDockObserver() {
         guard running, Permissions.accessibilityGranted, observer == nil else { return }
         guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock").first else {
+            dockPID = nil
             retryDockObserver()
             return
         }
+        dockPID = dock.processIdentifier
         let application = AXUIElementCreateApplication(dock.processIdentifier)
         AXUIElementSetMessagingTimeout(application, 0.1)
         guard let children: [AXUIElement] = attribute(application, kAXChildrenAttribute),
@@ -117,17 +126,23 @@ final class DockPreviewManager {
         }
 
         var createdObserver: AXObserver?
-        guard AXObserverCreate(dock.processIdentifier, dockPreviewSelectionChanged, &createdObserver) == .success,
+        guard AXObserverCreate(dock.processIdentifier, dockPreviewNotificationReceived, &createdObserver) == .success,
               let createdObserver else {
             retryDockObserver()
             return
         }
         AXUIElementSetMessagingTimeout(list, 0.1)
-        let result = AXObserverAddNotification(
-            createdObserver, list, kAXSelectedChildrenChangedNotification as CFString,
-            Unmanaged.passUnretained(self).toOpaque()
-        )
-        guard result == .success else {
+        let context = Unmanaged.passUnretained(self).toOpaque()
+        guard AXObserverAddNotification(
+            createdObserver, list, kAXSelectedChildrenChangedNotification as CFString, context
+        ) == .success else {
+            retryDockObserver()
+            return
+        }
+        guard AXObserverAddNotification(
+            createdObserver, list, kAXUIElementDestroyedNotification as CFString, context
+        ) == .success else {
+            AXObserverRemoveNotification(createdObserver, list, kAXSelectedChildrenChangedNotification as CFString)
             retryDockObserver()
             return
         }
@@ -150,22 +165,23 @@ final class DockPreviewManager {
     }
 
     private func restartDockObserver() {
-        stopDockObserver()
+        guard running, !dockRestartPending else { return }
+        dockRestartPending = true
         dockRetryTimer?.invalidate()
         dockRetryTimer = nil
-        hoverTimer?.invalidate()
-        hoverTimer = nil
-        selection = nil
-        selectedIconFrame = nil
+        stopDockObserver()
         hidePreview()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            self?.startDockObserver()
+            guard let self else { return }
+            self.dockRestartPending = false
+            self.startDockObserver()
         }
     }
 
     private func stopDockObserver() {
         if let observer, let observedList {
             AXObserverRemoveNotification(observer, observedList, kAXSelectedChildrenChangedNotification as CFString)
+            AXObserverRemoveNotification(observer, observedList, kAXUIElementDestroyedNotification as CFString)
         }
         if let observerSource {
             CFRunLoopRemoveSource(CFRunLoopGetMain(), observerSource, .commonModes)
@@ -175,35 +191,52 @@ final class DockPreviewManager {
         observerSource = nil
     }
 
+    func dockElementDestroyed() {
+        restartDockObserver()
+    }
+
     func dockSelectionChanged() {
         guard running, let observedList else { return }
+        let pointer = NSEvent.mouseLocation
+        guard let listFrame = AXWindow.frame(of: observedList), listFrame.contains(pointer),
+              !isShowing || !panel.frame.contains(pointer) else {
+            clearSelection()
+            scheduleHide()
+            return
+        }
         AXUIElementSetMessagingTimeout(observedList, 0.1)
         guard let items: [AXUIElement] = attribute(observedList, kAXSelectedChildrenAttribute),
               let item = items.first else {
-            selectedIconFrame = nil
-            selection = nil
-            hoverTimer?.invalidate()
-            hoverTimer = nil
+            clearSelection()
             scheduleHide()
             return
         }
         AXUIElementSetMessagingTimeout(item, 0.1)
-        guard let iconFrame = frame(of: item) else { return }
-        let _: String? = attribute(item, kAXTitleAttribute)
-        selectedIconFrame = iconFrame
-        guard let url = appURL(of: item),
-              let app = NSWorkspace.shared.runningApplications.first(where: {
-                  $0.bundleURL?.resolvingSymlinksInPath().standardizedFileURL == url.resolvingSymlinksInPath().standardizedFileURL
-              }),
-              let screen = NSScreen.screens.first(where: { $0.frame.intersects(iconFrame) }) else {
-            selection = nil
-            hoverTimer?.invalidate()
-            hoverTimer = nil
+        guard AXWindow.frame(of: item) != nil else {
+            clearSelection()
             scheduleHide()
             return
         }
-        let next = Selection(token: Int(truncatingIfNeeded: CFHash(item)), app: app, iconFrame: iconFrame,
-                             edge: dockEdge(for: iconFrame, screen: screen.frame), screenFrame: screen.frame)
+        guard let url = appURL(of: item) else {
+            clearSelection()
+            scheduleHide()
+            return
+        }
+        let runningApps = NSWorkspace.shared.runningApplications
+        let standardizedURL = url.standardizedFileURL
+        let app = runningApps.first { $0.bundleURL?.standardizedFileURL == standardizedURL }
+            ?? runningApps.first { candidate in
+                guard let bundleURL = candidate.bundleURL else { return false }
+                return bundleURL.resolvingSymlinksInPath().standardizedFileURL
+                    == url.resolvingSymlinksInPath().standardizedFileURL
+            }
+        guard let app else {
+            clearSelection()
+            scheduleHide()
+            return
+        }
+
+        let next = Selection(token: Int(truncatingIfNeeded: CFHash(item)), item: item, app: app)
         selection = next
         hideTimer?.invalidate()
         hideTimer = nil
@@ -211,17 +244,42 @@ final class DockPreviewManager {
         hoverTimer?.invalidate()
         hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self, self.selection?.token == next.token else { return }
+                guard let self, let current = self.selection, current.token == next.token else { return }
                 self.hoverTimer = nil
-                self.showPreview(for: next)
+                let pointer = NSEvent.mouseLocation
+                guard let list = self.observedList,
+                      let listFrame = AXWindow.frame(of: list), listFrame.contains(pointer),
+                      let itemFrame = AXWindow.frame(of: current.item), itemFrame.contains(pointer),
+                      !self.isShowing || !self.panel.frame.contains(pointer) else {
+                    self.clearSelection()
+                    self.scheduleHide()
+                    return
+                }
+                self.showPreview(for: current)
             }
         }
     }
 
+    private func clearSelection() {
+        selection = nil
+        hoverTimer?.invalidate()
+        hoverTimer = nil
+    }
+
     private func showPreview(for selection: Selection) {
+        captureTask?.cancel()
+        captureTask = nil
         generation += 1
         let captureGeneration = generation
+        guard let list = observedList,
+              let listFrame = AXWindow.frame(of: list),
+              let screen = NSScreen.screens.first(where: { $0.frame.intersects(listFrame) }) else {
+            hidePreview()
+            return
+        }
+
         let visibleFrames = onScreenFrames(processID: selection.app.processIdentifier)
+        let hiddenApp = visibleFrames.isEmpty
         var usedWindowIDs = Set<CGWindowID>()
         var tileItems: [DockPreviewItem] = []
         var nextWindows: [Int: AXWindow] = [:]
@@ -230,10 +288,12 @@ final class DockPreviewManager {
 
         for window in AXWindow.standardWindows(of: selection.app) {
             let minimized = window.isMinimized
+            // ponytail: frame-only matching can confuse overlapping windows.
+            // Use AX-to-window identity if macOS exposes a stable key.
             let visible = minimized ? nil : visibleFrames.first(where: { candidate in
                 !usedWindowIDs.contains(candidate.id) && window.frame.map { SnapGeometry.isClose($0, candidate.frame, tolerance: 4) } == true
             })
-            guard minimized || visible != nil else { continue }
+            guard minimized || visible != nil || hiddenApp else { continue }
             if let visible { usedWindowIDs.insert(visible.id) }
             let id = Int(truncatingIfNeeded: CFHash(window.element))
             tileItems.append(DockPreviewItem(id: id, title: window.title ?? "Untitled window", appIcon: icon, minimized: minimized))
@@ -241,37 +301,54 @@ final class DockPreviewManager {
             if let visible { screenshotIDs[id] = visible.id }
         }
         guard !tileItems.isEmpty else {
-            self.selection = nil
-            scheduleHide()
+            hidePreview()
             return
         }
+
         windows = nextWindows
         activeApp = selection.app
         isShowing = true
-        panel.show(items: tileItems, edge: selection.edge, anchor: selection.iconFrame, screenFrame: selection.screenFrame)
+        let orientation: String? = attribute(list, kAXOrientationAttribute)
+        let edge = dockEdge(for: listFrame, screen: screen.frame, orientation: orientation)
+        panel.show(items: tileItems, edge: edge, anchor: listFrame, screenFrame: screen.frame)
         startPointerTimer()
         captureThumbnails(screenshotIDs, generation: captureGeneration)
     }
 
     private func captureThumbnails(_ idsByTile: [Int: CGWindowID], generation: Int) {
         guard Permissions.screenRecordingGranted, !idsByTile.isEmpty else { return }
-        Task.detached(priority: .utility) { [weak self] in
-            guard let content = try? await SCShareableContent.current else { return }
-            for (tileID, windowID) in idsByTile {
-                guard let window = content.windows.first(where: { $0.windowID == windowID }) else { continue }
+        let now = Date()
+        thumbnailCache = thumbnailCache.filter { now.timeIntervalSince($0.value.capturedAt) <= 5 }
+        var uncached: [Int: CGWindowID] = [:]
+        for (tileID, windowID) in idsByTile {
+            if let cached = thumbnailCache[windowID] {
+                panel.setImage(NSImage(cgImage: cached.image, size: .zero), for: tileID)
+            } else {
+                uncached[tileID] = windowID
+            }
+        }
+        guard !uncached.isEmpty else { return }
+        captureTask = Task.detached(priority: .utility) { [weak self] in
+            guard let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true),
+                  !Task.isCancelled else { return }
+            for (tileID, windowID) in uncached {
+                guard !Task.isCancelled,
+                      let window = content.windows.first(where: { $0.windowID == windowID }) else { continue }
                 let filter = SCContentFilter(desktopIndependentWindow: window)
                 let configuration = SCStreamConfiguration()
                 configuration.width = max(1, Int(320 * CGFloat(filter.pointPixelScale)))
                 configuration.height = max(1, Int(CGFloat(configuration.width) * window.frame.height / max(window.frame.width, 1)))
                 configuration.showsCursor = false
-                guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration) else { continue }
-                await self?.setCapturedImage(image, for: tileID, generation: generation)
+                guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration),
+                      !Task.isCancelled else { continue }
+                await self?.setCapturedImage(image, for: tileID, windowID: windowID, generation: generation)
             }
         }
     }
 
-    private func setCapturedImage(_ image: CGImage, for id: Int, generation: Int) {
+    private func setCapturedImage(_ image: CGImage, for id: Int, windowID: CGWindowID, generation: Int) {
         guard self.generation == generation, isShowing else { return }
+        thumbnailCache[windowID] = CachedThumbnail(image: image, capturedAt: Date())
         panel.setImage(NSImage(cgImage: image, size: .zero), for: id)
     }
 
@@ -286,8 +363,8 @@ final class DockPreviewManager {
         pointerTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, self.isShowing else { return }
-                let overDock = self.selection != nil && self.selectedIconFrame?.contains(NSEvent.mouseLocation) == true
-                if overDock || self.panel.frame.contains(NSEvent.mouseLocation) {
+                let pointer = NSEvent.mouseLocation
+                if self.pointerIsOverDock(pointer) || self.panel.frame.contains(pointer) {
                     self.hideTimer?.invalidate()
                     self.hideTimer = nil
                 } else {
@@ -297,20 +374,28 @@ final class DockPreviewManager {
         }
     }
 
+    private func pointerIsOverDock(_ pointer: CGPoint) -> Bool {
+        guard let observedList, let listFrame = AXWindow.frame(of: observedList) else { return false }
+        return listFrame.contains(pointer)
+    }
+
     private func scheduleHide() {
         guard isShowing, hideTimer == nil else { return }
         hideTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.hideTimer = nil
-                let overDock = self.selection != nil && self.selectedIconFrame?.contains(NSEvent.mouseLocation) == true
-                if !overDock && !self.panel.frame.contains(NSEvent.mouseLocation) { self.hidePreview() }
+                let pointer = NSEvent.mouseLocation
+                if !self.pointerIsOverDock(pointer) && !self.panel.frame.contains(pointer) { self.hidePreview() }
             }
         }
     }
 
     private func hidePreview() {
         generation += 1
+        captureTask?.cancel()
+        captureTask = nil
+        clearSelection()
         panel.hide()
         isShowing = false
         activeApp = nil
@@ -342,24 +427,12 @@ final class DockPreviewManager {
         return nil
     }
 
-    private func frame(of element: AXUIElement) -> CGRect? {
-        AXUIElementSetMessagingTimeout(element, 0.1)
-        guard let position: AXValue = attribute(element, kAXPositionAttribute),
-              let size: AXValue = attribute(element, kAXSizeAttribute) else { return nil }
-        var point = CGPoint.zero
-        var dimensions = CGSize.zero
-        guard AXValueGetValue(position, .cgPoint, &point), AXValueGetValue(size, .cgSize, &dimensions) else { return nil }
-        return CGRect(origin: point, size: dimensions).axFlipped
-    }
-
-    private func dockEdge(for iconFrame: CGRect, screen: CGRect) -> DockPreviewEdge {
-        let distances: [(DockPreviewEdge, CGFloat)] = [
-            (.bottom, abs(iconFrame.minY - screen.minY)),
-            (.top, abs(screen.maxY - iconFrame.maxY)),
-            (.left, abs(iconFrame.minX - screen.minX)),
-            (.right, abs(screen.maxX - iconFrame.maxX))
-        ]
-        return distances.min(by: { $0.1 < $1.1 })?.0 ?? .bottom
+    private func dockEdge(for listFrame: CGRect, screen: CGRect, orientation: String?) -> DockPreviewEdge {
+        if orientation == kAXHorizontalOrientationValue { return .bottom }
+        guard orientation == kAXVerticalOrientationValue else { return .bottom }
+        let leftDistance = abs(listFrame.minX - screen.minX)
+        let rightDistance = abs(screen.maxX - listFrame.maxX)
+        return leftDistance <= rightDistance ? .left : .right
     }
 
     private func attribute<T>(_ element: AXUIElement, _ name: String) -> T? {
@@ -369,8 +442,14 @@ final class DockPreviewManager {
     }
 }
 
-private let dockPreviewSelectionChanged: AXObserverCallback = { _, _, _, refcon in
+private let dockPreviewNotificationReceived: AXObserverCallback = { _, _, notification, refcon in
     guard let refcon else { return }
     let manager = Unmanaged<DockPreviewManager>.fromOpaque(refcon).takeUnretainedValue()
-    MainActor.assumeIsolated { manager.dockSelectionChanged() }
+    MainActor.assumeIsolated {
+        if notification as String == kAXUIElementDestroyedNotification as String {
+            manager.dockElementDestroyed()
+        } else {
+            manager.dockSelectionChanged()
+        }
+    }
 }

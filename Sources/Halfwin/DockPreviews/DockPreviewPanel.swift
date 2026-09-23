@@ -2,7 +2,6 @@ import AppKit
 import SwiftUI
 
 enum DockPreviewEdge: Equatable {
-    case top
     case bottom
     case left
     case right
@@ -33,7 +32,7 @@ final class DockPreviewPanel {
         self.panel = panel
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.level = .floating
+        panel.level = .popUpMenu
         panel.isFloatingPanel = true
         panel.hasShadow = true
         panel.hidesOnDeactivate = false
@@ -57,14 +56,12 @@ final class DockPreviewPanel {
         state.images.removeAll(keepingCapacity: true)
         state.edge = edge
 
-        let horizontalDock = edge == .top || edge == .bottom
+        let horizontalDock = edge == .bottom
         let size = panelSize(for: items.count, horizontalDock: horizontalDock, screenFrame: screenFrame)
         state.viewportSize = CGSize(width: max(0, size.width - 16), height: max(0, size.height - 16))
 
         var origin = CGPoint(x: anchor.midX - size.width / 2, y: anchor.midY - size.height / 2)
         switch edge {
-        case .top:
-            origin.y = anchor.minY - size.height - 8
         case .bottom:
             origin.y = anchor.maxY + 8
         case .left:
@@ -118,7 +115,7 @@ private struct DockPreviewTilesView: View {
     let onSelect: (Int) -> Void
 
     private var horizontalDock: Bool {
-        state.edge == .top || state.edge == .bottom
+        state.edge == .bottom
     }
 
     var body: some View {

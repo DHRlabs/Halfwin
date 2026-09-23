@@ -37,9 +37,17 @@ struct AXWindow {
     }
 
     var frame: CGRect? {
-        guard let position = pointAttribute(kAXPositionAttribute),
-              let size = sizeAttribute(kAXSizeAttribute) else { return nil }
-        return CGRect(origin: position, size: size).axFlipped
+        Self.frame(of: element)
+    }
+
+    static func frame(of element: AXUIElement) -> CGRect? {
+        AXUIElementSetMessagingTimeout(element, 0.1)
+        guard let position: AXValue = objectAttribute(element, kAXPositionAttribute),
+              let size: AXValue = objectAttribute(element, kAXSizeAttribute) else { return nil }
+        var point = CGPoint.zero
+        var dimensions = CGSize.zero
+        guard AXValueGetValue(position, .cgPoint, &point), AXValueGetValue(size, .cgSize, &dimensions) else { return nil }
+        return CGRect(origin: point, size: dimensions).axFlipped
     }
 
     /// Set size, then position, then size again: macOS clamps the size to
@@ -124,7 +132,7 @@ struct AXWindow {
         AXUIElementSetMessagingTimeout(appElement, 0.1)
         let frontmost = AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue) == .success
         if !restored || !raised || !main || !frontmost {
-            app.activate()
+            app.activate(options: .activateAllWindows)
         }
     }
 
@@ -144,20 +152,6 @@ struct AXWindow {
         var value: AnyObject?
         guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
         return value as? T
-    }
-
-    private func pointAttribute(_ name: String) -> CGPoint? {
-        guard let axValue: AXValue = Self.objectAttribute(element, name) else { return nil }
-        var point = CGPoint.zero
-        guard AXValueGetValue(axValue, .cgPoint, &point) else { return nil }
-        return point
-    }
-
-    private func sizeAttribute(_ name: String) -> CGSize? {
-        guard let axValue: AXValue = Self.objectAttribute(element, name) else { return nil }
-        var size = CGSize.zero
-        guard AXValueGetValue(axValue, .cgSize, &size) else { return nil }
-        return size
     }
 
     private func setPointAttribute(_ name: String, _ point: CGPoint) {
