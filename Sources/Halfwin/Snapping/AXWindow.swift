@@ -104,7 +104,7 @@ struct AXWindow {
             guard let role: String = objectAttribute(element, kAXRoleAttribute), role == kAXWindowRole,
                   let subrole: String = objectAttribute(element, kAXSubroleAttribute), subrole == kAXStandardWindowSubrole else { return nil }
             return AXWindow(element: element)
-        }.filter { $0.frame != nil }
+        }
     }
 
     func raise() {
