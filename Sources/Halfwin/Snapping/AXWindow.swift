@@ -27,15 +27,26 @@ struct AXWindow {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    var isMinimized: Bool {
+        Self.objectAttribute(element, kAXMinimizedAttribute) ?? false
+    }
+
     var processIdentifier: pid_t? {
         var pid: pid_t = 0
         return AXUIElementGetPid(element, &pid) == .success ? pid : nil
     }
 
     var frame: CGRect? {
-        guard let position = pointAttribute(kAXPositionAttribute),
-              let size = sizeAttribute(kAXSizeAttribute) else { return nil }
-        return CGRect(origin: position, size: size).axFlipped
+        Self.frame(of: element)
+    }
+
+    static func frame(of element: AXUIElement) -> CGRect? {
+        guard let position: AXValue = objectAttribute(element, kAXPositionAttribute),
+              let size: AXValue = objectAttribute(element, kAXSizeAttribute) else { return nil }
+        var point = CGPoint.zero
+        var dimensions = CGSize.zero
+        guard AXValueGetValue(position, .cgPoint, &point), AXValueGetValue(size, .cgSize, &dimensions) else { return nil }
+        return CGRect(origin: point, size: dimensions).axFlipped
     }
 
     /// Set size, then position, then size again: macOS clamps the size to
@@ -111,6 +122,19 @@ struct AXWindow {
         AXUIElementPerformAction(element, kAXRaiseAction as CFString)
     }
 
+    func restoreAndRaise(in app: NSRunningApplication) {
+        AXUIElementSetMessagingTimeout(element, 0.1)
+        let restored = !isMinimized || AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) == .success
+        let raised = AXUIElementPerformAction(element, kAXRaiseAction as CFString) == .success
+        let main = AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, kCFBooleanTrue) == .success
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, 0.1)
+        let frontmost = AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue) == .success
+        if !restored || !raised || !main || !frontmost {
+            app.activate(options: .activateAllWindows)
+        }
+    }
+
     static func role(of element: AXUIElement) -> String? {
         var value: AnyObject?
         guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &value) == .success else { return nil }
@@ -127,20 +151,6 @@ struct AXWindow {
         var value: AnyObject?
         guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
         return value as? T
-    }
-
-    private func pointAttribute(_ name: String) -> CGPoint? {
-        guard let axValue: AXValue = Self.objectAttribute(element, name) else { return nil }
-        var point = CGPoint.zero
-        guard AXValueGetValue(axValue, .cgPoint, &point) else { return nil }
-        return point
-    }
-
-    private func sizeAttribute(_ name: String) -> CGSize? {
-        guard let axValue: AXValue = Self.objectAttribute(element, name) else { return nil }
-        var size = CGSize.zero
-        guard AXValueGetValue(axValue, .cgSize, &size) else { return nil }
-        return size
     }
 
     private func setPointAttribute(_ name: String, _ point: CGPoint) {
