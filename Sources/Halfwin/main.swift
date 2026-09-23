@@ -30,7 +30,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     func menuWillOpen(_ menu: NSMenu) {
         keepAwake.refresh()
-        updateUI()
     }
 
     private func buildMenu() {
@@ -69,7 +68,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         screenRecordingItem = NSMenuItem(title: "Screen Recording: Not Granted", action: #selector(requestScreenRecording), keyEquivalent: "")
         screenRecordingItem.target = self
         permissionsMenu.addItem(screenRecordingItem)
-        permissionsMenu.delegate = self
         permissionsItem.submenu = permissionsMenu
         menu.addItem(permissionsItem)
 
@@ -91,10 +89,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         return submenu
     }
 
-    @objc private func toggleAwake() { keepAwake.toggle(); updateUI() }
-    @objc private func startTimed(_ sender: NSMenuItem) { keepAwake.startTimed(sender.tag); updateUI() }
-    @objc private func toggleLid() { keepAwake.toggleLid(); updateUI() }
-    @objc private func startLidTimed(_ sender: NSMenuItem) { keepAwake.startLidTimed(sender.tag); updateUI() }
+    @objc private func toggleAwake() { keepAwake.toggle() }
+    @objc private func startTimed(_ sender: NSMenuItem) { keepAwake.startTimed(sender.tag) }
+    @objc private func toggleLid() { keepAwake.toggleLid() }
+    @objc private func startLidTimed(_ sender: NSMenuItem) { keepAwake.startLidTimed(sender.tag) }
 
     @objc private func toggleLogin() {
         do {
