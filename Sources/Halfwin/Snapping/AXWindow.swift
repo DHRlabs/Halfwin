@@ -41,15 +41,23 @@ struct AXWindow {
     /// window if the hit element is a child (title bar, close button, etc).
     static func windowUnderCursor(at appKitPoint: CGPoint) -> AXWindow? {
         let systemWide = AXUIElementCreateSystemWide()
+        // Keep a stuck AX call from stalling the main thread indefinitely.
+        AXUIElementSetMessagingTimeout(systemWide, 0.1)
         let point = appKitPoint.axFlipped
         var element: AXUIElement?
         guard AXUIElementCopyElementAtPosition(systemWide, Float(point.x), Float(point.y), &element) == .success,
               let element else { return nil }
-        if role(of: element) == kAXWindowRole { return AXWindow(element: element) }
+        if role(of: element) == kAXWindowRole {
+            AXUIElementSetMessagingTimeout(element, 0.1)
+            return AXWindow(element: element)
+        }
         var current = element
         for _ in 0..<8 {
             guard let parent: AXUIElement = objectAttribute(current, kAXParentAttribute) else { break }
-            if role(of: parent) == kAXWindowRole { return AXWindow(element: parent) }
+            if role(of: parent) == kAXWindowRole {
+                AXUIElementSetMessagingTimeout(parent, 0.1)
+                return AXWindow(element: parent)
+            }
             current = parent
         }
         return nil
