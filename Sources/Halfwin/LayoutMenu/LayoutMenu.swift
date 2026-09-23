@@ -198,7 +198,7 @@ final class LayoutMenuManager {
         cancelDwell()
         guard Permissions.accessibilityGranted else { return }
         pruneUnreadableRestoreInfo()
-        targetWindow = AXWindow.frontmostFocusedWindow()
+        targetWindow = AXWindow.focusedWindow()
         activeScreen = screen
         panel.show(on: screen)
     }
