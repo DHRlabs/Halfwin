@@ -11,7 +11,7 @@ struct SettingsView: View {
                 Toggle("Snap windows when dragged to an edge", isOn: $settings.dragSnappingEnabled)
                 ForEach(SnapPosition.allCases, id: \.self) { position in
                     Picker(position.displayName, selection: binding(for: position)) {
-                        ForEach(SnapAction.allCases, id: \.self) { action in
+                        ForEach(SnapAction.allCases.filter { $0 != .lastThirdTop && $0 != .lastThirdBottom }, id: \.self) { action in
                             Text(action.displayName).tag(action)
                         }
                     }

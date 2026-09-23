@@ -25,7 +25,7 @@ final class SnapGroupsManager {
     private var activationObserver: NSObjectProtocol?
     private var terminationObserver: NSObjectProtocol?
     private var members: [Display: [Side: Member]] = [:]
-    private var ignoreActivationsUntil = 0.0
+    private var ignoredActivations: [pid_t: TimeInterval] = [:]
 
     func setEnabled(_ enabled: Bool) {
         self.enabled = enabled
@@ -61,6 +61,7 @@ final class SnapGroupsManager {
             self.terminationObserver = nil
         }
         members.removeAll()
+        ignoredActivations.removeAll()
     }
 
     deinit { stop() }
@@ -109,18 +110,26 @@ final class SnapGroupsManager {
 
     private func activatedApplication(_ notification: Notification) {
         guard enabled, Permissions.accessibilityGranted,
-              ProcessInfo.processInfo.systemUptime >= ignoreActivationsUntil,
-              let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+              let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+        let now = ProcessInfo.processInfo.systemUptime
+        ignoredActivations = ignoredActivations.filter { $0.value > now }
+        guard ignoredActivations[app.processIdentifier] == nil,
               app.processIdentifier == NSWorkspace.shared.frontmostApplication?.processIdentifier else { return }
         pruneGroups()
         guard let focused = AXWindow.focusedWindow(of: app),
               let group = members.first(where: { $0.value.values.contains { $0.window == focused } }),
               group.value.count == 2 else { return }
-        ignoreActivationsUntil = ProcessInfo.processInfo.systemUptime + 0.3
+        let ignoreUntil = now + 0.3
         for member in group.value.values where member.window != focused {
             guard let screen = group.key.screen,
                   SnapWindowInventory.isOnCurrentSpace(member.window, on: screen) else { continue }
+            if let processIdentifier = member.window.processIdentifier {
+                ignoredActivations[processIdentifier] = ignoreUntil
+            }
             member.window.raise()
+        }
+        if let processIdentifier = focused.processIdentifier {
+            ignoredActivations[processIdentifier] = ignoreUntil
         }
         focused.raise()
     }
@@ -134,7 +143,10 @@ final class SnapGroupsManager {
 
     private func pruneGroups() {
         for display in Array(members.keys) {
-            guard let pair = members[display] else { continue }
+            guard let pair = members[display], display.screen != nil else {
+                members.removeValue(forKey: display)
+                continue
+            }
             guard pair.values.allSatisfy({ member in
                 guard let frame = member.window.frame else { return false }
                 return SnapGeometry.isClose(frame, member.frame)
