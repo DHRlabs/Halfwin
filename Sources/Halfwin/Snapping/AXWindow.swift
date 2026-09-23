@@ -21,6 +21,17 @@ extension CGRect {
 struct AXWindow {
     let element: AXUIElement
 
+    var title: String? {
+        guard let title: String = Self.objectAttribute(element, kAXTitleAttribute) else { return nil }
+        let trimmed = title.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    var processIdentifier: pid_t? {
+        var pid: pid_t = 0
+        return AXUIElementGetPid(element, &pid) == .success ? pid : nil
+    }
+
     var frame: CGRect? {
         guard let position = pointAttribute(kAXPositionAttribute),
               let size = sizeAttribute(kAXSizeAttribute) else { return nil }
@@ -67,15 +78,37 @@ struct AXWindow {
         return nil
     }
 
-    /// The frontmost app's focused window for system-wide keyboard actions.
+    /// The frontmost app's focused window for system-wide keyboard actions
+    /// and menu-driven layout picks.
     static func focusedWindow() -> AXWindow? {
         guard let application = NSWorkspace.shared.frontmostApplication else { return nil }
-        let appElement = AXUIElementCreateApplication(application.processIdentifier)
+        return focusedWindow(of: application)
+    }
+
+    static func focusedWindow(of app: NSRunningApplication) -> AXWindow? {
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
         AXUIElementSetMessagingTimeout(appElement, 0.1)
         guard let window: AXUIElement = objectAttribute(appElement, kAXFocusedWindowAttribute) else { return nil }
         AXUIElementSetMessagingTimeout(window, 0.1)
         guard role(of: window) == kAXWindowRole else { return nil }
         return AXWindow(element: window)
+    }
+
+    /// The standard windows reported for a regular app by the Accessibility API.
+    static func standardWindows(of app: NSRunningApplication) -> [AXWindow] {
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, 0.1)
+        guard let elements: [AXUIElement] = objectAttribute(appElement, kAXWindowsAttribute) else { return [] }
+        return elements.compactMap { element in
+            AXUIElementSetMessagingTimeout(element, 0.1)
+            guard let role: String = objectAttribute(element, kAXRoleAttribute), role == kAXWindowRole,
+                  let subrole: String = objectAttribute(element, kAXSubroleAttribute), subrole == kAXStandardWindowSubrole else { return nil }
+            return AXWindow(element: element)
+        }
+    }
+
+    func raise() {
+        AXUIElementPerformAction(element, kAXRaiseAction as CFString)
     }
 
     static func role(of element: AXUIElement) -> String? {

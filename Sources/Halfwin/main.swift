@@ -6,6 +6,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let mouseFeatures = MouseFeatures()
     private let snapSettings = SnapSettings.shared
     private lazy var snapManager = SnapManager(settings: snapSettings)
+    private let snapAssistManager = SnapAssistManager()
+    private let snapGroupsManager = SnapGroupsManager()
+    private let snapAssistSwitch = FeatureSwitch(key: "snapAssist", title: "Snap Assist", defaultOn: true)
+    private let snapGroupsSwitch = FeatureSwitch(key: "snapGroups", title: "Snap Groups", defaultOn: true)
     private let layoutMenuSettings = LayoutMenuSettings.shared
     private lazy var layoutMenuManager = LayoutMenuManager(settings: layoutMenuSettings)
     private lazy var windowExtrasManager = WindowExtrasManager()
@@ -24,8 +28,24 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var loginItem: NSMenuItem!
     private var accessibilityItem: NSMenuItem!
     private var screenRecordingItem: NSMenuItem!
+    private var activationRefreshObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        activationRefreshObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            self?.snapAssistManager.refreshPermission()
+            self?.snapGroupsManager.refreshPermission()
+        }
+        SnapEvents.handler = { [weak self] window, action, screen in
+            self?.snapAssistManager.didSnap(window: window, action: action, screen: screen)
+            self?.snapGroupsManager.didSnap(window: window, action: action, screen: screen)
+        }
+        snapAssistSwitch.onChange = { [weak self] in self?.snapAssistManager.setEnabled($0) }
+        snapGroupsSwitch.onChange = { [weak self] in self?.snapGroupsManager.setEnabled($0) }
+        snapAssistSwitch.start()
+        snapGroupsSwitch.start()
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         buildMenu()
         menu.delegate = self
@@ -40,9 +60,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     }
 
     func applicationWillTerminate(_ notification: Notification) {
+        if let activationRefreshObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(activationRefreshObserver)
+            self.activationRefreshObserver = nil
+        }
         mouseFeatures.stop()
         keepAwake.stop()
         windowExtrasManager.stop()
+        snapGroupsManager.stop()
+        snapAssistManager.setEnabled(false)
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -50,6 +76,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         mouseFeatures.refreshPermission()
         snapManager.refreshPermission()
         layoutMenuManager.refreshPermission()
+        snapAssistManager.refreshPermission()
+        snapGroupsManager.refreshPermission()
         windowExtrasManager.refreshPermission()
     }
 
@@ -92,6 +120,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(mouseFeatures.windowsScrollDirection.makeMenuItem())
         menu.addItem(mouseFeatures.sideButtonsBackForward.makeMenuItem())
 
+        menu.addItem(.separator())
+
+        let snappingHeader = NSMenuItem(title: "Snapping", action: nil, keyEquivalent: "")
+        snappingHeader.isEnabled = false
+        menu.addItem(snappingHeader)
+        menu.addItem(snapAssistSwitch.makeMenuItem())
+        menu.addItem(snapGroupsSwitch.makeMenuItem())
         menu.addItem(.separator())
 
         loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLogin), keyEquivalent: "")
