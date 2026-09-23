@@ -27,6 +27,10 @@ struct AXWindow {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    var isMinimized: Bool {
+        Self.objectAttribute(element, kAXMinimizedAttribute) ?? false
+    }
+
     var processIdentifier: pid_t? {
         var pid: pid_t = 0
         return AXUIElementGetPid(element, &pid) == .success ? pid : nil
@@ -109,6 +113,19 @@ struct AXWindow {
 
     func raise() {
         AXUIElementPerformAction(element, kAXRaiseAction as CFString)
+    }
+
+    func restoreAndRaise(in app: NSRunningApplication) {
+        AXUIElementSetMessagingTimeout(element, 0.1)
+        let restored = !isMinimized || AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) == .success
+        let raised = AXUIElementPerformAction(element, kAXRaiseAction as CFString) == .success
+        let main = AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, kCFBooleanTrue) == .success
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, 0.1)
+        let frontmost = AXUIElementSetAttributeValue(appElement, kAXFrontmostAttribute as CFString, kCFBooleanTrue) == .success
+        if !restored || !raised || !main || !frontmost {
+            app.activate()
+        }
     }
 
     static func role(of element: AXUIElement) -> String? {
