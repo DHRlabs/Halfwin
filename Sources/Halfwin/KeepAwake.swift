@@ -39,7 +39,13 @@ final class KeepAwake {
     }
 
     func refresh() {
-        lidEnabled = lidOn()
+        let nowLidOn = lidOn()
+        if lidEnabled && !nowLidOn && lidEndDate != nil && endDate == nil {
+            // Lid revert fired (pmset flag cleared itself): the caffeinate the
+            // lid session started has no timeout of its own, so stop it here.
+            stopCaffeinate()
+        }
+        lidEnabled = nowLidOn
         if !lidEnabled { lidEndDate = nil }
         if lidEnabled && !isActive { startCaffeinate(seconds: nil) }
         if lidEnabled { startLidWatch() }
@@ -50,9 +56,10 @@ final class KeepAwake {
     func toggle() {
         refresh()
         if lidEnabled {
-            _ = runPrivileged("pkill -f HALFWIN_LID_REVERT 2>/dev/null; pmset -a disablesleep 0")
-            lidEndDate = nil
-            if !isActive { startCaffeinate(seconds: nil) }
+            if runPrivileged("pkill -f HALFWIN_LID_REVERT 2>/dev/null; pmset -a disablesleep 0") {
+                lidEndDate = nil
+                if !isActive { startCaffeinate(seconds: nil) }
+            }
         } else if isActive && endDate == nil {
             stopCaffeinate()
         } else {
@@ -97,9 +104,9 @@ final class KeepAwake {
             arguments += ["-w", String(ProcessInfo.processInfo.processIdentifier)]
         }
         process.arguments = arguments
-        process.terminationHandler = { [weak self] _ in
+        process.terminationHandler = { [weak self] finishedProcess in
             DispatchQueue.main.async {
-                guard let self else { return }
+                guard let self, self.caffeinateProcess === finishedProcess else { return }
                 self.caffeinateProcess = nil
                 self.endDate = nil
                 self.refresh()
@@ -186,9 +193,10 @@ final class KeepAwake {
     }
 
     private func disableLid() {
-        _ = runPrivileged("pkill -f HALFWIN_LID_REVERT 2>/dev/null; pmset -a disablesleep 0")
-        lidEndDate = nil
-        if isActive && endDate == nil { stopCaffeinate() }
+        if runPrivileged("pkill -f HALFWIN_LID_REVERT 2>/dev/null; pmset -a disablesleep 0") {
+            lidEndDate = nil
+            if isActive && endDate == nil { stopCaffeinate() }
+        }
         refresh()
     }
 
