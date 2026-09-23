@@ -137,6 +137,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             image.isTemplate = true
             statusItem.button?.image = image
         }
+        statusItem.button?.title = "hfWn"
+        statusItem.button?.imagePosition = .imageLeft
 
         awakeItem.state = keepAwake.isPlainAwake ? .on : .off
         awakeItem.title = keepAwake.isPlainAwake ? "Stop Keeping Awake" : "Keep Awake"
