@@ -35,6 +35,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var activationRefreshObserver: NSObjectProtocol?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        #if DEBUG
+        if let previewPath = ProcessInfo.processInfo.environment["HALFWIN_RENDER_MENU_PREVIEW"] {
+            FeatureSwitch.renderPreview(to: URL(fileURLWithPath: previewPath))
+            exit(0)
+        }
+        #endif
+
         activationRefreshObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
         ) { [weak self] _ in

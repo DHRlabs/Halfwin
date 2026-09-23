@@ -1,5 +1,109 @@
 import AppKit
 
+private final class FeatureSwitchMenuRow: NSView {
+    private static let width: CGFloat = 280
+    private static let height: CGFloat = 22
+    private static let titleInset: CGFloat = 22
+    private static let switchSize = NSSize(width: 26, height: 15)
+
+    private weak var featureSwitch: FeatureSwitch?
+    private let title: String
+    private var trackingArea: NSTrackingArea?
+    private var isHovered = false
+
+    init(title: String, featureSwitch: FeatureSwitch) {
+        self.title = title
+        self.featureSwitch = featureSwitch
+        super.init(frame: NSRect(x: 0, y: 0, width: Self.width, height: Self.height))
+        autoresizingMask = [.width]
+        setAccessibilityElement(true)
+        setAccessibilityRole(.checkBox)
+        setAccessibilityLabel(title)
+        refresh()
+    }
+
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    override func updateTrackingAreas() {
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        super.updateTrackingAreas()
+        let trackingArea = NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        self.trackingArea = trackingArea
+        addTrackingArea(trackingArea)
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        needsDisplay = true
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        isHovered = false
+        needsDisplay = true
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        _ = toggle()
+    }
+
+    override func accessibilityPerformPress() -> Bool {
+        toggle()
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        if isHovered {
+            NSColor.selectedContentBackgroundColor.setFill()
+            NSBezierPath(rect: bounds).fill()
+        }
+
+        let isOn = featureSwitch?.isOn ?? false
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.menuFont(ofSize: 0),
+            .foregroundColor: isHovered ? NSColor.white : NSColor.labelColor
+        ]
+        let titleSize = (title as NSString).size(withAttributes: attributes)
+        (title as NSString).draw(
+            at: NSPoint(x: Self.titleInset, y: (bounds.height - titleSize.height) / 2),
+            withAttributes: attributes
+        )
+
+        let track = NSRect(
+            x: bounds.maxX - 16 - Self.switchSize.width,
+            y: (bounds.height - Self.switchSize.height) / 2,
+            width: Self.switchSize.width,
+            height: Self.switchSize.height
+        )
+        (isOn ? NSColor.controlAccentColor : NSColor.systemGray).setFill()
+        NSBezierPath(roundedRect: track, xRadius: track.height / 2, yRadius: track.height / 2).fill()
+
+        let knobSize: CGFloat = 11
+        let knobX = isOn ? track.maxX - 2 - knobSize : track.minX + 2
+        let knob = NSRect(x: knobX, y: (bounds.height - knobSize) / 2, width: knobSize, height: knobSize)
+        NSColor.white.setFill()
+        NSBezierPath(ovalIn: knob).fill()
+    }
+
+    func refresh() {
+        setAccessibilityValue(NSNumber(value: featureSwitch?.isOn ?? false))
+        needsDisplay = true
+    }
+
+    @discardableResult
+    private func toggle() -> Bool {
+        guard let featureSwitch else { return false }
+        featureSwitch.isOn.toggle()
+        needsDisplay = true
+        return true
+    }
+}
+
 /// One on/off switch for one Halfwin feature: saved in UserDefaults and shown
 /// in the menu bar menu as a row with a switch, so every feature can be
 /// turned on or off with a single flick.
@@ -8,17 +112,10 @@ final class FeatureSwitch: NSObject {
     private let key: String
     private var defaultsObserver: NSObjectProtocol?
     private var lastAppliedValue: Bool?
+    private weak var menuRow: FeatureSwitchMenuRow?
     /// Called on the main thread whenever the switch changes, including once
     /// from `start()` so the owner can apply the saved state at launch.
     var onChange: ((Bool) -> Void)?
-
-    private lazy var control: NSSwitch = {
-        let control = NSSwitch()
-        control.controlSize = .mini
-        control.target = self
-        control.action = #selector(flipped)
-        return control
-    }()
 
     init(key: String, title: String, defaultOn: Bool) {
         self.key = "Halfwin.feature." + key
@@ -42,7 +139,6 @@ final class FeatureSwitch: NSObject {
         set {
             let changed = isOn != newValue
             UserDefaults.standard.set(newValue, forKey: key)
-            control.state = newValue ? .on : .off
             if changed { apply(newValue) }
         }
     }
@@ -50,26 +146,14 @@ final class FeatureSwitch: NSObject {
     func start() {
         let value = isOn
         lastAppliedValue = value
-        control.state = value ? .on : .off
+        menuRow?.refresh()
         onChange?(value)
     }
 
     /// A menu row: the feature's name on the left, its switch on the right.
     func makeMenuItem() -> NSMenuItem {
-        let labelButton = NSButton(title: title, target: self, action: #selector(toggleFromLabel))
-        labelButton.setAccessibilityElement(false)
-        labelButton.isBordered = false
-        labelButton.alignment = .left
-        labelButton.font = .menuFont(ofSize: 0)
-        control.state = isOn ? .on : .off
-        control.setAccessibilityLabel(title)
-        let spacer = NSView()
-        spacer.setContentHuggingPriority(.defaultLow, for: .horizontal)
-        let row = NSStackView(views: [labelButton, spacer, control])
-        row.orientation = .horizontal
-        row.edgeInsets = NSEdgeInsets(top: 2, left: 14, bottom: 2, right: 14)
-        row.frame = NSRect(x: 0, y: 0, width: 280, height: 24)
-        row.autoresizingMask = [.width]
+        let row = FeatureSwitchMenuRow(title: title, featureSwitch: self)
+        menuRow = row
         let item = NSMenuItem()
         item.view = row
         return item
@@ -78,11 +162,45 @@ final class FeatureSwitch: NSObject {
     private func apply(_ value: Bool) {
         guard lastAppliedValue != value else { return }
         lastAppliedValue = value
-        control.state = value ? .on : .off
+        menuRow?.refresh()
         onChange?(value)
     }
 
-    @objc private func flipped() { isOn = control.state == .on }
+    #if DEBUG
+    static func renderPreview(to url: URL) {
+        let previewID = UUID().uuidString
+        let switches = [
+            FeatureSwitch(key: "menu-preview-\(previewID)-1", title: "Preview feature one", defaultOn: true),
+            FeatureSwitch(key: "menu-preview-\(previewID)-2", title: "Preview feature two", defaultOn: false),
+            FeatureSwitch(key: "menu-preview-\(previewID)-3", title: "Preview feature three", defaultOn: true)
+        ]
+        let rowHeight: CGFloat = 22
+        let preview = NSBox(frame: NSRect(x: 0, y: 0, width: 280, height: rowHeight * 3))
+        preview.boxType = .custom
+        preview.borderWidth = 0
+        preview.contentViewMargins = .zero
+        preview.fillColor = NSColor(white: 0.16, alpha: 1)
+        preview.appearance = NSAppearance(named: .darkAqua)
+        for (index, featureSwitch) in switches.enumerated() {
+            let row = FeatureSwitchMenuRow(title: featureSwitch.title, featureSwitch: featureSwitch)
+            row.frame = NSRect(x: 0, y: rowHeight * CGFloat(2 - index), width: 280, height: rowHeight)
+            preview.contentView?.addSubview(row)
+        }
 
-    @objc private func toggleFromLabel() { isOn = !isOn }
+        guard let bitmap = preview.bitmapImageRepForCachingDisplay(in: preview.bounds) else {
+            NSLog("Halfwin: could not render menu preview")
+            return
+        }
+        preview.cacheDisplay(in: preview.bounds, to: bitmap)
+        guard let png = bitmap.representation(using: .png, properties: [:]) else {
+            NSLog("Halfwin: could not encode menu preview")
+            return
+        }
+        do {
+            try png.write(to: url, options: .atomic)
+        } catch {
+            NSLog("Halfwin: could not write menu preview: %@", error.localizedDescription)
+        }
+    }
+    #endif
 }
