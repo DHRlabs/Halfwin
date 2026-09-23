@@ -258,9 +258,13 @@ final class WindowExtrasManager {
         }
         guard let target = targetFrame(action, for: window, current: frame) else { return }
         if rememberFrame {
-            frameMemory.set(window, current: frame, to: target)
+            frameMemory.set(window, current: frame, to: target.frame)
         } else {
-            window.setFrame(target)
+            window.setFrame(target.frame)
+        }
+        if action == .leftHalf || action == .rightHalf,
+           let readBack = window.frame, SnapGeometry.isClose(readBack, target.frame) {
+            SnapEvents.didSnap(window: window, action: action, screen: target.screen)
         }
     }
 
@@ -312,15 +316,16 @@ final class WindowExtrasManager {
     private func toggleToVisibleFrame(_ window: AXWindow, current: CGRect) -> Bool {
         frameMemory.pruneUnreadableFrames()
         guard let target = targetFrame(.maximize, for: window, current: current) else { return false }
-        frameMemory.toggle(window, current: current, to: target)
+        frameMemory.toggle(window, current: current, to: target.frame)
         return true
     }
 
-    private func targetFrame(_ action: SnapAction, for window: AXWindow, current: CGRect) -> CGRect? {
+    private func targetFrame(_ action: SnapAction, for window: AXWindow, current: CGRect) -> (frame: CGRect, screen: NSScreen)? {
         let center = CGPoint(x: current.midX, y: current.midY)
         guard let screen = NSScreen.screens.first(where: { $0.frame.contains(center) }) ?? NSScreen.main else { return nil }
-        return SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
-                                  currentWindowFrame: current, portrait: screen.frame.height > screen.frame.width)
+        guard let frame = SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
+                                             currentWindowFrame: current, portrait: screen.frame.height > screen.frame.width) else { return nil }
+        return (frame, screen)
     }
 }
 

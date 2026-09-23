@@ -25,7 +25,7 @@ final class SnapGroupsManager {
     private var activationObserver: NSObjectProtocol?
     private var terminationObserver: NSObjectProtocol?
     private var members: [Display: [Side: Member]] = [:]
-    private var raisingGroupMembers = false
+    private var ignoreActivationsUntil = 0.0
 
     func setEnabled(_ enabled: Bool) {
         self.enabled = enabled
@@ -43,7 +43,7 @@ final class SnapGroupsManager {
         var pair = members[display] ?? [:]
         if pair.values.contains(where: { member in
             guard let frame = member.window.frame else { return true }
-            return !SnapGeometry.isClose(frame, member.frame) || !SnapWindowInventory.isOnCurrentSpace(member.window, on: screen)
+            return !SnapGeometry.isClose(frame, member.frame)
         }) { pair = [:] }
         pair[side] = Member(window: window, frame: current)
         members[display] = pair
@@ -72,6 +72,7 @@ final class SnapGroupsManager {
         }
         guard Permissions.accessibilityGranted else {
             removeActivationObservers()
+            members.removeAll()
             if permissionTimer == nil {
                 permissionTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
                     self?.refreshPermission()
@@ -87,7 +88,6 @@ final class SnapGroupsManager {
         ) { [weak self] notification in
             DispatchQueue.main.async {
                 guard let self else { return }
-                self.refreshPermission()
                 self.activatedApplication(notification)
             }
         }
@@ -108,17 +108,21 @@ final class SnapGroupsManager {
     }
 
     private func activatedApplication(_ notification: Notification) {
-        guard enabled, Permissions.accessibilityGranted, !raisingGroupMembers,
+        guard enabled, Permissions.accessibilityGranted,
+              ProcessInfo.processInfo.systemUptime >= ignoreActivationsUntil,
               let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
               app.processIdentifier == NSWorkspace.shared.frontmostApplication?.processIdentifier else { return }
         pruneGroups()
         guard let focused = AXWindow.focusedWindow(of: app),
-              let pair = members.values.first(where: { $0.values.contains { $0.window == focused } }),
-              pair.count == 2 else { return }
-        raisingGroupMembers = true
-        pair.values.filter { $0.window != focused }.forEach { $0.window.raise() }
+              let group = members.first(where: { $0.value.values.contains { $0.window == focused } }),
+              group.value.count == 2 else { return }
+        ignoreActivationsUntil = ProcessInfo.processInfo.systemUptime + 0.3
+        for member in group.value.values where member.window != focused {
+            guard let screen = group.key.screen,
+                  SnapWindowInventory.isOnCurrentSpace(member.window, on: screen) else { continue }
+            member.window.raise()
+        }
         focused.raise()
-        DispatchQueue.main.async { [weak self] in self?.raisingGroupMembers = false }
     }
 
     private func terminatedApplication(_ notification: Notification) {
@@ -131,11 +135,10 @@ final class SnapGroupsManager {
     private func pruneGroups() {
         for display in Array(members.keys) {
             guard let pair = members[display] else { continue }
-            guard let screen = display.screen,
-                  pair.values.allSatisfy({ member in
-                      guard let frame = member.window.frame else { return false }
-                      return SnapGeometry.isClose(frame, member.frame) && SnapWindowInventory.isOnCurrentSpace(member.window, on: screen)
-                  }) else {
+            guard pair.values.allSatisfy({ member in
+                guard let frame = member.window.frame else { return false }
+                return SnapGeometry.isClose(frame, member.frame)
+            }) else {
                 members.removeValue(forKey: display)
                 continue
             }

@@ -169,7 +169,15 @@ final class SnapManager {
     }
 
     private func endDrag() {
-        defer { resetDrag() }
+        var snapNotification: (window: AXWindow, action: SnapAction, screen: NSScreen)?
+        defer {
+            resetDrag()
+            if let notification = snapNotification {
+                DispatchQueue.main.async {
+                    SnapEvents.didSnap(window: notification.window, action: notification.action, screen: notification.screen)
+                }
+            }
+        }
         footprint.hide()
         guard !cancelled, isWindowMoving, let zone = currentZone,
               let draggedWindow, let frame = draggedWindow.frame else { return }
@@ -181,7 +189,7 @@ final class SnapManager {
         // a size it was never snapped from.
         if let readBack = draggedWindow.frame, SnapGeometry.isClose(readBack, target, tolerance: 2) {
             snappedInfo[draggedWindow] = (target: target, preSnapSize: frame.size)
-            SnapEvents.didSnap(window: draggedWindow, action: zone.action, screen: zone.screen)
+            snapNotification = (draggedWindow, zone.action, zone.screen)
         }
     }
 
