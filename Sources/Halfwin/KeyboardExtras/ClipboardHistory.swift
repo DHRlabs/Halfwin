@@ -57,17 +57,38 @@ final class ClipboardHistory {
     private var picker: ClipboardHistoryPicker?
     private var onChoose: ((ClipboardEntry) -> Void)?
     private var onCancel: (() -> Void)?
+    private var passwordManagerActiveSinceLastPoll = false
+    private var activationObserver: NSObjectProtocol?
 
     func start() {
+        if activationObserver == nil {
+            activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
+                forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+            ) { [weak self] notification in
+                guard let application = notification.userInfo?["NSWorkspaceApplicationKey"] as? NSRunningApplication,
+                      Self.passwordManagerBundleIdentifiers.contains(application.bundleIdentifier ?? "") else { return }
+                self?.passwordManagerActiveSinceLastPoll = true
+            }
+        }
         capture(from: .general)
     }
 
     func stop() {
+        if let activationObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
+            self.activationObserver = nil
+        }
+        passwordManagerActiveSinceLastPoll = false
         cancelPicker(runCancelAction: false)
         entries.removeAll(keepingCapacity: false)
         selectedIndex = 0
         picker?.onChoose = nil
         picker?.update(entries: [], selectedIndex: 0)
+    }
+
+    func consumePasswordManagerActivation() -> Bool {
+        defer { passwordManagerActiveSinceLastPoll = false }
+        return passwordManagerActiveSinceLastPoll
     }
 
     func capture(from pasteboard: NSPasteboard) {

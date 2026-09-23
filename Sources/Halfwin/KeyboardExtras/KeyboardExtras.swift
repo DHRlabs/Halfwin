@@ -76,6 +76,9 @@ final class KeyboardExtras {
     }
 
     init() {
+#if DEBUG
+        Self.selfCheck()
+#endif
         clipboardSwitch.onChange = { [weak self] enabled in
             self?.clipboardEnabled = enabled
             self?.refreshPermission()
@@ -285,6 +288,8 @@ final class KeyboardExtras {
                 let point = NSEvent.mouseLocation
                 DispatchQueue.main.async { [weak self] in
                     guard let self, self.lastWindowEnabled,
+                          NSWorkspace.shared.frontmostApplication?.processIdentifier
+                            != NSRunningApplication.current.processIdentifier,
                           let application = self.applicationClosingUnderPointer(at: point) else { return }
                     self.checkForLastWindow(of: application)
                 }
@@ -352,14 +357,18 @@ final class KeyboardExtras {
 
         if let press = pastePress, !press.pickerShown, keyCode != 9,
            ProcessInfo.processInfo.systemUptime - press.startedAt < 0.45 {
+            if pendingFinderPasteID == press.id {
+                resolvePendingFinderPaste(matched: cutState?.awaitingFileCopy == false)
+                repostKeyDown(event)
+                return nil
+            }
             let queuedTargets = queuedPasteTargets
             queuedPasteTargets.removeAll()
             pendingFinderPasteID = nil
             pastePress = nil
-            swallowedKeyUps.insert(keyCode)
             replayPaste(to: press.application, flags: .maskCommand) { [weak self] in
                 self?.replayQueuedPastes(queuedTargets, at: 0) { [weak self] in
-                    self?.postKeyCombo(keyCode, flags: flags)
+                    self?.repostKeyDown(event)
                 }
             }
             return nil
@@ -404,11 +413,10 @@ final class KeyboardExtras {
             return nil
         }
         if lastWindowEnabled, keyCode == 13, isPlainCommand(flags),
-           let application, shouldMonitor(application),
-           let recordedCount = windowCount(for: application), recordedCount > 0 {
+           let application, shouldMonitor(application) {
             DispatchQueue.main.async { [weak self] in
                 guard let self, self.isFrontmost(application), self.lastWindowEnabled else { return }
-                self.scheduleLastWindowCheck(of: application, recordedCount: recordedCount)
+                self.checkForLastWindow(of: application)
             }
             return Unmanaged.passUnretained(event)
         }
@@ -647,6 +655,7 @@ final class KeyboardExtras {
     private func checkPasteboard() {
         let pasteboard = NSPasteboard.general
         let changeCount = pasteboard.changeCount
+        let passwordManagerWasActive = clipboardHistory.consumePasswordManagerActivation()
         if let cutState,
            ProcessInfo.processInfo.systemUptime - cutState.startedAt >= 60 {
             self.cutState = nil
@@ -684,26 +693,24 @@ final class KeyboardExtras {
         }
         if suppressedHistoryChangeCount == changeCount {
             suppressedHistoryChangeCount = nil
-        } else if clipboardEnabled {
+        } else if clipboardEnabled, !passwordManagerWasActive {
             clipboardHistory.capture(from: pasteboard)
         }
     }
 
     private func checkForLastWindow(of application: NSRunningApplication) {
-        guard shouldMonitor(application), let recordedCount = windowCount(for: application), recordedCount > 0 else { return }
-        scheduleLastWindowCheck(of: application, recordedCount: recordedCount)
+        guard shouldMonitor(application) else { return }
+        scheduleLastWindowCheck(of: application)
     }
 
-    private func scheduleLastWindowCheck(of application: NSRunningApplication, recordedCount: Int) {
+    private func scheduleLastWindowCheck(of application: NSRunningApplication) {
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.4) { [weak self] in
-            guard let self, recordedCount > 0, !application.isTerminated,
-                  self.lastWindowEnabled else { return }
-            let countAfterFirstCheck = self.windowCount(for: application)
+            guard let self, !application.isTerminated, self.lastWindowEnabled,
+                  self.hasNoOpenWindows(of: application) else { return }
             DispatchQueue.main.asyncAfter(deadline: .now() + 0.6) { [weak self] in
-                guard let self, recordedCount > 0, !application.isTerminated,
+                guard let self, !application.isTerminated,
                       self.lastWindowEnabled,
-                      countAfterFirstCheck == 0,
-                      self.windowCount(for: application) == 0 else { return }
+                      self.hasNoOpenWindows(of: application) else { return }
                 application.terminate()
             }
         }
@@ -715,17 +722,59 @@ final class KeyboardExtras {
             && !Self.lastWindowExcludedBundleIdentifiers.contains(application.bundleIdentifier ?? "")
     }
 
-    private func windowCount(for application: NSRunningApplication) -> Int? {
-        guard let windows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] else {
-            return nil
+    private func hasNoOpenWindows(of application: NSRunningApplication) -> Bool {
+        let appElement = AXUIElementCreateApplication(application.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, 0.15)
+        guard let windows: [AXUIElement] = attribute(appElement, kAXWindowsAttribute as String) else {
+            return false
         }
-        return windows.reduce(into: 0) { count, window in
+        for window in windows {
+            AXUIElementSetMessagingTimeout(window, 0.15)
+            guard let windowRole = role(of: window) else { return false }
+            if windowRole == kAXWindowRole as String { return false }
+        }
+        guard let cgWindows = CGWindowListCopyWindowInfo(.optionAll, kCGNullWindowID) as? [[String: Any]] else {
+            return false
+        }
+        // Closed windows retained by an app can block quitting; this fail-safe false negative is acceptable.
+        return Self.qualifyingCGWindowCount(cgWindows, pid: application.processIdentifier) == 0
+    }
+
+    private static func qualifyingCGWindowCount(_ windows: [[String: Any]], pid: pid_t) -> Int {
+        windows.reduce(into: 0) { count, window in
             guard let ownerPID = window[kCGWindowOwnerPID as String] as? Int,
-                  ownerPID == Int(application.processIdentifier),
-                  let layer = window[kCGWindowLayer as String] as? Int,
-                  layer == 0 else { return }
+                  ownerPID == Int(pid),
+                  let layer = window[kCGWindowLayer as String] as? Int, layer == 0,
+                  let alpha = window[kCGWindowAlpha as String] as? Double, alpha > 0,
+                  let bounds = window[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary),
+                  frame.width >= 200, frame.height >= 200,
+                  !(frame.width == 500 && frame.height == 500) else { return }
             count += 1
         }
+    }
+
+    private static func selfCheck() {
+        let pid = pid_t(1234)
+        func window(width: CGFloat, height: CGFloat) -> [String: Any] {
+            [
+                kCGWindowOwnerPID as String: Int(pid),
+                kCGWindowLayer as String: 0,
+                kCGWindowAlpha as String: 1.0,
+                kCGWindowBounds as String: CGRect(x: 0, y: 0, width: width, height: height).dictionaryRepresentation
+            ]
+        }
+        let stubs = [
+            window(width: 3440, height: 30),
+            window(width: 1710, height: 34),
+            window(width: 500, height: 500),
+            window(width: 64, height: 64),
+            window(width: 1, height: 1)
+        ]
+        let realWindow = window(width: 800, height: 600)
+        assert(qualifyingCGWindowCount(stubs, pid: pid) == 0)
+        assert(qualifyingCGWindowCount([realWindow], pid: pid) == 1)
+        assert(qualifyingCGWindowCount(stubs + [realWindow], pid: pid) == 1)
     }
 
     private func applicationClosingUnderPointer(at point: NSPoint) -> NSRunningApplication? {
@@ -865,9 +914,16 @@ final class KeyboardExtras {
 
     private func replayKeyCombo(to application: NSRunningApplication?, keyCode: CGKeyCode, flags: CGEventFlags,
                                 completion: (() -> Void)? = nil) {
-        guard let application, isFrontmost(application) else { return }
-        postKeyCombo(keyCode, flags: flags)
+        if let application, isFrontmost(application) {
+            postKeyCombo(keyCode, flags: flags)
+        }
         completion?()
+    }
+
+    private func repostKeyDown(_ event: CGEvent) {
+        guard let replayedEvent = event.copy() else { return }
+        replayedEvent.setIntegerValueField(.eventSourceUserData, value: Self.syntheticEventMarker)
+        replayedEvent.post(tap: .cghidEventTap)
     }
 
     private func postKeyCombo(_ keyCode: CGKeyCode, flags: CGEventFlags) {
