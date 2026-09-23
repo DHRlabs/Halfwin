@@ -5,7 +5,7 @@ import CoreGraphics
 /// Adds the small system-wide window actions that do not belong to drag snapping.
 final class WindowExtrasManager {
     private static let eventMask: CGEventMask = [
-        CGEventType.leftMouseDown, .leftMouseUp, .keyDown
+        CGEventType.leftMouseDown, .leftMouseUp, .keyDown, .keyUp
     ].reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
 
     private var greenButtonEnabled = false
@@ -16,8 +16,11 @@ final class WindowExtrasManager {
     private var runLoopSource: CFRunLoopSource?
     private var permissionTimer: Timer?
     private var activationObserver: NSObjectProtocol?
-    private var swallowNextMouseUp = false
+    private var swallowedMouseDownEventNumber: Int64?
+    private var swallowedCommandArrowKeyCodes = Set<Int64>()
     private var hiddenApplications: [NSRunningApplication]?
+    private var applicationToReactivate: NSRunningApplication?
+    private var ignoreActivationsUntil: TimeInterval = 0
     private let frameMemory = WindowFrameMemory()
 
     init() {
@@ -58,18 +61,21 @@ final class WindowExtrasManager {
             stopTap()
             return
         }
-        guard Permissions.accessibilityGranted else {
+        if Permissions.accessibilityGranted {
+            startTap()
+        } else {
             stopTap()
+        }
+        if eventTap == nil {
             if permissionTimer == nil {
                 permissionTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
                     self?.refreshPermission()
                 }
             }
-            return
+        } else {
+            permissionTimer?.invalidate()
+            permissionTimer = nil
         }
-        permissionTimer?.invalidate()
-        permissionTimer = nil
-        startTap()
     }
 
     func stop() {
@@ -86,6 +92,8 @@ final class WindowExtrasManager {
 
     fileprivate func handleTap(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            swallowedMouseDownEventNumber = nil
+            swallowedCommandArrowKeyCodes.removeAll()
             if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
             return Unmanaged.passUnretained(event)
         }
@@ -98,58 +106,53 @@ final class WindowExtrasManager {
         case .leftMouseDown:
             let point = event.location.axFlipped
             if showDesktopEnabled, isDesktopCorner(point) {
-                toggleDesktop()
-                swallowNextMouseUp = true
+                swallowMouseDown(event)
+                DispatchQueue.main.async { [weak self] in self?.toggleDesktop() }
                 return nil
             }
-            guard greenButtonEnabled || titleBarDoubleClickEnabled,
+            let clickCount = event.getIntegerValueField(.mouseEventClickState)
+            let candidates = windowClickCandidates(at: event.location, clickCount: clickCount)
+            let greenButtonCandidate = candidates.greenButton
+            let titleBarCandidate = candidates.titleBar
+            guard greenButtonCandidate || titleBarCandidate,
                   let hit = AXWindow.hitTest(at: point) else { return Unmanaged.passUnretained(event) }
-            if greenButtonEnabled, !event.flags.contains(.maskAlternate),
-               ["AXFullScreenButton", "AXZoomButton"].contains(AXWindow.subrole(of: hit.element) ?? ""),
-               let current = hit.window.frame, toggleToVisibleFrame(hit.window, current: current) {
-                swallowNextMouseUp = true
+            if greenButtonCandidate, !event.flags.contains(.maskAlternate),
+               isEnabledGreenButton(hit.element, window: hit.window) {
+                swallowMouseDown(event)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, let current = hit.window.frame else { return }
+                    _ = self.toggleToVisibleFrame(hit.window, current: current)
+                }
                 return nil
             }
-            if titleBarDoubleClickEnabled,
-               event.getIntegerValueField(.mouseEventClickState) == 2,
-               let current = hit.window.frame,
-               isTitleBarHit(hit.element, windowFrame: current, at: point),
-               toggleToVisibleFrame(hit.window, current: current) {
-                swallowNextMouseUp = true
+            if titleBarCandidate, isTitleBarHit(hit.element, window: hit.window, at: point) {
+                swallowMouseDown(event)
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, let current = hit.window.frame else { return }
+                    _ = self.toggleToVisibleFrame(hit.window, current: current)
+                }
                 return nil
             }
             return Unmanaged.passUnretained(event)
         case .leftMouseUp:
-            guard swallowNextMouseUp else { return Unmanaged.passUnretained(event) }
-            swallowNextMouseUp = false
-            return nil
+            guard let swallowed = swallowedMouseDownEventNumber else { return Unmanaged.passUnretained(event) }
+            swallowedMouseDownEventNumber = nil
+            return swallowed == event.getIntegerValueField(.mouseEventNumber) ? nil : Unmanaged.passUnretained(event)
         case .keyDown:
-            guard commandArrowEnabled, isExactCommand(event.flags),
-                  let window = AXWindow.focusedWindow(), let frame = window.frame else {
-                return Unmanaged.passUnretained(event)
-            }
+            guard commandArrowEnabled, isExactCommand(event.flags) else { return Unmanaged.passUnretained(event) }
             let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
-            let action: SnapAction
-            let rememberFrame: Bool
-            switch keyCode {
-            case 123: action = .leftHalf; rememberFrame = true
-            case 124: action = .rightHalf; rememberFrame = true
-            case 126: action = .maximize; rememberFrame = true
-            case 125:
-                if frameMemory.restore(window, current: frame) { return nil }
-                action = .center
-                rememberFrame = false
-            default:
+            guard [Int64(123), 124, 125, 126].contains(keyCode),
+                  NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
                 return Unmanaged.passUnretained(event)
             }
-            guard let target = targetFrame(action, for: window, current: frame) else {
-                return Unmanaged.passUnretained(event)
+            swallowedCommandArrowKeyCodes.insert(keyCode)
+            if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+                DispatchQueue.main.async { [weak self] in self?.applyCommandArrow(keyCode) }
             }
-            if rememberFrame {
-                frameMemory.set(window, current: frame, to: target)
-            } else {
-                window.setFrame(target)
-            }
+            return nil
+        case .keyUp:
+            let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+            guard swallowedCommandArrowKeyCodes.remove(keyCode) != nil else { return Unmanaged.passUnretained(event) }
             return nil
         default:
             return Unmanaged.passUnretained(event)
@@ -180,20 +183,97 @@ final class WindowExtrasManager {
         if let runLoopSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), runLoopSource, .commonModes) }
         eventTap = nil
         runLoopSource = nil
-        swallowNextMouseUp = false
+        swallowedMouseDownEventNumber = nil
+        swallowedCommandArrowKeyCodes.removeAll()
     }
 
     private func isExactCommand(_ flags: CGEventFlags) -> Bool {
-        let modifiers: CGEventFlags = [
-            .maskAlphaShift, .maskShift, .maskControl, .maskAlternate, .maskCommand, .maskHelp, .maskSecondaryFn
-        ]
-        return flags.intersection(modifiers) == .maskCommand
+        let commandModifiers: CGEventFlags = [.maskCommand, .maskShift, .maskControl, .maskAlternate]
+        return flags.intersection(commandModifiers) == .maskCommand
+    }
+
+    private func windowClickCandidates(at quartzPoint: CGPoint, clickCount: Int64) -> (greenButton: Bool, titleBar: Bool) {
+        guard greenButtonEnabled || (titleBarDoubleClickEnabled && clickCount == 2),
+              let windows = CGWindowListCopyWindowInfo(.optionOnScreenOnly, kCGNullWindowID) as? [[String: Any]] else {
+            return (false, false)
+        }
+        var candidates = (greenButton: false, titleBar: false)
+        for window in windows {
+            guard window[kCGWindowLayer as String] as? Int == 0,
+                  let bounds = window[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary),
+                  frame.contains(quartzPoint), quartzPoint.y <= frame.minY + 40 else { continue }
+            candidates.greenButton = candidates.greenButton ||
+                (greenButtonEnabled && quartzPoint.x <= frame.minX + 80)
+            candidates.titleBar = candidates.titleBar || (titleBarDoubleClickEnabled && clickCount == 2)
+            if candidates.greenButton && candidates.titleBar { break }
+        }
+        return candidates
+    }
+
+    private func isEnabledGreenButton(_ element: AXUIElement, window: AXWindow) -> Bool {
+        let enabled: Bool? = axAttribute(kAXEnabledAttribute, of: element)
+        let fullScreen: Bool? = axAttribute("AXFullScreen", of: window.element)
+        guard ["AXFullScreenButton", "AXZoomButton"].contains(AXWindow.subrole(of: element) ?? ""),
+              enabled != false, fullScreen != true else { return false }
+        return true
+    }
+
+    private func isTitleBarHit(_ element: AXUIElement, window: AXWindow, at point: CGPoint) -> Bool {
+        guard let role = AXWindow.role(of: element), role == kAXWindowRole || role == "AXToolbar" else { return false }
+        let buttonBottoms = [kAXCloseButtonAttribute, kAXZoomButtonAttribute].compactMap { name -> CGFloat? in
+            guard let button: AXUIElement = axAttribute(name, of: window.element),
+                  let frame = AXWindow(element: button).frame else { return nil }
+            return frame.minY
+        }
+        guard let buttonBottom = buttonBottoms.max() else { return false }
+        return point.y >= buttonBottom - 4
+    }
+
+    private func axAttribute<T>(_ name: String, of element: AXUIElement) -> T? {
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
+        return value as? T
+    }
+
+    private func swallowMouseDown(_ event: CGEvent) {
+        swallowedMouseDownEventNumber = event.getIntegerValueField(.mouseEventNumber)
+    }
+
+    private func applyCommandArrow(_ keyCode: Int64) {
+        guard let window = AXWindow.focusedWindow(), let frame = window.frame else { return }
+        frameMemory.pruneUnreadableFrames()
+        let action: SnapAction
+        let rememberFrame: Bool
+        switch keyCode {
+        case 123: action = .leftHalf; rememberFrame = true
+        case 124: action = .rightHalf; rememberFrame = true
+        case 126: action = .maximize; rememberFrame = true
+        case 125:
+            if frameMemory.restore(window, current: frame) { return }
+            action = .center
+            rememberFrame = false
+        default:
+            return
+        }
+        guard let target = targetFrame(action, for: window, current: frame) else { return }
+        if rememberFrame {
+            frameMemory.set(window, current: frame, to: target)
+        } else {
+            window.setFrame(target)
+        }
     }
 
     private func isDesktopCorner(_ point: CGPoint) -> Bool {
-        NSScreen.screens.contains { screen in
-            screen.frame.maxX - point.x >= 0 && screen.frame.maxX - point.x <= 3 &&
-                point.y - screen.frame.minY >= 0 && point.y - screen.frame.minY <= 3
+        let screens = NSScreen.screens
+        return screens.contains { screen in
+            let frame = screen.frame
+            guard frame.maxX - point.x >= 0, frame.maxX - point.x <= 3,
+                  point.y - frame.minY >= 0, point.y - frame.minY <= 3 else { return false }
+            return !screens.contains { other in
+                other !== screen && (other.frame.contains(CGPoint(x: frame.maxX + 1, y: point.y)) ||
+                    other.frame.contains(CGPoint(x: point.x, y: frame.minY - 1)))
+            }
         }
     }
 
@@ -201,47 +281,36 @@ final class WindowExtrasManager {
         if let applications = hiddenApplications {
             hiddenApplications = nil
             for application in applications where !application.isTerminated { application.unhide() }
+            _ = applicationToReactivate?.activate(options: [])
+            applicationToReactivate = nil
             return
         }
         let applications = NSWorkspace.shared.runningApplications.filter {
             $0.activationPolicy == .regular && !$0.isHidden && !$0.isTerminated
         }
         hiddenApplications = applications
+        applicationToReactivate = NSWorkspace.shared.frontmostApplication
+        ignoreActivationsUntil = ProcessInfo.processInfo.systemUptime + 1
         for application in applications { application.hide() }
+        ignoreActivationsUntil = ProcessInfo.processInfo.systemUptime + 1
     }
 
     private func restoreHiddenApplications() {
         guard let applications = hiddenApplications else { return }
         hiddenApplications = nil
+        applicationToReactivate = nil
         for application in applications where !application.isTerminated { application.unhide() }
     }
 
     private func applicationDidActivate(_ notification: Notification) {
-        guard hiddenApplications != nil else { return }
-        guard let application = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else {
-            hiddenApplications = nil
-            return
-        }
-        // Hiding the frontmost app can activate another app in the saved set.
-        // Check after the hide batch so only an app the user brought back clears it.
-        DispatchQueue.main.async { [weak self, weak application] in
-            guard let self, let applications = self.hiddenApplications,
-                  let application else { return }
-            if !applications.contains(where: { $0.processIdentifier == application.processIdentifier }) || !application.isHidden {
-                self.hiddenApplications = nil
-            }
-        }
-    }
-
-    private func isTitleBarHit(_ element: AXUIElement, windowFrame: CGRect, at point: CGPoint) -> Bool {
-        guard windowFrame.contains(point), windowFrame.maxY - point.y <= 28,
-              let role = AXWindow.role(of: element) else { return false }
-        guard !["AXButton", "AXTextField", "AXToolbar"].contains(role) else { return false }
-        return role == "AXWindow" || role == "AXTitleBar" || role == "AXTitle" ||
-            AXWindow.subrole(of: element) == "AXTitle"
+        guard hiddenApplications != nil,
+              ProcessInfo.processInfo.systemUptime >= ignoreActivationsUntil else { return }
+        hiddenApplications = nil
+        applicationToReactivate = nil
     }
 
     private func toggleToVisibleFrame(_ window: AXWindow, current: CGRect) -> Bool {
+        frameMemory.pruneUnreadableFrames()
         guard let target = targetFrame(.maximize, for: window, current: current) else { return false }
         frameMemory.toggle(window, current: current, to: target)
         return true
@@ -280,6 +349,11 @@ private final class WindowFrameMemory {
     }
 
     func removeAll() { originalFrames.removeAll() }
+
+    func pruneUnreadableFrames() {
+        let unreadable = originalFrames.keys.filter { $0.frame == nil }
+        for window in unreadable { originalFrames.removeValue(forKey: window) }
+    }
 
     private func isClose(_ a: CGRect, _ b: CGRect) -> Bool {
         abs(a.minX - b.minX) <= 2 && abs(a.minY - b.minY) <= 2 &&
