@@ -238,14 +238,20 @@ private final class MouseEventTap {
 
     private func reverseScrollDeltas(_ event: CGEvent, axis1: Bool, axis2: Bool) {
         if axis1 {
-            event.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: -event.getIntegerValueField(.scrollWheelEventDeltaAxis1))
-            event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: -event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1))
-            event.setIntegerValueField(.scrollWheelEventPointDeltaAxis1, value: -event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1))
+            let line = event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
+            let fixedPoint = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
+            let point = event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1)
+            event.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: -line)
+            event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: -fixedPoint)
+            event.setIntegerValueField(.scrollWheelEventPointDeltaAxis1, value: -point)
         }
         if axis2 {
-            event.setIntegerValueField(.scrollWheelEventDeltaAxis2, value: -event.getIntegerValueField(.scrollWheelEventDeltaAxis2))
-            event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2, value: -event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2))
-            event.setIntegerValueField(.scrollWheelEventPointDeltaAxis2, value: -event.getIntegerValueField(.scrollWheelEventPointDeltaAxis2))
+            let line = event.getIntegerValueField(.scrollWheelEventDeltaAxis2)
+            let fixedPoint = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2)
+            let point = event.getIntegerValueField(.scrollWheelEventPointDeltaAxis2)
+            event.setIntegerValueField(.scrollWheelEventDeltaAxis2, value: -line)
+            event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2, value: -fixedPoint)
+            event.setIntegerValueField(.scrollWheelEventPointDeltaAxis2, value: -point)
         }
     }
 
