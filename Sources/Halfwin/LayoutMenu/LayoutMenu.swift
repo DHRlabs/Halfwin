@@ -281,7 +281,10 @@ final class LayoutMenuManager {
         guard let action = action(for: zone),
               let target = targetFrame(for: zone, window: window, currentFrame: currentFrame,
                                        restoreFrame: startFrame, screen: screen) else { return nil }
-        return apply(target, to: window, currentFrame: currentFrame, preMove: startFrame,
+        let preMove = lastMoved[window].flatMap {
+            SnapGeometry.isClose(startFrame, $0.target) ? $0.preMove : nil
+        } ?? startFrame
+        return apply(target, to: window, currentFrame: currentFrame, preMove: preMove,
                      action: action, screen: screen)
     }
 
