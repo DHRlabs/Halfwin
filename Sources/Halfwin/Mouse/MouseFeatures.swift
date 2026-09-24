@@ -217,9 +217,16 @@ private final class MouseEventTap {
             return Unmanaged.passUnretained(event)
         }
 
-        if type == .scrollWheel, scrollEnabled,
-           NSEvent(cgEvent: event)?.isDirectionInvertedFromDevice == true {
-            reverseScrollDeltas(event)
+        if type == .scrollWheel, scrollEnabled, let scrollEvent = NSEvent(cgEvent: event) {
+            let isInverted = scrollEvent.isDirectionInvertedFromDevice
+            let isUnshiftedMouseWheel = event.getIntegerValueField(.scrollWheelEventIsContinuous) == 0
+                && !event.flags.contains(.maskShift)
+            // Unshifted mouse wheels use natural-scroll inversion vertically and its opposite horizontally.
+            let reverseAxis1 = isInverted
+            let reverseAxis2 = isUnshiftedMouseWheel ? !isInverted : isInverted
+            if reverseAxis1 || reverseAxis2 {
+                reverseScrollDeltas(event, axis1: reverseAxis1, axis2: reverseAxis2)
+            }
             return Unmanaged.passUnretained(event)
         }
 
@@ -229,20 +236,17 @@ private final class MouseEventTap {
         return Unmanaged.passUnretained(event)
     }
 
-    private func reverseScrollDeltas(_ event: CGEvent) {
-        let line1 = event.getIntegerValueField(.scrollWheelEventDeltaAxis1)
-        let line2 = event.getIntegerValueField(.scrollWheelEventDeltaAxis2)
-        let fixed1 = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1)
-        let fixed2 = event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2)
-        let point1 = event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1)
-        let point2 = event.getIntegerValueField(.scrollWheelEventPointDeltaAxis2)
-
-        event.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: -line1)
-        event.setIntegerValueField(.scrollWheelEventDeltaAxis2, value: -line2)
-        event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: -fixed1)
-        event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2, value: -fixed2)
-        event.setIntegerValueField(.scrollWheelEventPointDeltaAxis1, value: -point1)
-        event.setIntegerValueField(.scrollWheelEventPointDeltaAxis2, value: -point2)
+    private func reverseScrollDeltas(_ event: CGEvent, axis1: Bool, axis2: Bool) {
+        if axis1 {
+            event.setIntegerValueField(.scrollWheelEventDeltaAxis1, value: -event.getIntegerValueField(.scrollWheelEventDeltaAxis1))
+            event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1, value: -event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis1))
+            event.setIntegerValueField(.scrollWheelEventPointDeltaAxis1, value: -event.getIntegerValueField(.scrollWheelEventPointDeltaAxis1))
+        }
+        if axis2 {
+            event.setIntegerValueField(.scrollWheelEventDeltaAxis2, value: -event.getIntegerValueField(.scrollWheelEventDeltaAxis2))
+            event.setDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2, value: -event.getDoubleValueField(.scrollWheelEventFixedPtDeltaAxis2))
+            event.setIntegerValueField(.scrollWheelEventPointDeltaAxis2, value: -event.getIntegerValueField(.scrollWheelEventPointDeltaAxis2))
+        }
     }
 
     private func handleSideButton(_ type: CGEventType, _ event: CGEvent) -> Unmanaged<CGEvent>? {
