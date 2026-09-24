@@ -129,6 +129,31 @@ struct AXWindow {
         }
     }
 
+    static func standardWindowsIfReadable(of app: NSRunningApplication) -> [AXWindow]? {
+        let appElement = AXUIElementCreateApplication(app.processIdentifier)
+        AXUIElementSetMessagingTimeout(appElement, 0.1)
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(appElement, kAXWindowsAttribute as CFString, &value) == .success,
+              let elements = value as? [AXUIElement] else { return nil }
+
+        var windows: [AXWindow] = []
+        for element in elements {
+            AXUIElementSetMessagingTimeout(element, 0.1)
+            var roleValue: AnyObject?
+            let roleError = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleValue)
+            if roleError == .noValue || roleError == .attributeUnsupported { continue }
+            guard roleError == .success, let role = roleValue as? String else { return nil }
+            guard role == kAXWindowRole else { continue }
+
+            var subroleValue: AnyObject?
+            let subroleError = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleValue)
+            if subroleError == .noValue || subroleError == .attributeUnsupported { continue }
+            guard subroleError == .success, let subrole = subroleValue as? String else { return nil }
+            if subrole == kAXStandardWindowSubrole { windows.append(AXWindow(element: element)) }
+        }
+        return windows
+    }
+
     func raise() {
         AXUIElementPerformAction(element, kAXRaiseAction as CFString)
     }
