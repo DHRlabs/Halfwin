@@ -89,6 +89,17 @@ struct AXWindow {
         return nil
     }
 
+    /// The Accessibility element at a Quartz top-left screen coordinate.
+    static func element(atQuartzPoint point: CGPoint) -> AXUIElement? {
+        let systemWide = AXUIElementCreateSystemWide()
+        AXUIElementSetMessagingTimeout(systemWide, 0.1)
+        var element: AXUIElement?
+        guard AXUIElementCopyElementAtPosition(systemWide, Float(point.x), Float(point.y), &element) == .success,
+              let element else { return nil }
+        AXUIElementSetMessagingTimeout(element, 0.1)
+        return element
+    }
+
     /// The frontmost app's focused window for system-wide keyboard actions
     /// and menu-driven layout picks.
     static func focusedWindow() -> AXWindow? {
@@ -122,9 +133,17 @@ struct AXWindow {
         AXUIElementPerformAction(element, kAXRaiseAction as CFString)
     }
 
+    @discardableResult
+    func setMinimized(_ minimized: Bool) -> Bool {
+        AXUIElementSetMessagingTimeout(element, 0.1)
+        return AXUIElementSetAttributeValue(
+            element, kAXMinimizedAttribute as CFString, minimized ? kCFBooleanTrue : kCFBooleanFalse
+        ) == .success
+    }
+
     func restoreAndRaise(in app: NSRunningApplication) {
         AXUIElementSetMessagingTimeout(element, 0.1)
-        let restored = !isMinimized || AXUIElementSetAttributeValue(element, kAXMinimizedAttribute as CFString, kCFBooleanFalse) == .success
+        let restored = !isMinimized || setMinimized(false)
         let raised = AXUIElementPerformAction(element, kAXRaiseAction as CFString) == .success
         let main = AXUIElementSetAttributeValue(element, kAXMainAttribute as CFString, kCFBooleanTrue) == .success
         let appElement = AXUIElementCreateApplication(app.processIdentifier)
