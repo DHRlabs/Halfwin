@@ -44,7 +44,9 @@ final class SnapManager {
         settings.$dragSnappingEnabled
             .dropFirst()
             .sink { [weak self] enabled in
-                MissionControlDrag.setDragSnappingEnabled(enabled)
+                if !enabled || Permissions.accessibilityGranted {
+                    MissionControlDrag.setDragSnappingEnabled(enabled)
+                }
                 // @Published fires before the stored value changes, so hop
                 // to the next run-loop turn before reacting to it.
                 DispatchQueue.main.async { self?.refreshPermission() }
@@ -58,7 +60,9 @@ final class SnapManager {
     /// Starts (or stops) the monitor to match Accessibility permission and
     /// the Settings toggle. Safe to call repeatedly.
     func refreshPermission() {
-        if settings.dragSnappingEnabled { MissionControlDrag.setDragSnappingEnabled(true) }
+        if settings.dragSnappingEnabled && Permissions.accessibilityGranted {
+            MissionControlDrag.setDragSnappingEnabled(true)
+        }
         if Permissions.accessibilityGranted {
             permissionTimer?.invalidate()
             permissionTimer = nil
@@ -253,7 +257,10 @@ final class SnapManager {
         footprint.hide()
         guard !cancelled, isWindowMoving, let draggedWindow, let size = lockedSize else { return }
         if let currentDropZone {
-            if let target = layoutMenu.applyDrop(currentDropZone) {
+            let target = layoutMenu.applyDrop(currentDropZone)
+            if case .preset(.restore) = currentDropZone {
+                snappedInfo.removeValue(forKey: draggedWindow)
+            } else if let target {
                 snappedInfo[draggedWindow] = (target: target, preSnapSize: size)
             }
             return
