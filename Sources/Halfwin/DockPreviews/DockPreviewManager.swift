@@ -39,10 +39,13 @@ final class DockPreviewManager {
         let mouseDownPoint: CGPoint
         let mouseDownTimestamp: TimeInterval
         let mouseDownGeneration: Int
-        let windowsToMinimize: [AXWindow]
-        let focusedWindow: AXWindow?
-        let previousMinimizedSet: MinimizedWindowSet?
-        let windowsToRestore: MinimizedWindowSet?
+        let frontmostPID: pid_t?
+        let ownsTopmostWindow: Bool
+        var windowsToMinimize: [AXWindow] = []
+        var focusedWindow: AXWindow?
+        var previousMinimizedSet: MinimizedWindowSet?
+        var windowsToRestore: MinimizedWindowSet?
+        var thumbnailTask: Task<Void, Never>?
     }
 
     private struct CachedShareableContent {
@@ -530,34 +533,17 @@ final class DockPreviewManager {
         let frontmostPID = frontmost?.processIdentifier
         guard frontmostPID == processID || minimizedWindowsByApp[processID] != nil else { return }
         guard let itemFrame = AXWindow.frame(of: item) else { return }
-        let appWindows = AXWindow.standardWindows(of: app)
-        let onScreenRecords = windowRecords(options: .optionOnScreenOnly)
-        let appRecords = onScreenRecords.filter { $0.processID == processID }
-        let matchedWindows = visibleStandardWindows(of: appWindows, among: appRecords)
-        let visibleWindows = matchedWindows.map(\.window)
-        let previousSet = prunedMinimizedSet(for: processID)
-        let restoreSet = visibleWindows.isEmpty ? previousSet : nil
-        guard restoreSet != nil
-                || (onScreenRecords.first?.processID == processID
-                    && !visibleWindows.isEmpty) else { return }
-
-        let focusedWindow = AXWindow.focusedWindow(of: app).flatMap { visibleWindows.contains($0) ? $0 : nil }
-        observeWindowMinimization(in: app, windows: appWindows)
+        let ownsTopmostWindow = windowRecords(options: .optionOnScreenOnly).first?.processID == processID
         pendingDockClick = DockClick(
             itemFrame: itemFrame,
             app: app,
             mouseDownPoint: point,
             mouseDownTimestamp: timestamp,
             mouseDownGeneration: clickGeneration,
-            windowsToMinimize: visibleWindows,
-            focusedWindow: focusedWindow,
-            previousMinimizedSet: previousSet,
-            windowsToRestore: restoreSet
+            frontmostPID: frontmostPID,
+            ownsTopmostWindow: ownsTopmostWindow
         )
         dockClickInFlight = true
-        if restoreSet == nil {
-            warmThumbnails(matchedWindows.map(\.record.id))
-        }
     }
 
     private func handleGlobalMouseUp(
@@ -566,19 +552,41 @@ final class DockPreviewManager {
         clickCount: Int,
         modifierFlags: NSEvent.ModifierFlags
     ) {
-        guard let click = pendingDockClick else { return }
+        guard let pendingClick = pendingDockClick else { return }
         pendingDockClick = nil
-        let pressDuration = timestamp - click.mouseDownTimestamp
+        let pressDuration = timestamp - pendingClick.mouseDownTimestamp
         guard ProcessInfo.processInfo.systemUptime - timestamp <= 0.05,
               clickToMinimizeEnabled, Permissions.accessibilityGranted,
               clickCount == 1, !hasUnsupportedModifiers(modifierFlags),
               pressDuration >= 0, pressDuration < 0.4,
               let point,
-              hypot(point.x - click.mouseDownPoint.x, point.y - click.mouseDownPoint.y) <= 4,
-              click.itemFrame.contains(point.axFlipped),
-              click.mouseDownGeneration == mouseDownGeneration else {
+              hypot(point.x - pendingClick.mouseDownPoint.x, point.y - pendingClick.mouseDownPoint.y) <= 4,
+              pendingClick.itemFrame.contains(point.axFlipped),
+              pendingClick.mouseDownGeneration == mouseDownGeneration else {
             dockClickInFlight = false
             return
+        }
+        var click = pendingClick
+        let processID = click.app.processIdentifier
+        let appWindows = AXWindow.standardWindows(of: click.app)
+        let appRecords = windowRecords(options: .optionOnScreenOnly).filter { $0.processID == processID }
+        let matchedWindows = visibleStandardWindows(of: appWindows, among: appRecords)
+        let visibleWindows = matchedWindows.map(\.window)
+        let previousSet = prunedMinimizedSet(for: processID, existingWindows: appWindows)
+        let restoreSet = visibleWindows.isEmpty ? previousSet : nil
+        guard click.frontmostPID == processID || previousSet != nil,
+              restoreSet != nil || (click.ownsTopmostWindow && !visibleWindows.isEmpty) else {
+            dockClickInFlight = false
+            return
+        }
+        click.windowsToMinimize = visibleWindows
+        click.focusedWindow = AXWindow.focusedWindow(of: click.app)
+            .flatMap { visibleWindows.contains($0) ? $0 : nil }
+        click.previousMinimizedSet = previousSet
+        click.windowsToRestore = restoreSet
+        observeWindowMinimization(in: click.app, windows: appWindows)
+        if restoreSet == nil {
+            click.thumbnailTask = warmThumbnails(matchedWindows.map(\.record.id))
         }
         DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval) { [weak self] in
             guard let self, self.mouseDownGeneration == click.mouseDownGeneration else { return }
@@ -591,12 +599,14 @@ final class DockPreviewManager {
     }
 
     private func performDockIconClick(_ click: DockClick) {
-        defer { dockClickInFlight = false }
         guard clickToMinimizeEnabled, Permissions.accessibilityGranted,
               !click.app.isTerminated,
               NSWorkspace.shared.runningApplications.contains(where: {
                   $0.processIdentifier == click.app.processIdentifier
-              }) else { return }
+              }) else {
+            dockClickInFlight = false
+            return
+        }
         hidePreview()
 
         if let restoreSet = click.windowsToRestore {
@@ -604,6 +614,7 @@ final class DockPreviewManager {
             let restoreWindows = restoreSet.windows.filter { existing.contains($0) }
             guard !restoreWindows.isEmpty else {
                 minimizedWindowsByApp.removeValue(forKey: click.app.processIdentifier)
+                dockClickInFlight = false
                 return
             }
             for window in restoreWindows { window.setMinimized(false) }
@@ -611,26 +622,41 @@ final class DockPreviewManager {
                 ?? restoreWindows.first
             focused?.restoreAndRaise(in: click.app)
             minimizedWindowsByApp.removeValue(forKey: click.app.processIdentifier)
+            dockClickInFlight = false
             return
         }
 
-        guard !click.windowsToMinimize.isEmpty else { return }
-        for window in click.windowsToMinimize { window.setMinimized(true) }
-        let remembered = click.previousMinimizedSet?.windows ?? []
-        let combined = remembered + click.windowsToMinimize.filter { !remembered.contains($0) }
-        guard !combined.isEmpty else { return }
-        let focused = click.focusedWindow ?? click.previousMinimizedSet?.focusedWindow
-        minimizedWindowsByApp[click.app.processIdentifier] = MinimizedWindowSet(
-            windows: combined,
-            focusedWindow: focused
-        )
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-            guard let self,
-                  self.mouseDownGeneration == click.mouseDownGeneration,
-                  self.clickToMinimizeEnabled,
-                  let saved = self.minimizedWindowsByApp[click.app.processIdentifier] else { return }
-            for window in saved.windows where !window.isMinimized {
-                window.setMinimized(true)
+        guard !click.windowsToMinimize.isEmpty else {
+            dockClickInFlight = false
+            return
+        }
+        Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer { self.dockClickInFlight = false }
+            await self.waitForThumbnailCapture(click.thumbnailTask)
+            guard self.mouseDownGeneration == click.mouseDownGeneration,
+                  self.clickToMinimizeEnabled, Permissions.accessibilityGranted,
+                  !click.app.isTerminated,
+                  NSWorkspace.shared.runningApplications.contains(where: {
+                      $0.processIdentifier == click.app.processIdentifier
+                  }) else { return }
+            for window in click.windowsToMinimize { window.setMinimized(true) }
+            let remembered = click.previousMinimizedSet?.windows ?? []
+            let combined = remembered + click.windowsToMinimize.filter { !remembered.contains($0) }
+            guard !combined.isEmpty else { return }
+            let focused = click.focusedWindow ?? click.previousMinimizedSet?.focusedWindow
+            self.minimizedWindowsByApp[click.app.processIdentifier] = MinimizedWindowSet(
+                windows: combined,
+                focusedWindow: focused
+            )
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                guard let self,
+                      self.mouseDownGeneration == click.mouseDownGeneration,
+                      self.clickToMinimizeEnabled,
+                      let saved = self.minimizedWindowsByApp[click.app.processIdentifier] else { return }
+                for window in saved.windows where !window.isMinimized {
+                    window.setMinimized(true)
+                }
             }
         }
     }
@@ -649,9 +675,9 @@ final class DockPreviewManager {
         }
     }
 
-    private func prunedMinimizedSet(for processID: pid_t) -> MinimizedWindowSet? {
+    private func prunedMinimizedSet(for processID: pid_t, existingWindows: [AXWindow]) -> MinimizedWindowSet? {
         guard var saved = minimizedWindowsByApp[processID] else { return nil }
-        saved.windows = saved.windows.filter(\.isMinimized)
+        saved.windows = saved.windows.filter { existingWindows.contains($0) }
         if let focusedWindow = saved.focusedWindow, !saved.windows.contains(focusedWindow) {
             saved.focusedWindow = nil
         }
@@ -803,13 +829,13 @@ final class DockPreviewManager {
         let windowIDs = windowRecords(processID: app.processIdentifier, options: .optionOnScreenOnly).map(\.id)
         guard !windowIDs.isEmpty else { return }
         pruneThumbnailCache()
-        warmThumbnails(windowIDs)
+        _ = warmThumbnails(windowIDs)
     }
 
-    private func warmThumbnails(_ windowIDs: [CGWindowID]) {
-        guard previewsEnabled, running, Permissions.screenRecordingGranted, !windowIDs.isEmpty else { return }
+    private func warmThumbnails(_ windowIDs: [CGWindowID]) -> Task<Void, Never>? {
+        guard previewsEnabled, running, Permissions.screenRecordingGranted, !windowIDs.isEmpty else { return nil }
         prefetchShareableContent()
-        _ = Task.detached(priority: .utility) { [weak self] in
+        return Task.detached(priority: .utility) { [weak self] in
             guard let self,
                   let content = await self.shareableContentForCapture(),
                   !Task.isCancelled else { return }
@@ -819,6 +845,23 @@ final class DockPreviewManager {
                 await self.setWarmedThumbnail(image, windowID: windowID)
             }
         }
+    }
+
+    private func waitForThumbnailCapture(_ task: Task<Void, Never>?) async {
+        guard let task else { return }
+        let finished = AsyncStream<Void> { continuation in
+            Task {
+                await task.value
+                continuation.yield(())
+                continuation.finish()
+            }
+            Task {
+                try? await Task.sleep(for: .milliseconds(300))
+                continuation.yield(())
+                continuation.finish()
+            }
+        }
+        for await _ in finished { break }
     }
 
     private func prefetchShareableContent() {
@@ -947,7 +990,7 @@ final class DockPreviewManager {
             let frame = bounds.flatMap { CGRect(dictionaryRepresentation: $0 as CFDictionary)?.axFlipped }
             let rawTitle = entry[kCGWindowName as String] as? String
             let title = rawTitle?.trimmingCharacters(in: .whitespacesAndNewlines)
-            let isOnScreen = (entry[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? true
+            let isOnScreen = (entry[kCGWindowIsOnscreen as String] as? NSNumber)?.boolValue ?? false
             return CGWindowRecord(
                 id: CGWindowID(number.uint32Value),
                 processID: processID,
