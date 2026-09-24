@@ -49,6 +49,29 @@ struct AXWindow {
         return CGRect(origin: point, size: dimensions).axFlipped
     }
 
+    static func frameWithError(of element: AXUIElement) -> (frame: CGRect?, error: AXError) {
+        var positionValue: AnyObject?
+        let positionError = AXUIElementCopyAttributeValue(element, kAXPositionAttribute as CFString, &positionValue)
+        guard positionError == .success, let positionValue,
+              CFGetTypeID(positionValue) == AXValueGetTypeID() else {
+            return (nil, positionError == .success ? .failure : positionError)
+        }
+        let position = positionValue as! AXValue
+        var sizeValue: AnyObject?
+        let sizeError = AXUIElementCopyAttributeValue(element, kAXSizeAttribute as CFString, &sizeValue)
+        guard sizeError == .success, let sizeValue,
+              CFGetTypeID(sizeValue) == AXValueGetTypeID() else {
+            return (nil, sizeError == .success ? .failure : sizeError)
+        }
+        let size = sizeValue as! AXValue
+        var point = CGPoint.zero
+        var dimensions = CGSize.zero
+        guard AXValueGetValue(position, .cgPoint, &point), AXValueGetValue(size, .cgSize, &dimensions) else {
+            return (nil, .failure)
+        }
+        return (CGRect(origin: point, size: dimensions).axFlipped, .success)
+    }
+
     /// Set size, then position, then size again: macOS clamps the size to
     /// whichever display the position lands on, so the final call wins.
     func setFrame(_ appKitFrame: CGRect) {

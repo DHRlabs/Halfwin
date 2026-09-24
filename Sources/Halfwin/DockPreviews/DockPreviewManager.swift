@@ -556,40 +556,39 @@ final class DockPreviewManager {
         guard let pendingClick = pendingDockClick else { return }
         pendingDockClick = nil
         let pressDuration = timestamp - pendingClick.mouseDownTimestamp
-        guard ProcessInfo.processInfo.systemUptime - timestamp <= 0.05,
-              clickToMinimizeEnabled, Permissions.accessibilityGranted,
+        guard clickToMinimizeEnabled, Permissions.accessibilityGranted,
               clickCount == 1, !hasUnsupportedModifiers(modifierFlags),
               pressDuration >= 0, pressDuration < 0.4,
               let point,
               hypot(point.x - pendingClick.mouseDownPoint.x, point.y - pendingClick.mouseDownPoint.y) <= 4,
               pendingClick.itemFrame.contains(point.axFlipped),
               pendingClick.mouseDownGeneration == mouseDownGeneration else {
-            dockClickInFlight = false
+            if pendingClick.mouseDownGeneration == mouseDownGeneration { dockClickInFlight = false }
             return
         }
         var click = pendingClick
         let processID = click.app.processIdentifier
         guard let appWindows = AXWindow.standardWindowsIfReadable(of: click.app),
               let onScreenRecords = windowRecordsIfReadable(options: .optionOnScreenOnly) else {
-            dockClickInFlight = false
+            if pendingClick.mouseDownGeneration == mouseDownGeneration { dockClickInFlight = false }
             return
         }
         let appRecords = onScreenRecords.filter { $0.processID == processID }
         guard let matchedWindows = visibleStandardWindows(of: appWindows, among: appRecords) else {
-            dockClickInFlight = false
+            if pendingClick.mouseDownGeneration == mouseDownGeneration { dockClickInFlight = false }
             return
         }
         let visibleWindows = matchedWindows.map(\.window)
         if visibleWindows.isEmpty {
             guard let restoreSet = prunedMinimizedSet(for: processID) else {
-                dockClickInFlight = false
+                if pendingClick.mouseDownGeneration == mouseDownGeneration { dockClickInFlight = false }
                 return
             }
             click.previousMinimizedSet = restoreSet
             click.windowsToRestore = restoreSet
         } else {
             guard click.frontmostPID == processID, click.ownsTopmostWindow else {
-                dockClickInFlight = false
+                if pendingClick.mouseDownGeneration == mouseDownGeneration { dockClickInFlight = false }
                 return
             }
             click.windowsToMinimize = visibleWindows
@@ -684,10 +683,13 @@ final class DockPreviewManager {
         var matched: [MatchedWindow] = []
         for window in windows {
             var value: AnyObject?
-            guard AXUIElementCopyAttributeValue(window.element, kAXMinimizedAttribute as CFString, &value) == .success,
-                  let minimized = value as? Bool else { return nil }
+            let minimizedError = AXUIElementCopyAttributeValue(window.element, kAXMinimizedAttribute as CFString, &value)
+            if minimizedError == .noValue || minimizedError == .attributeUnsupported { continue }
+            guard minimizedError == .success, let minimized = value as? Bool else { return nil }
             if minimized { continue }
-            guard let frame = window.frame else { return nil }
+            let (frame, frameError) = AXWindow.frameWithError(of: window.element)
+            if frameError == .noValue || frameError == .attributeUnsupported { continue }
+            guard frameError == .success, let frame else { return nil }
             guard let match = visibleFrames.first(where: { candidate in
                 !usedWindowIDs.contains(candidate.id)
                     && candidate.frame.map { SnapGeometry.isClose(frame, $0, tolerance: 4) } == true
@@ -947,6 +949,7 @@ final class DockPreviewManager {
 
     private func selectWindow(_ id: Int) {
         guard let app = activeApp, let window = windows[id] else { return }
+        mouseDownGeneration += 1
         if app.isHidden { app.unhide() }
         window.restoreAndRaise(in: app)
         hidePreview()

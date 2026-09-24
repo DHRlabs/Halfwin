@@ -120,10 +120,15 @@ enum DockPreference {
             }
         }
 
+        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock")
+            .first(where: { !$0.isTerminated }) else {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) {
+                restartDockIfNeeded()
+            }
+            return
+        }
         restartRequested = false
         restartScheduled = false
-        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock")
-            .first(where: { !$0.isTerminated }) else { return }
         lastRestartAt = ProcessInfo.processInfo.systemUptime
         kill(dock.processIdentifier, SIGTERM)
     }
