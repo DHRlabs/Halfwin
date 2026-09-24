@@ -9,20 +9,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private lazy var snapManager = SnapManager(settings: snapSettings, layoutMenu: layoutMenuManager)
     private let snapAssistManager = SnapAssistManager()
     private let snapGroupsManager = SnapGroupsManager()
-    private lazy var dockPreviewsManager = MainActor.assumeIsolated { DockPreviewManager() }
     private let snapAssistSwitch = FeatureSwitch(key: "snapAssist", title: "Snap Assist", defaultOn: true)
     private let snapGroupsSwitch = FeatureSwitch(key: "snapGroups", title: "Snap Groups", defaultOn: true)
     private let dragToTopLayoutsSwitch = FeatureSwitch(key: "drag-to-top-layouts", title: "Drag to top for layouts", defaultOn: true)
     private let dockPreviewsSwitch = FeatureSwitch(key: "dock-previews", title: "Dock previews", defaultOn: true)
     private let clickDockIconMinimizeSwitch = FeatureSwitch(key: "click-dock-icon-to-minimize", title: "Click Dock icon to minimize", defaultOn: true)
     private let layoutMenuSettings = LayoutMenuSettings.shared
+    private let dockPreviewSettings = DockPreviewSettings.shared
+    private lazy var dockPreviewsManager = MainActor.assumeIsolated { DockPreviewManager(settings: dockPreviewSettings) }
     private lazy var layoutMenuManager = LayoutMenuManager(settings: layoutMenuSettings)
     private lazy var windowExtrasManager = WindowExtrasManager()
     private let greenButtonSwitch = FeatureSwitch(key: "green-button-maximizes", title: "Green button maximizes", defaultOn: true)
     private let titleBarSwitch = FeatureSwitch(key: "title-bar-double-click-maximizes", title: "Double-click title bar maximizes", defaultOn: true)
     private let showDesktopSwitch = FeatureSwitch(key: "show-desktop-corner", title: "Show desktop corner", defaultOn: true)
     private let commandArrowSwitch = FeatureSwitch(key: "command-arrow-snapping", title: "Command-arrow snapping", defaultOn: true)
-    private lazy var settingsWindowController = SettingsWindowController(settings: snapSettings, layoutMenuSettings: layoutMenuSettings)
+    private lazy var settingsWindowController = SettingsWindowController(
+        settings: snapSettings,
+        layoutMenuSettings: layoutMenuSettings,
+        dockPreviewSettings: dockPreviewSettings
+    )
     private let menu = NSMenu()
     private var statusItem: NSStatusItem!
     private var statusLine: NSMenuItem!
@@ -35,6 +40,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var accessibilityItem: NSMenuItem!
     private var screenRecordingItem: NSMenuItem!
     private var activationRefreshObserver: NSObjectProtocol?
+    private var launchSessionObservers: [NSObjectProtocol] = []
+    private var sessionInactiveAtLaunch = false
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        let center = NSWorkspace.shared.notificationCenter
+        launchSessionObservers = [
+            center.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: nil) { [weak self] _ in
+                self?.sessionInactiveAtLaunch = true
+            },
+            center.addObserver(forName: NSWorkspace.sessionDidBecomeActiveNotification, object: nil, queue: nil) { [weak self] _ in
+                self?.sessionInactiveAtLaunch = false
+            }
+        ]
+    }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         #if DEBUG
@@ -43,6 +62,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             exit(0)
         }
         #endif
+
+        for observer in launchSessionObservers {
+            NSWorkspace.shared.notificationCenter.removeObserver(observer)
+        }
+        launchSessionObservers.removeAll()
+        MainActor.assumeIsolated { dockPreviewsManager.setSessionActive(!sessionInactiveAtLaunch) }
 
         activationRefreshObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main

@@ -4,6 +4,7 @@ import AppKit
 struct SettingsView: View {
     @ObservedObject var settings: SnapSettings
     @ObservedObject var layoutMenuSettings: LayoutMenuSettings
+    @ObservedObject var dockPreviewSettings: DockPreviewSettings
 
     var body: some View {
         Form {
@@ -26,9 +27,17 @@ struct SettingsView: View {
                     Text("Dwell delay: \(layoutMenuSettings.dwellDelay, specifier: "%.2f")s")
                 }
             }
+            Section("Dock previews") {
+                Stepper(value: $dockPreviewSettings.hoverDelay, in: 0.0...0.5, step: 0.05) {
+                    Text("Hover delay: \(dockPreviewSettings.hoverDelay, specifier: "%.2f")s")
+                }
+                Stepper(value: $dockPreviewSettings.previewSize, in: 1.0...3.0, step: 0.25) {
+                    Text("Preview size: \(Int(dockPreviewSettings.previewSize * 100))%")
+                }
+            }
         }
         .formStyle(.grouped)
-        .frame(width: 420, height: 520)
+        .frame(width: 420, height: 570)
     }
 
     private func binding(for position: SnapPosition) -> Binding<SnapAction> {
@@ -41,16 +50,20 @@ struct SettingsView: View {
 
 /// Hosts `SettingsView` in a plain `NSWindow`, opened from the menu (Cmd-,).
 final class SettingsWindowController: NSWindowController {
-    convenience init(settings: SnapSettings, layoutMenuSettings: LayoutMenuSettings) {
+    convenience init(settings: SnapSettings, layoutMenuSettings: LayoutMenuSettings, dockPreviewSettings: DockPreviewSettings) {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 520),
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 570),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
         )
         window.title = "Halfwin Settings"
         window.contentViewController = NSHostingController(
-            rootView: SettingsView(settings: settings, layoutMenuSettings: layoutMenuSettings)
+            rootView: SettingsView(
+                settings: settings,
+                layoutMenuSettings: layoutMenuSettings,
+                dockPreviewSettings: dockPreviewSettings
+            )
         )
         window.center()
         self.init(window: window)
