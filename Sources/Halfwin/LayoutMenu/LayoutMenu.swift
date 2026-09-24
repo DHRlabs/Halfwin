@@ -44,6 +44,8 @@ enum LayoutDropZone: Equatable {
 
 private final class LayoutMenuDropState: ObservableObject {
     @Published var highlightedZone: LayoutDropZone?
+    @Published var isDropMode = false
+    @Published var showCount = 0
 }
 
 /// Windows 11-style layout menu: hover the top-center of a display, pick a
@@ -69,7 +71,8 @@ final class LayoutMenuManager {
     /// The screen and window the panel is currently showing for.
     private var activeScreen: NSScreen?
     private var targetWindow: AXWindow?
-    private var isDropBarVisible = false
+    private(set) var isDropBarVisible = false
+    private var dropStartFrame: CGRect?
 
     /// Pre-move frame per window, the same shape as `SnapManager.snappedInfo`:
     /// remembers what to restore to, dropped once the window has moved away
@@ -220,17 +223,23 @@ final class LayoutMenuManager {
         targetWindow = AXWindow.focusedWindow()
         activeScreen = screen
         isDropBarVisible = false
+        dropStartFrame = nil
+        dropState.isDropMode = false
+        dropState.showCount += 1
         dropState.highlightedZone = nil
         panel.show(on: screen)
     }
 
-    func showDropBar(on screen: NSScreen, for window: AXWindow) {
+    func showDropBar(on screen: NSScreen, for window: AXWindow, startFrame: CGRect) {
         cancelDwell()
         guard Permissions.accessibilityGranted else { return }
         pruneUnreadableRestoreInfo()
         targetWindow = window
         activeScreen = screen
         isDropBarVisible = true
+        dropStartFrame = startFrame
+        dropState.isDropMode = true
+        dropState.showCount += 1
         dropState.highlightedZone = nil
         panel.show(on: screen, ignoringMouseEvents: true)
     }
@@ -254,31 +263,32 @@ final class LayoutMenuManager {
         isDropBarVisible && panel.frame.insetBy(dx: -60, dy: -60).contains(point)
     }
 
-    func dropPreviewFrame(for zone: LayoutDropZone) -> CGRect? {
+    func dropPreviewFrame(for zone: LayoutDropZone, currentWindowFrame: CGRect) -> CGRect? {
         guard isDropBarVisible, let screen = activeScreen, let window = targetWindow,
-              let currentFrame = window.frame else { return nil }
-        return targetFrame(for: zone, window: window, currentFrame: currentFrame, screen: screen)
+              let startFrame = dropStartFrame else { return nil }
+        return targetFrame(for: zone, window: window, currentFrame: currentWindowFrame,
+                           restoreFrame: startFrame, screen: screen)
     }
 
     @discardableResult
-    func applyDrop(_ zone: LayoutDropZone) -> Bool {
+    func applyDrop(_ zone: LayoutDropZone) -> CGRect? {
         defer { hideDropBar() }
         guard isDropBarVisible, let screen = activeScreen, let window = targetWindow,
-              let currentFrame = window.frame else { return false }
+              let currentFrame = window.frame, let startFrame = dropStartFrame else { return nil }
         if case .preset(.restore) = zone {
-            restore(window: window, currentFrame: currentFrame)
-            return true
+            return restore(window: window, currentFrame: startFrame)
         }
         guard let action = action(for: zone),
-              let target = targetFrame(for: zone, window: window, currentFrame: currentFrame, screen: screen) else { return false }
-        apply(target, to: window, currentFrame: currentFrame, action: action, screen: screen)
-        return true
+              let target = targetFrame(for: zone, window: window, currentFrame: currentFrame,
+                                       restoreFrame: startFrame, screen: screen) else { return nil }
+        return apply(target, to: window, currentFrame: currentFrame, preMove: startFrame,
+                     action: action, screen: screen)
     }
 
     private func targetFrame(for zone: LayoutDropZone, window: AXWindow, currentFrame: CGRect,
-                             screen: NSScreen) -> CGRect? {
+                             restoreFrame: CGRect, screen: NSScreen) -> CGRect? {
         if case .preset(.restore) = zone {
-            guard let info = lastMoved[window], SnapGeometry.isClose(currentFrame, info.target) else { return nil }
+            guard let info = lastMoved[window], SnapGeometry.isClose(restoreFrame, info.target) else { return nil }
             return info.preMove
         }
         guard let action = action(for: zone) else { return nil }
@@ -295,6 +305,8 @@ final class LayoutMenuManager {
 
     private func hidePanel(suppressRearm: Bool = false) {
         isDropBarVisible = false
+        dropStartFrame = nil
+        dropState.isDropMode = false
         dropState.highlightedZone = nil
         panel.hide()
         activeScreen = nil
@@ -354,13 +366,13 @@ final class LayoutMenuManager {
     /// Only sound if the window is still where this menu last put it — drop
     /// the entry (no-op) otherwise, so "Normal" never yanks a window the
     /// user has since moved or resized by hand.
-    private func restore(window: AXWindow, currentFrame: CGRect) {
-        guard let info = lastMoved[window], SnapGeometry.isClose(currentFrame, info.target) else {
-            lastMoved.removeValue(forKey: window)
-            return
-        }
+    @discardableResult
+    private func restore(window: AXWindow, currentFrame: CGRect) -> CGRect? {
+        guard let info = lastMoved[window], SnapGeometry.isClose(currentFrame, info.target) else { return nil }
         window.setFrame(info.preMove)
+        guard let readBack = window.frame, SnapGeometry.isClose(readBack, info.preMove) else { return nil }
         lastMoved.removeValue(forKey: window)
+        return readBack
     }
 
     /// Remembers the pre-move frame for "Normal", keyed off the frame
@@ -369,10 +381,14 @@ final class LayoutMenuManager {
     /// min size) so a later restore-eligibility check compares against
     /// reality. Carries the original pre-move frame forward across repeated
     /// picks, the same way `SnapManager.snappedInfo` does.
+    @discardableResult
     private func apply(_ target: CGRect, to window: AXWindow, currentFrame: CGRect,
-                       action: SnapAction, screen: NSScreen) {
+                       preMove explicitPreMove: CGRect? = nil,
+                       action: SnapAction, screen: NSScreen) -> CGRect? {
         let preMove: CGRect
-        if let info = lastMoved[window], SnapGeometry.isClose(currentFrame, info.target) {
+        if let explicitPreMove {
+            preMove = explicitPreMove
+        } else if let info = lastMoved[window], SnapGeometry.isClose(currentFrame, info.target) {
             preMove = info.preMove
         } else {
             preMove = currentFrame
@@ -383,7 +399,9 @@ final class LayoutMenuManager {
             if SnapGeometry.isClose(readBack, target) {
                 SnapEvents.didSnap(window: window, action: action, screen: screen)
             }
+            return readBack
         }
+        return nil
     }
 
 }
@@ -404,7 +422,7 @@ private final class LayoutMenuPanel: NSPanel {
                    styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isOpaque = false
         backgroundColor = .clear
-        level = .floating
+        level = NSWindow.Level(rawValue: NSWindow.Level.floating.rawValue + 1)
         hasShadow = true
         isReleasedWhenClosed = false
         isMovableByWindowBackground = false
@@ -480,6 +498,7 @@ private struct LayoutMenuView: View {
         .padding(15)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
         .frame(width: LayoutMenuPanel.size.width, height: LayoutMenuPanel.size.height)
+        .id(dropState.showCount)
     }
 }
 
@@ -502,7 +521,8 @@ private struct SingleTile: View {
                     .strokeBorder(Color.secondary.opacity(0.6), lineWidth: 1)
                     .background(RoundedRectangle(cornerRadius: 3).fill(Color.secondary.opacity(0.08)))
                 Rectangle()
-                    .fill(hovering || dropState.highlightedZone == zone ? Color.accentColor : Color.accentColor.opacity(0.55))
+                    .fill((dropState.isDropMode ? dropState.highlightedZone == zone : hovering || dropState.highlightedZone == zone)
+                          ? Color.accentColor : Color.accentColor.opacity(0.55))
                     .frame(width: rect.width * Self.size.width, height: rect.height * Self.size.height)
                     .offset(x: rect.minX * Self.size.width, y: -rect.minY * Self.size.height)
             }
@@ -543,7 +563,8 @@ private struct StackTile: View {
 
     private func zone(_ action: SnapAction, unit: CGRect) -> some View {
         Rectangle()
-            .fill(hovered == action || dropState.highlightedZone == .stack(action) ? Color.accentColor : Color.accentColor.opacity(0.55))
+            .fill((dropState.isDropMode ? dropState.highlightedZone == .stack(action) : hovered == action || dropState.highlightedZone == .stack(action))
+                  ? Color.accentColor : Color.accentColor.opacity(0.55))
             .frame(width: unit.width * Self.size.width, height: unit.height * Self.size.height)
             .offset(x: unit.minX * Self.size.width, y: -unit.minY * Self.size.height)
             .contentShape(Rectangle())
