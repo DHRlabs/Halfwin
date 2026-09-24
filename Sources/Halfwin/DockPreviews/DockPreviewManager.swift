@@ -16,6 +16,11 @@ final class DockPreviewManager {
         let capturedAt: Date
     }
 
+    private struct CachedShareableContent {
+        let content: SCShareableContent
+        let loadedAt: Date
+    }
+
     private var enabled = false
     private var running = false
     private var permissionTimer: Timer?
@@ -37,6 +42,9 @@ final class DockPreviewManager {
     private var isShowing = false
     private var captureTask: Task<Void, Never>?
     private var thumbnailCache: [CGWindowID: CachedThumbnail] = [:]
+    private var shareableContentCache: CachedShareableContent?
+    private var shareableContentTask: Task<(SCShareableContent?, Date), Never>?
+    private var shareableContentRequestID: UUID?
     private let panel = DockPreviewPanel()
 
     init() {
@@ -109,6 +117,10 @@ final class DockPreviewManager {
         dockPID = nil
         dockRestartPending = false
         thumbnailCache.removeAll()
+        shareableContentTask?.cancel()
+        shareableContentTask = nil
+        shareableContentRequestID = nil
+        shareableContentCache = nil
         hidePreview()
     }
 
@@ -185,7 +197,7 @@ final class DockPreviewManager {
         dockRetryTimer = nil
         stopDockObserver()
         hidePreview()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.12) { [weak self] in
             guard let self else { return }
             self.dockRestartPending = false
             self.startDockObserver()
@@ -220,8 +232,13 @@ final class DockPreviewManager {
             return
         }
         let orientation: String? = attribute(observedList, kAXOrientationAttribute)
-        guard frameExtendedToDockEdge(listFrame, dockListFrame: listFrame, screenFrame: screen.frame, orientation: orientation).contains(pointer),
-              !isShowing || !panel.frame.contains(pointer) else {
+        guard frameExtendedToDockEdge(listFrame, dockListFrame: listFrame, screenFrame: screen.frame, orientation: orientation).contains(pointer) else {
+            clearSelection()
+            scheduleHide()
+            return
+        }
+        prefetchShareableContent()
+        guard !isShowing || !panel.frame.contains(pointer) else {
             clearSelection()
             scheduleHide()
             return
@@ -268,7 +285,12 @@ final class DockPreviewManager {
         hideTimer = nil
         guard activeApp?.processIdentifier != app.processIdentifier || !isShowing else { return }
         hoverTimer?.invalidate()
-        hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: false) { [weak self] _ in
+        hoverTimer = nil
+        if isShowing {
+            showPreview(for: next)
+            return
+        }
+        hoverTimer = Timer.scheduledTimer(withTimeInterval: 0.12, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self, let current = self.selection, current.token == next.token else { return }
                 self.hoverTimer = nil
@@ -356,7 +378,7 @@ final class DockPreviewManager {
         isShowing = true
         let orientation: String? = attribute(list, kAXOrientationAttribute)
         let edge = dockEdge(for: listFrame, screen: screen.frame, orientation: orientation)
-        panel.show(items: tileItems, edge: edge, dockFrame: listFrame, itemFrame: itemFrame, screenFrame: screen.frame)
+        panel.show(items: tileItems, edge: edge, dockFrame: listFrame, itemFrame: itemFrame, visibleFrame: screen.visibleFrame)
         startPointerTimer()
         captureThumbnails(screenshotIDs, generation: captureGeneration)
     }
@@ -375,21 +397,68 @@ final class DockPreviewManager {
         }
         guard !uncached.isEmpty else { return }
         captureTask = Task.detached(priority: .utility) { [weak self] in
-            guard let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true),
+            guard let self,
+                  let content = await self.shareableContentForCapture(),
                   !Task.isCancelled else { return }
-            for (tileID, windowID) in uncached {
-                guard !Task.isCancelled,
-                      let window = content.windows.first(where: { $0.windowID == windowID }) else { continue }
-                let filter = SCContentFilter(desktopIndependentWindow: window)
-                let configuration = SCStreamConfiguration()
-                configuration.width = max(1, Int(320 * CGFloat(filter.pointPixelScale)))
-                configuration.height = max(1, Int(CGFloat(configuration.width) * window.frame.height / max(window.frame.width, 1)))
-                configuration.showsCursor = false
-                guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration),
-                      !Task.isCancelled else { continue }
-                await self?.setCapturedImage(image, for: tileID, windowID: windowID, generation: generation)
+            await withTaskGroup(of: (Int, CGWindowID, CGImage?).self) { group in
+                for (tileID, windowID) in uncached {
+                    guard let window = content.windows.first(where: { $0.windowID == windowID }) else { continue }
+                    group.addTask {
+                        guard !Task.isCancelled else { return (tileID, windowID, nil) }
+                        let filter = SCContentFilter(desktopIndependentWindow: window)
+                        let configuration = SCStreamConfiguration()
+                        configuration.width = max(1, Int(320 * CGFloat(filter.pointPixelScale)))
+                        configuration.height = max(1, Int(CGFloat(configuration.width) * window.frame.height / max(window.frame.width, 1)))
+                        configuration.showsCursor = false
+                        guard let image = try? await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration),
+                              !Task.isCancelled else { return (tileID, windowID, nil) }
+                        return (tileID, windowID, image)
+                    }
+                }
+                for await (tileID, windowID, image) in group {
+                    guard !Task.isCancelled, let image else { continue }
+                    await self.setCapturedImage(image, for: tileID, windowID: windowID, generation: generation)
+                }
             }
         }
+    }
+
+    private func prefetchShareableContent() {
+        if let cache = shareableContentCache, Date().timeIntervalSince(cache.loadedAt) <= 2 { return }
+        guard shareableContentTask == nil else { return }
+        let requestID = UUID()
+        let task = Task.detached(priority: .utility) {
+            let content = try? await SCShareableContent.excludingDesktopWindows(true, onScreenWindowsOnly: true)
+            return (content, Date())
+        }
+        shareableContentTask = task
+        shareableContentRequestID = requestID
+        Task { [weak self] in
+            let (content, loadedAt) = await task.value
+            guard let self, self.shareableContentRequestID == requestID else { return }
+            if let content {
+                self.shareableContentCache = CachedShareableContent(content: content, loadedAt: loadedAt)
+            }
+            self.shareableContentTask = nil
+            self.shareableContentRequestID = nil
+        }
+    }
+
+    private func shareableContentForCapture() async -> SCShareableContent? {
+        if let cache = shareableContentCache, Date().timeIntervalSince(cache.loadedAt) <= 2 {
+            return cache.content
+        }
+        prefetchShareableContent()
+        guard let task = shareableContentTask, let requestID = shareableContentRequestID else { return nil }
+        let (content, loadedAt) = await task.value
+        if shareableContentRequestID == requestID {
+            if let content {
+                shareableContentCache = CachedShareableContent(content: content, loadedAt: loadedAt)
+            }
+            shareableContentTask = nil
+            shareableContentRequestID = nil
+        }
+        return content
     }
 
     private func setCapturedImage(_ image: CGImage, for id: Int, windowID: CGWindowID, generation: Int) {
@@ -432,7 +501,7 @@ final class DockPreviewManager {
 
     private func scheduleHide() {
         guard isShowing, hideTimer == nil else { return }
-        hideTimer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: false) { [weak self] _ in
+        hideTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: false) { [weak self] _ in
             MainActor.assumeIsolated {
                 guard let self else { return }
                 self.hideTimer = nil

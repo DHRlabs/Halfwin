@@ -45,8 +45,8 @@ final class DockPreviewPanel {
         })
     }
 
-    /// `dockFrame`, `itemFrame`, and `screenFrame` use AppKit's global screen coordinates.
-    func show(items: [DockPreviewItem], edge: DockPreviewEdge, dockFrame: CGRect, itemFrame: CGRect, screenFrame: CGRect) {
+    /// `dockFrame`, `itemFrame`, and `visibleFrame` use AppKit's global screen coordinates.
+    func show(items: [DockPreviewItem], edge: DockPreviewEdge, dockFrame: CGRect, itemFrame: CGRect, visibleFrame: CGRect) {
         guard !items.isEmpty else {
             hide()
             return
@@ -57,22 +57,24 @@ final class DockPreviewPanel {
         state.edge = edge
 
         let horizontalDock = edge == .bottom
-        let size = panelSize(for: items.count, horizontalDock: horizontalDock, screenFrame: screenFrame)
-        state.viewportSize = CGSize(width: max(0, size.width - 16), height: max(0, size.height - 16))
+        let layout = panelLayout(for: items.count, horizontalDock: horizontalDock, visibleFrame: visibleFrame)
+        state.panelSize = layout.panelSize
+        state.tileSize = layout.tileSize
+        state.spacing = layout.spacing
 
         var origin: CGPoint
         switch edge {
         case .bottom:
-            origin = CGPoint(x: itemFrame.midX - size.width / 2, y: dockFrame.maxY + 8)
+            origin = CGPoint(x: itemFrame.midX - layout.panelSize.width / 2, y: dockFrame.maxY + 8)
         case .left:
-            origin = CGPoint(x: dockFrame.maxX + 8, y: itemFrame.midY - size.height / 2)
+            origin = CGPoint(x: dockFrame.maxX + 8, y: itemFrame.midY - layout.panelSize.height / 2)
         case .right:
-            origin = CGPoint(x: dockFrame.minX - size.width - 8, y: itemFrame.midY - size.height / 2)
+            origin = CGPoint(x: dockFrame.minX - layout.panelSize.width - 8, y: itemFrame.midY - layout.panelSize.height / 2)
         }
-        origin.x = min(max(origin.x, screenFrame.minX), screenFrame.maxX - size.width)
-        origin.y = min(max(origin.y, screenFrame.minY), screenFrame.maxY - size.height)
+        origin.x = min(max(origin.x, visibleFrame.minX), visibleFrame.maxX - layout.panelSize.width)
+        origin.y = min(max(origin.y, visibleFrame.minY), visibleFrame.maxY - layout.panelSize.height)
 
-        panel.setFrame(CGRect(origin: origin, size: size), display: true)
+        panel.setFrame(CGRect(origin: origin, size: layout.panelSize), display: true)
         panel.orderFrontRegardless()
     }
 
@@ -87,16 +89,24 @@ final class DockPreviewPanel {
         state.images.removeAll(keepingCapacity: true)
     }
 
-    private func panelSize(for count: Int, horizontalDock: Bool, screenFrame: CGRect) -> CGSize {
-        if horizontalDock {
-            return CGSize(
-                width: min(screenFrame.width, min(640, CGFloat(count) * 186 + 16)),
-                height: min(screenFrame.height, 160)
-            )
-        }
-        return CGSize(
-            width: min(screenFrame.width, 244),
-            height: min(screenFrame.height, min(600, CGFloat(count) * 136 + 16))
+    private func panelLayout(for count: Int, horizontalDock: Bool, visibleFrame: CGRect) -> (panelSize: CGSize, tileSize: CGSize, spacing: CGFloat) {
+        let idealTileSize = horizontalDock ? CGSize(width: 176, height: 132) : CGSize(width: 220, height: 126)
+        let idealSpacing: CGFloat = 10
+        let tileCount = CGFloat(count)
+        let contentSize = horizontalDock
+            ? CGSize(width: tileCount * idealTileSize.width + (tileCount - 1) * idealSpacing, height: idealTileSize.height)
+            : CGSize(width: idealTileSize.width, height: tileCount * idealTileSize.height + (tileCount - 1) * idealSpacing)
+        let panelSize = CGSize(
+            width: min(visibleFrame.width, contentSize.width + 16),
+            height: min(visibleFrame.height, contentSize.height + 16)
+        )
+        let contentWidth = max(0, panelSize.width - 16)
+        let contentHeight = max(0, panelSize.height - 16)
+        let scale = min(1, min(contentWidth / contentSize.width, contentHeight / contentSize.height))
+        return (
+            panelSize,
+            CGSize(width: idealTileSize.width * scale, height: idealTileSize.height * scale),
+            idealSpacing * scale
         )
     }
 }
@@ -106,7 +116,9 @@ private final class DockPreviewPanelState: ObservableObject {
     @Published var items: [DockPreviewItem] = []
     @Published var images: [Int: NSImage] = [:]
     @Published var edge: DockPreviewEdge = .bottom
-    @Published var viewportSize = CGSize.zero
+    @Published var panelSize = CGSize.zero
+    @Published var tileSize = CGSize.zero
+    @Published var spacing: CGFloat = 10
 }
 
 @MainActor
@@ -121,33 +133,32 @@ private struct DockPreviewTilesView: View {
     var body: some View {
         Group {
             if horizontalDock {
-                ScrollView(.horizontal) {
-                    HStack(spacing: 10) {
-                        ForEach(state.items) { item in
-                            tile(item).frame(width: 176, height: 132)
-                        }
+                HStack(spacing: state.spacing) {
+                    ForEach(state.items) { item in
+                        tile(item).frame(width: state.tileSize.width, height: state.tileSize.height)
                     }
                 }
-                .scrollIndicators(.hidden)
             } else {
-                ScrollView(.vertical) {
-                    VStack(spacing: 10) {
-                        ForEach(state.items) { item in
-                            tile(item).frame(width: 220, height: 126)
-                        }
+                VStack(spacing: state.spacing) {
+                    ForEach(state.items) { item in
+                        tile(item).frame(width: state.tileSize.width, height: state.tileSize.height)
                     }
                 }
-                .scrollIndicators(.hidden)
             }
         }
         .padding(8)
-        .frame(width: state.viewportSize.width, height: state.viewportSize.height)
+        .frame(width: state.panelSize.width, height: state.panelSize.height)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 14))
     }
 
     private func tile(_ item: DockPreviewItem) -> some View {
-        Button { onSelect(item.id) } label: {
-            VStack(alignment: .leading, spacing: 6) {
+        let inset = min(7, min(state.tileSize.width, state.tileSize.height) * 0.05)
+        let rowSpacing = min(6, state.tileSize.height * 0.05)
+        let titleSize = min(12, state.tileSize.height * 0.095)
+        let imageHeight = min(92, max(0, state.tileSize.height - inset * 2 - rowSpacing - titleSize * 1.2))
+        let iconSize = min(42, min(state.tileSize.width, state.tileSize.height) * 0.45)
+        return Button { onSelect(item.id) } label: {
+            VStack(alignment: .leading, spacing: rowSpacing) {
                 ZStack {
                     RoundedRectangle(cornerRadius: 8)
                         .fill(.quaternary)
@@ -161,10 +172,10 @@ private struct DockPreviewTilesView: View {
                         Image(nsImage: item.appIcon)
                             .resizable()
                             .scaledToFit()
-                            .frame(width: 42, height: 42)
+                            .frame(width: iconSize, height: iconSize)
                     }
                 }
-                .frame(height: 92)
+                .frame(height: imageHeight)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
 
                 HStack(spacing: 5) {
@@ -177,9 +188,9 @@ private struct DockPreviewTilesView: View {
                             .foregroundStyle(.secondary)
                     }
                 }
-                .font(.system(size: 12))
+                .font(.system(size: titleSize))
             }
-            .padding(7)
+            .padding(inset)
             .background(.background.opacity(0.72), in: RoundedRectangle(cornerRadius: 10))
             .overlay(RoundedRectangle(cornerRadius: 10).strokeBorder(.quaternary))
             .contentShape(RoundedRectangle(cornerRadius: 10))
