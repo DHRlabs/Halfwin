@@ -58,8 +58,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         snapAssistSwitch.onChange = { [weak self] in self?.snapAssistManager.setEnabled($0) }
         snapGroupsSwitch.onChange = { [weak self] in self?.snapGroupsManager.setEnabled($0) }
         dragToTopLayoutsSwitch.onChange = { [weak self] in self?.snapManager.setDragToTopLayoutsEnabled($0) }
+        var isInitialDockPreviewsState = true
         dockPreviewsSwitch.onChange = { [weak self] enabled in
             self?.dockPreviewsManager.setEnabled(enabled)
+            if isInitialDockPreviewsState {
+                isInitialDockPreviewsState = false
+                if enabled { MinimizeToIcon.setDockPreviewsEnabled(true) }
+                return
+            }
             MinimizeToIcon.setDockPreviewsEnabled(enabled)
         }
         clickDockIconMinimizeSwitch.onChange = { [weak self] in
