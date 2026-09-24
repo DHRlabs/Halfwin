@@ -15,6 +15,7 @@ final class SnapManager {
     }
 
     private let settings: SnapSettings
+    private let layoutMenu: LayoutMenuManager
     private var monitor: Any?
     private lazy var footprint = FootprintWindow()
 
@@ -24,6 +25,9 @@ final class SnapManager {
     private var isWindowMoving = false
     private var cancelled = false
     private var currentZone: Zone?
+    private var dragToTopLayoutsEnabled = false
+    private var dropScreen: NSScreen?
+    private var currentDropZone: LayoutDropZone?
     private var cancellables = Set<AnyCancellable>()
     private var permissionTimer: Timer?
 
@@ -34,8 +38,9 @@ final class SnapManager {
     /// the AX element, not a window id — this port never needs a CGWindowID.
     private var snappedInfo: [AXWindow: (target: CGRect, preSnapSize: CGSize)] = [:]
 
-    init(settings: SnapSettings) {
+    init(settings: SnapSettings, layoutMenu: LayoutMenuManager) {
         self.settings = settings
+        self.layoutMenu = layoutMenu
         settings.$dragSnappingEnabled
             .sink { [weak self] _ in
                 // @Published fires before the stored value changes, so hop
@@ -51,6 +56,7 @@ final class SnapManager {
     /// Starts (or stops) the monitor to match Accessibility permission and
     /// the Settings toggle. Safe to call repeatedly.
     func refreshPermission() {
+        MissionControlDrag.setDragSnappingEnabled(Permissions.accessibilityGranted && settings.dragSnappingEnabled)
         if Permissions.accessibilityGranted {
             permissionTimer?.invalidate()
             permissionTimer = nil
@@ -67,6 +73,11 @@ final class SnapManager {
         } else {
             stop()
         }
+    }
+
+    func setDragToTopLayoutsEnabled(_ enabled: Bool) {
+        dragToTopLayoutsEnabled = enabled
+        if !enabled { clearDropBar() }
     }
 
     private func start() {
@@ -92,6 +103,7 @@ final class SnapManager {
             cancelled = true
             footprint.hide()
             currentZone = nil
+            clearDropBar()
         case .leftMouseDown:
             beginDrag()
         case .leftMouseDragged:
@@ -141,11 +153,52 @@ final class SnapManager {
         }
 
         guard let size = lockedSize else { return }
-        let cursor = NSEvent.mouseLocation
+        updateTarget(at: NSEvent.mouseLocation, window: draggedWindow, size: size)
+    }
+
+    private func updateTarget(at cursor: CGPoint, window: AXWindow, size: CGSize) {
+        if dragToTopLayoutsEnabled, let screen = layoutTriggerScreen(for: cursor) {
+            if dropScreen != screen {
+                dropScreen = screen
+                layoutMenu.showDropBar(on: screen, for: window)
+            }
+            let zone = layoutMenu.dropZone(at: cursor)
+            currentDropZone = zone
+            currentZone = nil
+            layoutMenu.highlight(zone)
+            if let zone, let frame = layoutMenu.dropPreviewFrame(for: zone) {
+                footprint.show(in: frame)
+            } else {
+                footprint.hide()
+            }
+            return // The drop bar owns the top-center strip, including maximize.
+        }
+
+        if dropScreen != nil {
+            if layoutMenu.isDropBarNear(cursor), let zone = layoutMenu.dropZone(at: cursor) {
+                currentDropZone = zone
+                currentZone = nil
+                layoutMenu.highlight(zone)
+                if let frame = layoutMenu.dropPreviewFrame(for: zone) {
+                    footprint.show(in: frame)
+                } else {
+                    footprint.hide()
+                }
+                return
+            }
+            if layoutMenu.isDropBarNear(cursor) {
+                currentDropZone = nil
+                layoutMenu.highlight(nil)
+            } else {
+                clearDropBar()
+            }
+        }
+
         guard let screen = NSScreen.screens.first(where: { NSMouseInRect(cursor, $0.frame, false) }),
               let position = SnapGeometry.position(for: cursor, in: screen.frame) else {
             footprint.hide()
             currentZone = nil
+            currentDropZone = nil
             return
         }
 
@@ -153,6 +206,7 @@ final class SnapManager {
         guard action != .none else {
             footprint.hide()
             currentZone = nil
+            currentDropZone = nil
             return
         }
 
@@ -168,9 +222,19 @@ final class SnapManager {
         }
     }
 
+    private func layoutTriggerScreen(for cursor: CGPoint) -> NSScreen? {
+        NSScreen.screens.first { screen in
+            let frame = screen.frame
+            return cursor.x >= frame.minX && cursor.x <= frame.maxX &&
+                cursor.y >= frame.maxY - 8 && cursor.y <= frame.maxY &&
+                abs(cursor.x - frame.midX) <= 200
+        }
+    }
+
     private func endDrag() {
         var snapNotification: (window: AXWindow, action: SnapAction, screen: NSScreen)?
         defer {
+            footprint.hide()
             resetDrag()
             if let notification = snapNotification {
                 DispatchQueue.main.async {
@@ -179,8 +243,13 @@ final class SnapManager {
             }
         }
         footprint.hide()
-        guard !cancelled, isWindowMoving, let zone = currentZone,
-              let draggedWindow, let frame = draggedWindow.frame else { return }
+        guard !cancelled, isWindowMoving, let draggedWindow, let size = lockedSize else { return }
+        updateTarget(at: NSEvent.mouseLocation, window: draggedWindow, size: size)
+        if let currentDropZone {
+            layoutMenu.applyDrop(currentDropZone)
+            return
+        }
+        guard let zone = currentZone, let frame = draggedWindow.frame else { return }
         guard let target = SnapGeometry.frame(for: zone.action, visibleFrame: zone.screen.visibleFrame,
                                               currentWindowFrame: frame, portrait: zone.screen.frame.isPortrait) else { return }
         draggedWindow.setFrame(target)
@@ -194,11 +263,18 @@ final class SnapManager {
     }
 
     private func resetDrag() {
+        clearDropBar()
         draggedWindow = nil
         initialFrame = nil
         isWindowMoving = false
         cancelled = false
         currentZone = nil
+    }
+
+    private func clearDropBar() {
+        layoutMenu.hideDropBar()
+        dropScreen = nil
+        currentDropZone = nil
     }
 
     private func resolvedAction(for position: SnapPosition, cursor: CGPoint, screen: NSScreen, previous: SnapAction?) -> SnapAction {
