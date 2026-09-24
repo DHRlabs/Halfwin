@@ -11,8 +11,10 @@ final class LayoutMenuSettings: ObservableObject {
     private let defaults = UserDefaults.standard
     private let enabledKey = "Halfwin.layoutMenuEnabled"
     private let dwellKey = "Halfwin.layoutMenuDwellDelay"
+    private let hotZoneWidthKey = "Halfwin.layoutMenuHotZoneWidth"
 
     static let defaultDwellDelay: Double = 0.35
+    static let defaultHotZoneWidth: CGFloat = 400
 
     @Published var enabled: Bool {
         didSet { defaults.set(enabled, forKey: enabledKey) }
@@ -22,24 +24,71 @@ final class LayoutMenuSettings: ObservableObject {
         didSet { defaults.set(dwellDelay, forKey: dwellKey) }
     }
 
+    @Published var hotZoneWidth: CGFloat {
+        didSet {
+            let value = Self.clampedHotZoneWidth(hotZoneWidth)
+            if value != hotZoneWidth { hotZoneWidth = value }
+            defaults.set(Double(value), forKey: hotZoneWidthKey)
+        }
+    }
+
     private init() {
         enabled = defaults.object(forKey: enabledKey) == nil ? true : defaults.bool(forKey: enabledKey)
         let saved = defaults.object(forKey: dwellKey) as? Double ?? Self.defaultDwellDelay
         dwellDelay = min(max(saved, 0.1), 1.5)
+        let savedHotZoneWidth = CGFloat(defaults.object(forKey: hotZoneWidthKey) as? Double ?? Double(Self.defaultHotZoneWidth))
+        hotZoneWidth = Self.clampedHotZoneWidth(savedHotZoneWidth)
+    }
+
+    private static func clampedHotZoneWidth(_ value: CGFloat) -> CGFloat {
+        min(max(value.isFinite ? value : defaultHotZoneWidth, 200), 1200)
     }
 }
 
 /// A single tile in the layout menu. Most map straight to a `SnapAction`;
 /// `restore` doesn't fit that enum (it replays a remembered frame instead of
-/// computing one), so it's handled locally. The big-left-stack thumbnail's
-/// three zones bypass this enum entirely and post a `SnapAction` directly.
+/// computing one), so it's handled locally. Multi-zone tiles carry their
+/// `SnapAction` in the `.layout` case.
 enum LayoutPreset: Equatable {
     case leftHalf, rightHalf, center, restore, maximize
 }
 
 enum LayoutDropZone: Equatable {
     case preset(LayoutPreset)
-    case stack(SnapAction)
+    case layout(SnapAction)
+}
+
+private struct LayoutTileZone {
+    let action: SnapAction
+    let rect: CGRect
+}
+
+private struct LayoutMultiZoneTile {
+    let title: String
+    let zones: [LayoutTileZone]
+}
+
+private enum LayoutMenuTiles {
+    static var multiZone: [LayoutMultiZoneTile] {
+        let side = SnapGeometry.commandCenterSideFraction
+        return [
+            LayoutMultiZoneTile(title: "Left + Stack", zones: [
+                LayoutTileZone(action: .firstTwoThirds, rect: CGRect(x: 0, y: 0, width: 2.0 / 3, height: 1)),
+                LayoutTileZone(action: .lastThirdTop, rect: CGRect(x: 2.0 / 3, y: 0.5, width: 1.0 / 3, height: 0.5)),
+                LayoutTileZone(action: .lastThirdBottom, rect: CGRect(x: 2.0 / 3, y: 0, width: 1.0 / 3, height: 0.5)),
+            ]),
+            LayoutMultiZoneTile(title: "Thirds", zones: [
+                LayoutTileZone(action: .firstThird, rect: CGRect(x: 0, y: 0, width: 1.0 / 3, height: 1)),
+                LayoutTileZone(action: .centerThird, rect: CGRect(x: 1.0 / 3, y: 0, width: 1.0 / 3, height: 1)),
+                LayoutTileZone(action: .lastThird, rect: CGRect(x: 2.0 / 3, y: 0, width: 1.0 / 3, height: 1)),
+            ]),
+            LayoutMultiZoneTile(title: "Command Center", zones: [
+                LayoutTileZone(action: .commandCenterLeft, rect: CGRect(x: 0, y: 0, width: side, height: 1)),
+                LayoutTileZone(action: .commandCenter, rect: CGRect(x: side, y: 0, width: 1 - 2 * side, height: 1)),
+                LayoutTileZone(action: .commandCenterRight, rect: CGRect(x: 1 - side, y: 0, width: side, height: 1)),
+            ]),
+        ]
+    }
 }
 
 private final class LayoutMenuDropState: ObservableObject {
@@ -63,7 +112,7 @@ final class LayoutMenuManager {
     private lazy var panel = LayoutMenuPanel(
         dropState: dropState,
         onPick: { [weak self] preset in self?.pick(preset) },
-        onPickZone: { [weak self] action in self?.pickStackZone(action) }
+        onPickZone: { [weak self] action in self?.pickLayoutZone(action) }
     )
 
     /// The display currently armed (dwelling or shown) for.
@@ -85,8 +134,9 @@ final class LayoutMenuManager {
     /// pop right back up.
     private var suppressRearmUntilLeave = false
 
-    private static let triggerHalfWidth: CGFloat = 100
     private static let triggerHeight: CGFloat = 4
+
+    var hotZoneWidth: CGFloat { settings.hotZoneWidth }
 
     init(settings: LayoutMenuSettings) {
         self.settings = settings
@@ -200,7 +250,7 @@ final class LayoutMenuManager {
             let frame = screen.frame
             guard cursor.x >= frame.minX, cursor.x <= frame.maxX else { return false }
             guard cursor.y >= frame.maxY - Self.triggerHeight, cursor.y <= frame.maxY else { return false }
-            return abs(cursor.x - frame.midX) <= Self.triggerHalfWidth
+            return abs(cursor.x - frame.midX) <= settings.hotZoneWidth / 2
         }
     }
 
@@ -211,7 +261,7 @@ final class LayoutMenuManager {
     /// and a stacked display below/above never reads as "near".
     private func isNearPanelOrTrigger(_ cursor: CGPoint) -> Bool {
         guard let frame = activeScreen?.frame else { return false }
-        let halfWidth = max(Self.triggerHalfWidth, panel.frame.width / 2)
+        let halfWidth = max(settings.hotZoneWidth / 2, panel.frame.width / 2)
         guard cursor.x >= frame.midX - halfWidth, cursor.x <= frame.midX + halfWidth else { return false }
         return cursor.y >= panel.frame.minY && cursor.y <= frame.maxY
     }
@@ -302,7 +352,7 @@ final class LayoutMenuManager {
     private func action(for zone: LayoutDropZone) -> SnapAction? {
         switch zone {
         case .preset(let preset): return snapAction(for: preset)
-        case .stack(let action): return action
+        case .layout(let action): return action
         }
     }
 
@@ -343,9 +393,8 @@ final class LayoutMenuManager {
         apply(target, to: window, currentFrame: currentFrame, action: action, screen: screen)
     }
 
-    /// `restore` doesn't produce a `SnapAction`; the big-left-stack
-    /// thumbnail's three zones bypass this mapping entirely via
-    /// `pickStackZone`.
+    /// `restore` doesn't produce a `SnapAction`; multi-zone thumbnails map
+    /// their picked zones directly to one.
     private func snapAction(for preset: LayoutPreset) -> SnapAction? {
         switch preset {
         case .leftHalf: return .leftHalf
@@ -356,8 +405,8 @@ final class LayoutMenuManager {
         }
     }
 
-    /// Called for the three zones inside the big-left-stack thumbnail.
-    fileprivate func pickStackZone(_ action: SnapAction) {
+    /// Called for a zone inside a multi-zone thumbnail.
+    fileprivate func pickLayoutZone(_ action: SnapAction) {
         defer { hidePanel(suppressRearm: true) }
         guard let screen = activeScreen, let window = targetWindow, let currentFrame = window.frame else { return }
         let portrait = screen.frame.height > screen.frame.width
@@ -413,10 +462,14 @@ final class LayoutMenuManager {
 /// just below the menu bar on the triggering display. Non-activating so the
 /// frontmost app (whose window the picks affect) never loses focus.
 private final class LayoutMenuPanel: NSPanel {
-    fileprivate static let size = CGSize(width: 360, height: 96)
     fileprivate static let tileWidth: CGFloat = 50
     fileprivate static let tileHeight: CGFloat = 50
     fileprivate static let tileSpacing: CGFloat = 6
+    fileprivate static let tileCount = 5 + LayoutMenuTiles.multiZone.count
+    fileprivate static let size = CGSize(
+        width: CGFloat(tileCount) * tileWidth + CGFloat(tileCount - 1) * tileSpacing + 30,
+        height: 96
+    )
     private static let thumbnailSize = CGSize(width: 44, height: 30)
 
     init(dropState: LayoutMenuDropState, onPick: @escaping (LayoutPreset) -> Void,
@@ -449,25 +502,26 @@ private final class LayoutMenuPanel: NSPanel {
 
     func dropZone(at point: CGPoint) -> LayoutDropZone? {
         guard frame.contains(point) else { return nil }
-        let contentWidth = 6 * Self.tileWidth + 5 * Self.tileSpacing
+        let contentWidth = CGFloat(Self.tileCount) * Self.tileWidth + CGFloat(Self.tileCount - 1) * Self.tileSpacing
         let firstTileX = frame.minX + (frame.width - contentWidth) / 2
         let offset = point.x - firstTileX
         guard offset >= 0 else { return nil }
         let stride = Self.tileWidth + Self.tileSpacing
         let index = Int(offset / stride)
-        guard index < 6, offset - CGFloat(index) * stride < Self.tileWidth else { return nil }
+        guard index < Self.tileCount, offset - CGFloat(index) * stride < Self.tileWidth else { return nil }
         if index < 5 {
             let presets: [LayoutPreset] = [.leftHalf, .rightHalf, .center, .restore, .maximize]
             return .preset(presets[index])
         }
 
+        let tile = LayoutMenuTiles.multiZone[index - 5]
         let tileMinY = frame.minY + (frame.height - Self.tileHeight) / 2
         let thumbnail = CGRect(x: firstTileX + CGFloat(index) * stride + (Self.tileWidth - Self.thumbnailSize.width) / 2,
                                y: tileMinY + 17, width: Self.thumbnailSize.width, height: Self.thumbnailSize.height)
         guard thumbnail.contains(point) else { return nil }
-        let onRightThird = point.x >= thumbnail.minX + thumbnail.width * 2 / 3
-        guard onRightThird else { return .stack(.firstTwoThirds) }
-        return .stack(point.y >= thumbnail.midY ? .lastThirdTop : .lastThirdBottom)
+        let unitPoint = CGPoint(x: (point.x - thumbnail.minX) / thumbnail.width,
+                                y: (point.y - thumbnail.minY) / thumbnail.height)
+        return tile.zones.first { $0.rect.contains(unitPoint) }.map { .layout($0.action) }
     }
 
     func hide() {
@@ -495,7 +549,9 @@ private struct LayoutMenuView: View {
                        zone: .preset(.restore), dropState: dropState) { onPick(.restore) }
             SingleTile(title: "Maximize", rect: CGRect(x: 0, y: 0, width: 1, height: 1),
                        zone: .preset(.maximize), dropState: dropState) { onPick(.maximize) }
-            StackTile(dropState: dropState, onPickZone: onPickZone)
+            ForEach(LayoutMenuTiles.multiZone.indices, id: \.self) { index in
+                MultiZoneTileView(tile: LayoutMenuTiles.multiZone[index], dropState: dropState, onPickZone: onPickZone)
+            }
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
         .padding(15)
@@ -539,9 +595,9 @@ private struct SingleTile: View {
     }
 }
 
-/// The sixth preset: one thumbnail, three independently clickable/hoverable
-/// zones (big left two-thirds, right-third top half, right-third bottom half).
-private struct StackTile: View {
+/// A thumbnail whose zones share their unit geometry for drawing and drops.
+private struct MultiZoneTileView: View {
+    let tile: LayoutMultiZoneTile
     @ObservedObject var dropState: LayoutMenuDropState
     let onPickZone: (SnapAction) -> Void
     @State private var hovered: SnapAction?
@@ -554,24 +610,24 @@ private struct StackTile: View {
                 RoundedRectangle(cornerRadius: 3)
                     .strokeBorder(Color.secondary.opacity(0.6), lineWidth: 1)
                     .background(RoundedRectangle(cornerRadius: 3).fill(Color.secondary.opacity(0.08)))
-                zone(.firstTwoThirds, unit: CGRect(x: 0, y: 0, width: 2.0 / 3, height: 1))
-                zone(.lastThirdTop, unit: CGRect(x: 2.0 / 3, y: 0.5, width: 1.0 / 3, height: 0.5))
-                zone(.lastThirdBottom, unit: CGRect(x: 2.0 / 3, y: 0, width: 1.0 / 3, height: 0.5))
+                ForEach(tile.zones, id: \.action) { zone in
+                    zoneView(zone)
+                }
             }
             .frame(width: Self.size.width, height: Self.size.height)
-            Text("Left + Stack").font(.system(size: 9)).lineLimit(1).minimumScaleFactor(0.8).foregroundStyle(.secondary)
+            Text(tile.title).font(.system(size: 9)).lineLimit(1).minimumScaleFactor(0.8).foregroundStyle(.secondary)
         }
         .frame(width: LayoutMenuPanel.tileWidth, height: LayoutMenuPanel.tileHeight)
     }
 
-    private func zone(_ action: SnapAction, unit: CGRect) -> some View {
+    private func zoneView(_ zone: LayoutTileZone) -> some View {
         Rectangle()
-            .fill((dropState.isDropMode ? dropState.highlightedZone == .stack(action) : hovered == action || dropState.highlightedZone == .stack(action))
+            .fill((dropState.isDropMode ? dropState.highlightedZone == .layout(zone.action) : hovered == zone.action || dropState.highlightedZone == .layout(zone.action))
                   ? Color.accentColor : Color.accentColor.opacity(0.55))
-            .frame(width: unit.width * Self.size.width, height: unit.height * Self.size.height)
-            .offset(x: unit.minX * Self.size.width, y: -unit.minY * Self.size.height)
+            .frame(width: zone.rect.width * Self.size.width, height: zone.rect.height * Self.size.height)
+            .offset(x: zone.rect.minX * Self.size.width, y: -zone.rect.minY * Self.size.height)
             .contentShape(Rectangle())
-            .onHover { hovered = $0 ? action : (hovered == action ? nil : hovered) }
-            .onTapGesture { onPickZone(action) }
+            .onHover { hovered = $0 ? zone.action : (hovered == zone.action ? nil : hovered) }
+            .onTapGesture { onPickZone(zone.action) }
     }
 }
