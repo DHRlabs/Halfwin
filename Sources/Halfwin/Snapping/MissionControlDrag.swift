@@ -1,5 +1,6 @@
 import AppKit
 import CoreFoundation
+import Darwin
 
 enum MissionControlDrag {
     private enum PreviousValue: String {
@@ -13,6 +14,7 @@ enum MissionControlDrag {
     private static let previousValueKey = "Halfwin.missionControlDragPreviousValue"
 
     static func setDragSnappingEnabled(_ enabled: Bool) {
+        guard !CFPreferencesAppValueIsForced(key, domain) else { return }
         if enabled {
             disableMissionControlDrag()
         } else {
@@ -22,20 +24,23 @@ enum MissionControlDrag {
 
     private static func disableMissionControlDrag() {
         let current = CFPreferencesCopyAppValue(key, domain)
-        if let value = current as? NSNumber, CFGetTypeID(value) == CFBooleanGetTypeID() {
-            let previousValue: PreviousValue = value.boolValue ? .enabled : .disabled
-            if value.boolValue || UserDefaults.standard.object(forKey: previousValueKey) == nil {
-                UserDefaults.standard.set(previousValue.rawValue, forKey: previousValueKey)
+        let previousValue: PreviousValue
+        if let current, let value = booleanValue(current) {
+            previousValue = value ? .enabled : .disabled
+            guard value else {
+                savePreviousValueIfNeeded(previousValue)
+                return
             }
-            guard value.boolValue else { return }
         } else if current == nil {
-            UserDefaults.standard.set(PreviousValue.absent.rawValue, forKey: previousValueKey)
+            previousValue = .absent
         } else {
             return
         }
+        savePreviousValueIfNeeded(previousValue)
 
         CFPreferencesSetAppValue(key, kCFBooleanFalse, domain)
-        CFPreferencesAppSynchronize(domain)
+        guard CFPreferencesAppSynchronize(domain),
+              booleanValue(CFPreferencesCopyAppValue(key, domain)) == false else { return }
         restartDock()
     }
 
@@ -52,28 +57,50 @@ enum MissionControlDrag {
             }
             CFPreferencesSetAppValue(key, nil, domain)
         case .enabled:
-            if let value = current as? NSNumber,
-               CFGetTypeID(value) == CFBooleanGetTypeID(), value.boolValue {
+            if booleanValue(current) == true {
                 UserDefaults.standard.removeObject(forKey: previousValueKey)
                 return
             }
             CFPreferencesSetAppValue(key, kCFBooleanTrue, domain)
         case .disabled:
-            if let value = current as? NSNumber,
-               CFGetTypeID(value) == CFBooleanGetTypeID(), !value.boolValue {
+            if booleanValue(current) == false {
                 UserDefaults.standard.removeObject(forKey: previousValueKey)
                 return
             }
             CFPreferencesSetAppValue(key, kCFBooleanFalse, domain)
         }
 
-        CFPreferencesAppSynchronize(domain)
+        guard CFPreferencesAppSynchronize(domain) else { return }
+        switch previousValue {
+        case .absent:
+            guard CFPreferencesCopyAppValue(key, domain) == nil else { return }
+        case .enabled:
+            guard booleanValue(CFPreferencesCopyAppValue(key, domain)) == true else { return }
+        case .disabled:
+            guard booleanValue(CFPreferencesCopyAppValue(key, domain)) == false else { return }
+        }
         UserDefaults.standard.removeObject(forKey: previousValueKey)
         restartDock()
     }
 
+    private static func savePreviousValueIfNeeded(_ value: PreviousValue) {
+        guard UserDefaults.standard.object(forKey: previousValueKey) == nil else { return }
+        UserDefaults.standard.set(value.rawValue, forKey: previousValueKey)
+    }
+
+    private static func booleanValue(_ value: Any?) -> Bool? {
+        guard let value = value as? NSNumber else { return nil }
+        if CFGetTypeID(value) == CFBooleanGetTypeID() { return value.boolValue }
+        switch value.doubleValue {
+        case 0: return false
+        case 1: return true
+        default: return nil
+        }
+    }
+
     private static func restartDock() {
-        NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock")
-            .first(where: { !$0.isTerminated })?.terminate()
+        guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock")
+            .first(where: { !$0.isTerminated }) else { return }
+        kill(dock.processIdentifier, SIGTERM)
     }
 }

@@ -42,7 +42,9 @@ final class SnapManager {
         self.settings = settings
         self.layoutMenu = layoutMenu
         settings.$dragSnappingEnabled
-            .sink { [weak self] _ in
+            .dropFirst()
+            .sink { [weak self] enabled in
+                MissionControlDrag.setDragSnappingEnabled(enabled)
                 // @Published fires before the stored value changes, so hop
                 // to the next run-loop turn before reacting to it.
                 DispatchQueue.main.async { self?.refreshPermission() }
@@ -56,7 +58,7 @@ final class SnapManager {
     /// Starts (or stops) the monitor to match Accessibility permission and
     /// the Settings toggle. Safe to call repeatedly.
     func refreshPermission() {
-        MissionControlDrag.setDragSnappingEnabled(Permissions.accessibilityGranted && settings.dragSnappingEnabled)
+        if settings.dragSnappingEnabled { MissionControlDrag.setDragSnappingEnabled(true) }
         if Permissions.accessibilityGranted {
             permissionTimer?.invalidate()
             permissionTimer = nil
@@ -158,15 +160,20 @@ final class SnapManager {
 
     private func updateTarget(at cursor: CGPoint, window: AXWindow, size: CGSize) {
         if dragToTopLayoutsEnabled, let screen = layoutTriggerScreen(for: cursor) {
-            if dropScreen != screen {
+            if dropScreen != screen || !layoutMenu.isDropBarVisible {
                 dropScreen = screen
-                layoutMenu.showDropBar(on: screen, for: window)
+                currentDropZone = nil
+                footprint.hide()
+                layoutMenu.showDropBar(on: screen, for: window, startFrame: initialFrame ?? .zero)
             }
-            let zone = layoutMenu.dropZone(at: cursor)
-            currentDropZone = zone
             currentZone = nil
+            let zone = layoutMenu.dropZone(at: cursor)
+            guard zone != currentDropZone else { return }
+            currentDropZone = zone
             layoutMenu.highlight(zone)
-            if let zone, let frame = layoutMenu.dropPreviewFrame(for: zone) {
+            if let zone, let frame = layoutMenu.dropPreviewFrame(
+                for: zone, currentWindowFrame: CGRect(origin: .zero, size: size)
+            ) {
                 footprint.show(in: frame)
             } else {
                 footprint.hide()
@@ -175,23 +182,22 @@ final class SnapManager {
         }
 
         if dropScreen != nil {
-            if layoutMenu.isDropBarNear(cursor), let zone = layoutMenu.dropZone(at: cursor) {
+            if layoutMenu.isDropBarNear(cursor) {
+                let zone = layoutMenu.dropZone(at: cursor)
+                guard zone != currentDropZone else { return }
                 currentDropZone = zone
                 currentZone = nil
                 layoutMenu.highlight(zone)
-                if let frame = layoutMenu.dropPreviewFrame(for: zone) {
+                if let zone, let frame = layoutMenu.dropPreviewFrame(
+                    for: zone, currentWindowFrame: CGRect(origin: .zero, size: size)
+                ) {
                     footprint.show(in: frame)
                 } else {
                     footprint.hide()
                 }
                 return
             }
-            if layoutMenu.isDropBarNear(cursor) {
-                currentDropZone = nil
-                layoutMenu.highlight(nil)
-            } else {
-                clearDropBar()
-            }
+            clearDropBar()
         }
 
         guard let screen = NSScreen.screens.first(where: { NSMouseInRect(cursor, $0.frame, false) }),
@@ -225,6 +231,8 @@ final class SnapManager {
     private func layoutTriggerScreen(for cursor: CGPoint) -> NSScreen? {
         NSScreen.screens.first { screen in
             let frame = screen.frame
+            let pointAbove = CGPoint(x: cursor.x, y: frame.maxY + 1)
+            guard !NSScreen.screens.contains(where: { $0 != screen && $0.frame.contains(pointAbove) }) else { return false }
             return cursor.x >= frame.minX && cursor.x <= frame.maxX &&
                 cursor.y >= frame.maxY - 8 && cursor.y <= frame.maxY &&
                 abs(cursor.x - frame.midX) <= 200
@@ -244,9 +252,10 @@ final class SnapManager {
         }
         footprint.hide()
         guard !cancelled, isWindowMoving, let draggedWindow, let size = lockedSize else { return }
-        updateTarget(at: NSEvent.mouseLocation, window: draggedWindow, size: size)
         if let currentDropZone {
-            layoutMenu.applyDrop(currentDropZone)
+            if let target = layoutMenu.applyDrop(currentDropZone) {
+                snappedInfo[draggedWindow] = (target: target, preSnapSize: size)
+            }
             return
         }
         guard let zone = currentZone, let frame = draggedWindow.frame else { return }
