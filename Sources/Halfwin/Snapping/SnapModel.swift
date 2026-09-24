@@ -30,6 +30,7 @@ enum SnapAction: String, CaseIterable, Codable {
     case center
     case topLeftQuarter, topRightQuarter, bottomLeftQuarter, bottomRightQuarter
     case firstThird, centerThird, lastThird
+    case commandCenterLeft, commandCenter, commandCenterRight
     case firstTwoThirds, lastTwoThirds
     case lastThirdTop, lastThirdBottom
     case leftTopBottomHalfCompound
@@ -52,6 +53,9 @@ enum SnapAction: String, CaseIterable, Codable {
         case .firstThird: return "First Third"
         case .centerThird: return "Center Third"
         case .lastThird: return "Last Third"
+        case .commandCenterLeft: return "Command Center — Left"
+        case .commandCenter: return "Command Center"
+        case .commandCenterRight: return "Command Center — Right"
         case .firstTwoThirds: return "First Two Thirds"
         case .lastTwoThirds: return "Last Two Thirds"
         case .lastThirdTop: return "Last Third — Top Half"
