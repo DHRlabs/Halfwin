@@ -14,6 +14,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let snapGroupsSwitch = FeatureSwitch(key: "snapGroups", title: "Snap Groups", defaultOn: true)
     private let dragToTopLayoutsSwitch = FeatureSwitch(key: "drag-to-top-layouts", title: "Drag to top for layouts", defaultOn: true)
     private let dockPreviewsSwitch = FeatureSwitch(key: "dock-previews", title: "Dock previews", defaultOn: true)
+    private let clickDockIconMinimizeSwitch = FeatureSwitch(key: "click-dock-icon-to-minimize", title: "Click Dock icon to minimize", defaultOn: true)
     private let layoutMenuSettings = LayoutMenuSettings.shared
     private lazy var layoutMenuManager = LayoutMenuManager(settings: layoutMenuSettings)
     private lazy var windowExtrasManager = WindowExtrasManager()
@@ -57,11 +58,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         snapAssistSwitch.onChange = { [weak self] in self?.snapAssistManager.setEnabled($0) }
         snapGroupsSwitch.onChange = { [weak self] in self?.snapGroupsManager.setEnabled($0) }
         dragToTopLayoutsSwitch.onChange = { [weak self] in self?.snapManager.setDragToTopLayoutsEnabled($0) }
-        dockPreviewsSwitch.onChange = { [weak self] in self?.dockPreviewsManager.setEnabled($0) }
+        dockPreviewsSwitch.onChange = { [weak self] enabled in
+            self?.dockPreviewsManager.setEnabled(enabled)
+            MinimizeToIcon.setDockPreviewsEnabled(enabled)
+        }
+        clickDockIconMinimizeSwitch.onChange = { [weak self] in
+            self?.dockPreviewsManager.setClickToMinimizeEnabled($0)
+        }
         snapAssistSwitch.start()
         snapGroupsSwitch.start()
         dragToTopLayoutsSwitch.start()
         dockPreviewsSwitch.start()
+        clickDockIconMinimizeSwitch.start()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         keyboardExtras.onCutPendingChange = { [weak self] pending in
@@ -161,6 +169,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dockHeader.isEnabled = false
         menu.addItem(dockHeader)
         menu.addItem(dockPreviewsSwitch.makeMenuItem())
+        menu.addItem(clickDockIconMinimizeSwitch.makeMenuItem())
         menu.addItem(.separator())
 
         loginItem = NSMenuItem(title: "Launch at Login", action: #selector(toggleLogin), keyEquivalent: "")
