@@ -37,6 +37,15 @@ enum LayoutPreset: Equatable {
     case leftHalf, rightHalf, center, restore, maximize
 }
 
+enum LayoutDropZone: Equatable {
+    case preset(LayoutPreset)
+    case stack(SnapAction)
+}
+
+private final class LayoutMenuDropState: ObservableObject {
+    @Published var highlightedZone: LayoutDropZone?
+}
+
 /// Windows 11-style layout menu: hover the top-center of a display, pick a
 /// preset from a small dropdown of thumbnails. Read Loop/DockDoor only to
 /// confirm which system APIs exist (trigger zone, non-activating panel);
@@ -48,7 +57,9 @@ final class LayoutMenuManager {
     private var dwellTimer: Timer?
     private var permissionTimer: Timer?
     private var cancellables = Set<AnyCancellable>()
+    private let dropState = LayoutMenuDropState()
     private lazy var panel = LayoutMenuPanel(
+        dropState: dropState,
         onPick: { [weak self] preset in self?.pick(preset) },
         onPickZone: { [weak self] action in self?.pickStackZone(action) }
     )
@@ -58,6 +69,7 @@ final class LayoutMenuManager {
     /// The screen and window the panel is currently showing for.
     private var activeScreen: NSScreen?
     private var targetWindow: AXWindow?
+    private var isDropBarVisible = false
 
     /// Pre-move frame per window, the same shape as `SnapManager.snappedInfo`:
     /// remembers what to restore to, dropped once the window has moved away
@@ -148,6 +160,7 @@ final class LayoutMenuManager {
     }
 
     private func handleMouseMoved() {
+        if isDropBarVisible { return } // The drag monitor owns drop-bar tracking.
         let cursor = NSEvent.mouseLocation
 
         if panel.isVisible {
@@ -206,10 +219,83 @@ final class LayoutMenuManager {
         pruneUnreadableRestoreInfo()
         targetWindow = AXWindow.focusedWindow()
         activeScreen = screen
+        isDropBarVisible = false
+        dropState.highlightedZone = nil
         panel.show(on: screen)
     }
 
+    func showDropBar(on screen: NSScreen, for window: AXWindow) {
+        cancelDwell()
+        guard Permissions.accessibilityGranted else { return }
+        pruneUnreadableRestoreInfo()
+        targetWindow = window
+        activeScreen = screen
+        isDropBarVisible = true
+        dropState.highlightedZone = nil
+        panel.show(on: screen, ignoringMouseEvents: true)
+    }
+
+    func hideDropBar() {
+        guard isDropBarVisible else { return }
+        hidePanel(suppressRearm: true)
+    }
+
+    func dropZone(at point: CGPoint) -> LayoutDropZone? {
+        guard isDropBarVisible else { return nil }
+        return panel.dropZone(at: point)
+    }
+
+    func highlight(_ zone: LayoutDropZone?) {
+        guard isDropBarVisible, dropState.highlightedZone != zone else { return }
+        dropState.highlightedZone = zone
+    }
+
+    func isDropBarNear(_ point: CGPoint) -> Bool {
+        isDropBarVisible && panel.frame.insetBy(dx: -60, dy: -60).contains(point)
+    }
+
+    func dropPreviewFrame(for zone: LayoutDropZone) -> CGRect? {
+        guard isDropBarVisible, let screen = activeScreen, let window = targetWindow,
+              let currentFrame = window.frame else { return nil }
+        return targetFrame(for: zone, window: window, currentFrame: currentFrame, screen: screen)
+    }
+
+    @discardableResult
+    func applyDrop(_ zone: LayoutDropZone) -> Bool {
+        defer { hideDropBar() }
+        guard isDropBarVisible, let screen = activeScreen, let window = targetWindow,
+              let currentFrame = window.frame else { return false }
+        if case .preset(.restore) = zone {
+            restore(window: window, currentFrame: currentFrame)
+            return true
+        }
+        guard let action = action(for: zone),
+              let target = targetFrame(for: zone, window: window, currentFrame: currentFrame, screen: screen) else { return false }
+        apply(target, to: window, currentFrame: currentFrame, action: action, screen: screen)
+        return true
+    }
+
+    private func targetFrame(for zone: LayoutDropZone, window: AXWindow, currentFrame: CGRect,
+                             screen: NSScreen) -> CGRect? {
+        if case .preset(.restore) = zone {
+            guard let info = lastMoved[window], SnapGeometry.isClose(currentFrame, info.target) else { return nil }
+            return info.preMove
+        }
+        guard let action = action(for: zone) else { return nil }
+        return SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
+                                  currentWindowFrame: currentFrame, portrait: screen.frame.height > screen.frame.width)
+    }
+
+    private func action(for zone: LayoutDropZone) -> SnapAction? {
+        switch zone {
+        case .preset(let preset): return snapAction(for: preset)
+        case .stack(let action): return action
+        }
+    }
+
     private func hidePanel(suppressRearm: Bool = false) {
+        isDropBarVisible = false
+        dropState.highlightedZone = nil
         panel.hide()
         activeScreen = nil
         targetWindow = nil
@@ -306,9 +392,14 @@ final class LayoutMenuManager {
 /// just below the menu bar on the triggering display. Non-activating so the
 /// frontmost app (whose window the picks affect) never loses focus.
 private final class LayoutMenuPanel: NSPanel {
-    private static let size = CGSize(width: 360, height: 96)
+    fileprivate static let size = CGSize(width: 360, height: 96)
+    fileprivate static let tileWidth: CGFloat = 50
+    fileprivate static let tileHeight: CGFloat = 50
+    fileprivate static let tileSpacing: CGFloat = 6
+    private static let thumbnailSize = CGSize(width: 44, height: 30)
 
-    init(onPick: @escaping (LayoutPreset) -> Void, onPickZone: @escaping (SnapAction) -> Void) {
+    init(dropState: LayoutMenuDropState, onPick: @escaping (LayoutPreset) -> Void,
+         onPickZone: @escaping (SnapAction) -> Void) {
         super.init(contentRect: CGRect(origin: .zero, size: Self.size),
                    styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isOpaque = false
@@ -320,40 +411,75 @@ private final class LayoutMenuPanel: NSPanel {
         hidesOnDeactivate = false
         collectionBehavior = [.canJoinAllSpaces, .stationary, .ignoresCycle, .fullScreenAuxiliary]
 
-        let view = LayoutMenuView(onPick: onPick, onPickZone: onPickZone)
+        let view = LayoutMenuView(dropState: dropState, onPick: onPick, onPickZone: onPickZone)
         contentView = NSHostingView(rootView: view)
     }
 
     override var canBecomeKey: Bool { false }
 
-    func show(on screen: NSScreen) {
+    func show(on screen: NSScreen, ignoringMouseEvents: Bool = false) {
         // Below the menu bar (and any notch), not under it: `visibleFrame`
         // already excludes that area, unlike `frame`.
         let origin = CGPoint(x: screen.frame.midX - Self.size.width / 2, y: screen.visibleFrame.maxY - Self.size.height - 6)
+        self.ignoresMouseEvents = ignoringMouseEvents
         setFrame(CGRect(origin: origin, size: Self.size), display: true)
         orderFrontRegardless()
     }
 
-    func hide() { orderOut(nil) }
+    func dropZone(at point: CGPoint) -> LayoutDropZone? {
+        guard frame.contains(point) else { return nil }
+        let contentWidth = 6 * Self.tileWidth + 5 * Self.tileSpacing
+        let firstTileX = frame.minX + (frame.width - contentWidth) / 2
+        let offset = point.x - firstTileX
+        guard offset >= 0 else { return nil }
+        let stride = Self.tileWidth + Self.tileSpacing
+        let index = Int(offset / stride)
+        guard index < 6, offset - CGFloat(index) * stride < Self.tileWidth else { return nil }
+        if index < 5 {
+            let presets: [LayoutPreset] = [.leftHalf, .rightHalf, .center, .restore, .maximize]
+            return .preset(presets[index])
+        }
+
+        let tileMinY = frame.minY + (frame.height - Self.tileHeight) / 2
+        let thumbnail = CGRect(x: firstTileX + CGFloat(index) * stride + (Self.tileWidth - Self.thumbnailSize.width) / 2,
+                               y: tileMinY + 17, width: Self.thumbnailSize.width, height: Self.thumbnailSize.height)
+        guard thumbnail.contains(point) else { return nil }
+        let onRightThird = point.x >= thumbnail.minX + thumbnail.width * 2 / 3
+        guard onRightThird else { return .stack(.firstTwoThirds) }
+        return .stack(point.y >= thumbnail.midY ? .lastThirdTop : .lastThirdBottom)
+    }
+
+    func hide() {
+        orderOut(nil)
+        ignoresMouseEvents = false
+    }
 }
 
 /// SwiftUI content of the panel: a row of small screen-shaped thumbnails,
 /// each highlighting its zone(s) on hover.
 private struct LayoutMenuView: View {
+    @ObservedObject var dropState: LayoutMenuDropState
     let onPick: (LayoutPreset) -> Void
     let onPickZone: (SnapAction) -> Void
 
     var body: some View {
-        HStack(spacing: 10) {
-            SingleTile(title: "Left Half", rect: CGRect(x: 0, y: 0, width: 0.5, height: 1)) { onPick(.leftHalf) }
-            SingleTile(title: "Right Half", rect: CGRect(x: 0.5, y: 0, width: 0.5, height: 1)) { onPick(.rightHalf) }
-            SingleTile(title: "Center", rect: CGRect(x: 0.2, y: 0.15, width: 0.6, height: 0.7)) { onPick(.center) }
-            SingleTile(title: "Normal", rect: CGRect(x: 0.15, y: 0.15, width: 0.7, height: 0.7)) { onPick(.restore) }
-            SingleTile(title: "Maximize", rect: CGRect(x: 0, y: 0, width: 1, height: 1)) { onPick(.maximize) }
-            StackTile(onPickZone: onPickZone)
+        HStack(spacing: LayoutMenuPanel.tileSpacing) {
+            SingleTile(title: "Left Half", rect: CGRect(x: 0, y: 0, width: 0.5, height: 1),
+                       zone: .preset(.leftHalf), dropState: dropState) { onPick(.leftHalf) }
+            SingleTile(title: "Right Half", rect: CGRect(x: 0.5, y: 0, width: 0.5, height: 1),
+                       zone: .preset(.rightHalf), dropState: dropState) { onPick(.rightHalf) }
+            SingleTile(title: "Center", rect: CGRect(x: 0.2, y: 0.15, width: 0.6, height: 0.7),
+                       zone: .preset(.center), dropState: dropState) { onPick(.center) }
+            SingleTile(title: "Normal", rect: CGRect(x: 0.15, y: 0.15, width: 0.7, height: 0.7),
+                       zone: .preset(.restore), dropState: dropState) { onPick(.restore) }
+            SingleTile(title: "Maximize", rect: CGRect(x: 0, y: 0, width: 1, height: 1),
+                       zone: .preset(.maximize), dropState: dropState) { onPick(.maximize) }
+            StackTile(dropState: dropState, onPickZone: onPickZone)
         }
-        .padding(10)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .center)
+        .padding(15)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 12))
+        .frame(width: LayoutMenuPanel.size.width, height: LayoutMenuPanel.size.height)
     }
 }
 
@@ -362,6 +488,8 @@ private struct LayoutMenuView: View {
 private struct SingleTile: View {
     let title: String
     let rect: CGRect // unit rect, 0...1 in each axis, AppKit-style origin bottom-left
+    let zone: LayoutDropZone
+    @ObservedObject var dropState: LayoutMenuDropState
     let action: () -> Void
     @State private var hovering = false
 
@@ -374,13 +502,14 @@ private struct SingleTile: View {
                     .strokeBorder(Color.secondary.opacity(0.6), lineWidth: 1)
                     .background(RoundedRectangle(cornerRadius: 3).fill(Color.secondary.opacity(0.08)))
                 Rectangle()
-                    .fill(hovering ? Color.accentColor : Color.accentColor.opacity(0.55))
+                    .fill(hovering || dropState.highlightedZone == zone ? Color.accentColor : Color.accentColor.opacity(0.55))
                     .frame(width: rect.width * Self.size.width, height: rect.height * Self.size.height)
                     .offset(x: rect.minX * Self.size.width, y: -rect.minY * Self.size.height)
             }
             .frame(width: Self.size.width, height: Self.size.height)
-            Text(title).font(.system(size: 9)).foregroundStyle(.secondary)
+            Text(title).font(.system(size: 9)).lineLimit(1).minimumScaleFactor(0.8).foregroundStyle(.secondary)
         }
+        .frame(width: LayoutMenuPanel.tileWidth, height: LayoutMenuPanel.tileHeight)
         .contentShape(Rectangle())
         .onHover { hovering = $0 }
         .onTapGesture(perform: action)
@@ -390,6 +519,7 @@ private struct SingleTile: View {
 /// The sixth preset: one thumbnail, three independently clickable/hoverable
 /// zones (big left two-thirds, right-third top half, right-third bottom half).
 private struct StackTile: View {
+    @ObservedObject var dropState: LayoutMenuDropState
     let onPickZone: (SnapAction) -> Void
     @State private var hovered: SnapAction?
 
@@ -406,13 +536,14 @@ private struct StackTile: View {
                 zone(.lastThirdBottom, unit: CGRect(x: 2.0 / 3, y: 0, width: 1.0 / 3, height: 0.5))
             }
             .frame(width: Self.size.width, height: Self.size.height)
-            Text("Left + Stack").font(.system(size: 9)).foregroundStyle(.secondary)
+            Text("Left + Stack").font(.system(size: 9)).lineLimit(1).minimumScaleFactor(0.8).foregroundStyle(.secondary)
         }
+        .frame(width: LayoutMenuPanel.tileWidth, height: LayoutMenuPanel.tileHeight)
     }
 
     private func zone(_ action: SnapAction, unit: CGRect) -> some View {
         Rectangle()
-            .fill(hovered == action ? Color.accentColor : Color.accentColor.opacity(0.55))
+            .fill(hovered == action || dropState.highlightedZone == .stack(action) ? Color.accentColor : Color.accentColor.opacity(0.55))
             .frame(width: unit.width * Self.size.width, height: unit.height * Self.size.height)
             .offset(x: unit.minX * Self.size.width, y: -unit.minY * Self.size.height)
             .contentShape(Rectangle())
