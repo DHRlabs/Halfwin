@@ -46,18 +46,33 @@ final class DockPreviewPanel {
     }
 
     /// `dockFrame`, `itemFrame`, and `visibleFrame` use AppKit's global screen coordinates.
-    func show(items: [DockPreviewItem], edge: DockPreviewEdge, dockFrame: CGRect, itemFrame: CGRect, visibleFrame: CGRect) {
+    func show(
+        items: [DockPreviewItem],
+        edge: DockPreviewEdge,
+        dockFrame: CGRect,
+        itemFrame: CGRect,
+        visibleFrame: CGRect,
+        previewScale: CGFloat = 1,
+        preservingImages: Bool = false
+    ) {
         guard !items.isEmpty else {
             hide()
             return
         }
 
+        let existingImages = state.images
         state.items = items
-        state.images.removeAll(keepingCapacity: true)
+        let itemIDs = Set(items.map(\.id))
+        state.images = preservingImages ? existingImages.filter { itemIDs.contains($0.key) } : [:]
         state.edge = edge
 
         let horizontalDock = edge == .bottom
-        let layout = panelLayout(for: items.count, horizontalDock: horizontalDock, visibleFrame: visibleFrame)
+        let layout = panelLayout(
+            for: items.count,
+            horizontalDock: horizontalDock,
+            visibleFrame: visibleFrame,
+            previewScale: previewScale
+        )
         state.panelSize = layout.panelSize
         state.tileSize = layout.tileSize
         state.spacing = layout.spacing
@@ -89,9 +104,16 @@ final class DockPreviewPanel {
         state.images.removeAll(keepingCapacity: true)
     }
 
-    private func panelLayout(for count: Int, horizontalDock: Bool, visibleFrame: CGRect) -> (panelSize: CGSize, tileSize: CGSize, spacing: CGFloat) {
-        let idealTileSize = horizontalDock ? CGSize(width: 176, height: 132) : CGSize(width: 220, height: 126)
-        let idealSpacing: CGFloat = 10
+    private func panelLayout(
+        for count: Int,
+        horizontalDock: Bool,
+        visibleFrame: CGRect,
+        previewScale: CGFloat
+    ) -> (panelSize: CGSize, tileSize: CGSize, spacing: CGFloat) {
+        let baseTileSize = horizontalDock ? CGSize(width: 176, height: 132) : CGSize(width: 220, height: 126)
+        let requestedScale = min(max(previewScale, 1), 3)
+        let idealTileSize = CGSize(width: baseTileSize.width * requestedScale, height: baseTileSize.height * requestedScale)
+        let idealSpacing: CGFloat = 10 * requestedScale
         let tileCount = CGFloat(count)
         let contentSize = horizontalDock
             ? CGSize(width: tileCount * idealTileSize.width + (tileCount - 1) * idealSpacing, height: idealTileSize.height)
@@ -102,11 +124,11 @@ final class DockPreviewPanel {
         )
         let contentWidth = max(0, panelSize.width - 16)
         let contentHeight = max(0, panelSize.height - 16)
-        let scale = min(1, min(contentWidth / contentSize.width, contentHeight / contentSize.height))
+        let fitScale = min(1, min(contentWidth / contentSize.width, contentHeight / contentSize.height))
         return (
             panelSize,
-            CGSize(width: idealTileSize.width * scale, height: idealTileSize.height * scale),
-            idealSpacing * scale
+            CGSize(width: idealTileSize.width * fitScale, height: idealTileSize.height * fitScale),
+            idealSpacing * fitScale
         )
     }
 }
@@ -152,11 +174,13 @@ private struct DockPreviewTilesView: View {
     }
 
     private func tile(_ item: DockPreviewItem) -> some View {
-        let inset = min(7, min(state.tileSize.width, state.tileSize.height) * 0.05)
-        let rowSpacing = min(6, state.tileSize.height * 0.05)
-        let titleSize = min(12, state.tileSize.height * 0.095)
-        let imageHeight = min(92, max(0, state.tileSize.height - inset * 2 - rowSpacing - titleSize * 1.2))
-        let iconSize = min(42, min(state.tileSize.width, state.tileSize.height) * 0.45)
+        let baseWidth: CGFloat = horizontalDock ? 176 : 220
+        let tileScale = state.tileSize.width / baseWidth
+        let inset = min(7 * tileScale, min(state.tileSize.width, state.tileSize.height) * 0.05)
+        let rowSpacing = min(6 * tileScale, state.tileSize.height * 0.05)
+        let titleSize = min(12 * tileScale, state.tileSize.height * 0.095)
+        let imageHeight = min(92 * tileScale, max(0, state.tileSize.height - inset * 2 - rowSpacing - titleSize * 1.2))
+        let iconSize = min(42 * tileScale, min(state.tileSize.width, state.tileSize.height) * 0.45)
         return Button { onSelect(item.id) } label: {
             VStack(alignment: .leading, spacing: rowSpacing) {
                 ZStack {
