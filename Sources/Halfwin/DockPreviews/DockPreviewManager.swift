@@ -113,6 +113,7 @@ final class DockPreviewManager {
     private var shareableContentTask: Task<(SCShareableContent?, Date), Never>?
     private var shareableContentRequestID: UUID?
     private var shareableContentTaskIsForced = false
+    private var cachedOnScreenWindowRecords: (records: [CGWindowRecord], loadedAt: TimeInterval)?
     private let panel = DockPreviewPanel()
     private let settings: DockPreviewSettings
 
@@ -678,6 +679,7 @@ final class DockPreviewManager {
             AXUIElementSetMessagingTimeout(element, 0.1)
             if AXWindow.subrole(of: element) == (kAXMinimizeButtonSubrole as String),
                let windowElement: AXUIElement = attribute(element, kAXWindowAttribute) {
+                AXUIElementSetMessagingTimeout(windowElement, 0.1)
                 let window = AXWindow(element: windowElement)
                 guard let processID = window.processIdentifier,
                       let record = matchingVisibleWindow(
@@ -707,9 +709,19 @@ final class DockPreviewManager {
             guard window.isOnScreen, window.owningApplication?.processID != dockPID else { return false }
             return isInTitleBar(window.frame.axFlipped)
         }) == true { return true }
-        return windowRecordsIfReadable(options: .optionOnScreenOnly)?.contains { record in
+        return recentOnScreenWindowRecords()?.contains { record in
             record.isOnScreen && record.processID != dockPID && record.frame.map(isInTitleBar) == true
         } == true
+    }
+
+    private func recentOnScreenWindowRecords() -> [CGWindowRecord]? {
+        let now = ProcessInfo.processInfo.systemUptime
+        if let cachedOnScreenWindowRecords, now - cachedOnScreenWindowRecords.loadedAt <= 0.25 {
+            return cachedOnScreenWindowRecords.records
+        }
+        guard let records = windowRecordsIfReadable(options: .optionOnScreenOnly) else { return nil }
+        cachedOnScreenWindowRecords = (records, now)
+        return records
     }
 
     private func captureFrontmostFocusedWindow(
@@ -813,7 +825,7 @@ final class DockPreviewManager {
             click.previousMinimizedSet = prunedMinimizedSet(for: processID)
             click.focusedWindow = AXWindow.focusedWindow(of: click.app)
                 .flatMap { visibleWindows.contains($0) ? $0 : nil }
-            click.thumbnailTask = warmThumbnails(matchedWindows.map(\.record.id))
+            click.thumbnailTask = warmThumbnails(matchedWindows.map(\.record.id), usingSavedContent: true)
         }
         observeWindowMinimization(in: click.app, windows: appWindows)
         DispatchQueue.main.asyncAfter(deadline: .now() + NSEvent.doubleClickInterval) { [weak self] in
