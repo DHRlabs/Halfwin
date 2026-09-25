@@ -219,11 +219,12 @@ private final class MouseEventTap {
 
         if type == .scrollWheel, scrollEnabled, let scrollEvent = NSEvent(cgEvent: event) {
             let isInverted = scrollEvent.isDirectionInvertedFromDevice
+            let isContinuous = event.getIntegerValueField(.scrollWheelEventIsContinuous) == 1
             let isUnshiftedMouseWheel = event.getIntegerValueField(.scrollWheelEventIsContinuous) == 0
                 && !event.flags.contains(.maskShift)
-            // Unshifted mouse wheels use natural-scroll inversion vertically and its opposite horizontally.
-            let reverseAxis1 = isInverted
-            let reverseAxis2 = isUnshiftedMouseWheel ? !isInverted : isInverted
+            // Continuous scroll follows the fingers regardless of macOS natural scrolling; mouse-wheel rules are unchanged.
+            let reverseAxis1 = isContinuous ? !isInverted : isInverted
+            let reverseAxis2 = isUnshiftedMouseWheel ? !isInverted : reverseAxis1
             if reverseAxis1 || reverseAxis2 {
                 reverseScrollDeltas(event, axis1: reverseAxis1, axis2: reverseAxis2)
             }
