@@ -1677,6 +1677,7 @@ private func captureWindowThumbnail(_ window: SCWindow, width: Int, maxHeight: I
     guard !Task.isCancelled else { return nil }
     let filter = SCContentFilter(desktopIndependentWindow: window)
     let configuration = SCStreamConfiguration()
+    configuration.ignoreShadowsSingleWindow = true
     let sourceWidth = max(window.frame.width, 1)
     let sourceHeight = max(window.frame.height, 1)
     let widthScale = CGFloat(width) / sourceWidth
