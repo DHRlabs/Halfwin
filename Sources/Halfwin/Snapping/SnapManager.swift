@@ -239,7 +239,7 @@ final class SnapManager {
             guard !NSScreen.screens.contains(where: { $0 != screen && $0.frame.contains(pointAbove) }) else { return false }
             return cursor.x >= frame.minX && cursor.x <= frame.maxX &&
                 cursor.y >= frame.maxY - 8 && cursor.y <= frame.maxY &&
-                abs(cursor.x - frame.midX) <= 200
+                abs(cursor.x - frame.midX) <= layoutMenu.hotZoneWidth / 2
         }
     }
 

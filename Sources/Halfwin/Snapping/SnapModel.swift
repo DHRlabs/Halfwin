@@ -30,6 +30,7 @@ enum SnapAction: String, CaseIterable, Codable {
     case center
     case topLeftQuarter, topRightQuarter, bottomLeftQuarter, bottomRightQuarter
     case firstThird, centerThird, lastThird
+    case commandCenterLeft, commandCenter, commandCenterRight
     case firstTwoThirds, lastTwoThirds
     case lastThirdTop, lastThirdBottom
     case leftTopBottomHalfCompound
@@ -52,10 +53,13 @@ enum SnapAction: String, CaseIterable, Codable {
         case .firstThird: return "First Third"
         case .centerThird: return "Center Third"
         case .lastThird: return "Last Third"
+        case .commandCenterLeft: return "Command Center Left"
+        case .commandCenter: return "Command Center"
+        case .commandCenterRight: return "Command Center Right"
         case .firstTwoThirds: return "First Two Thirds"
         case .lastTwoThirds: return "Last Two Thirds"
-        case .lastThirdTop: return "Last Third — Top Half"
-        case .lastThirdBottom: return "Last Third — Bottom Half"
+        case .lastThirdTop: return "Last Third Top Half"
+        case .lastThirdBottom: return "Last Third Bottom Half"
         case .leftTopBottomHalfCompound: return "Left Half (Top/Bottom Half Near Corners)"
         case .rightTopBottomHalfCompound: return "Right Half (Top/Bottom Half Near Corners)"
         case .bottomThirdsCompound: return "Thirds (Drag to Center for Two Thirds)"
@@ -64,6 +68,78 @@ enum SnapAction: String, CaseIterable, Codable {
 }
 
 typealias SnapMap = [SnapPosition: SnapAction]
+
+struct SnapLayoutZone {
+    let action: SnapAction
+    let rect: CGRect
+}
+
+/// Shared ordered zones for menu tiles, snap memory, and Snap Assist.
+enum SnapMultiWindowLayout: CaseIterable, Equatable {
+    case halves, leftStack, thirds, commandCenter
+
+    var title: String {
+        switch self {
+        case .halves: return "Halves"
+        case .thirds: return "Thirds"
+        case .leftStack: return "Left + Stack"
+        case .commandCenter: return "Command Center"
+        }
+    }
+
+    var zones: [SnapLayoutZone] {
+        switch self {
+        case .halves:
+            return [
+                SnapLayoutZone(action: .leftHalf, rect: CGRect(x: 0, y: 0, width: 0.5, height: 1)),
+                SnapLayoutZone(action: .rightHalf, rect: CGRect(x: 0.5, y: 0, width: 0.5, height: 1)),
+            ]
+        case .thirds:
+            return [
+                SnapLayoutZone(action: .firstThird, rect: CGRect(x: 0, y: 0, width: 1.0 / 3, height: 1)),
+                SnapLayoutZone(action: .centerThird, rect: CGRect(x: 1.0 / 3, y: 0, width: 1.0 / 3, height: 1)),
+                SnapLayoutZone(action: .lastThird, rect: CGRect(x: 2.0 / 3, y: 0, width: 1.0 / 3, height: 1)),
+            ]
+        case .leftStack:
+            return [
+                SnapLayoutZone(action: .firstTwoThirds, rect: CGRect(x: 0, y: 0, width: 2.0 / 3, height: 1)),
+                SnapLayoutZone(action: .lastThirdTop, rect: CGRect(x: 2.0 / 3, y: 0.5, width: 1.0 / 3, height: 0.5)),
+                SnapLayoutZone(action: .lastThirdBottom, rect: CGRect(x: 2.0 / 3, y: 0, width: 1.0 / 3, height: 0.5)),
+            ]
+        case .commandCenter:
+            let side = SnapGeometry.commandCenterSideFraction
+            return [
+                SnapLayoutZone(action: .commandCenterLeft, rect: CGRect(x: 0, y: 0, width: side, height: 1)),
+                SnapLayoutZone(action: .commandCenter, rect: CGRect(x: side, y: 0, width: 1 - 2 * side, height: 1)),
+                SnapLayoutZone(action: .commandCenterRight, rect: CGRect(x: 1 - side, y: 0, width: side, height: 1)),
+            ]
+        }
+    }
+
+    func zones(portrait: Bool) -> [SnapLayoutZone] {
+        guard portrait else { return zones }
+        return zones.map { zone in
+            let action: SnapAction
+            if self == .leftStack {
+                switch zone.action {
+                case .lastThirdTop: action = .lastThirdBottom
+                case .lastThirdBottom: action = .lastThirdTop
+                default: action = zone.action
+                }
+            } else {
+                action = zone.action
+            }
+            let rect = zone.rect
+            return SnapLayoutZone(action: action,
+                                  rect: CGRect(x: rect.minY, y: 1 - rect.maxX,
+                                               width: rect.height, height: rect.width))
+        }
+    }
+
+    static func containing(_ action: SnapAction) -> Self? {
+        allCases.first { $0.zones.contains { $0.action == action } }
+    }
+}
 
 /// Persists the drag-snapping zone map (Codable, UserDefaults-backed) and the
 /// on/off switch. Lance's own Rectangle map ships as the default; Settings

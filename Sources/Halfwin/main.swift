@@ -10,7 +10,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let snapAssistManager = SnapAssistManager()
     private let snapGroupsManager = SnapGroupsManager()
     private let snapAssistSwitch = FeatureSwitch(key: "snapAssist", title: "Snap Assist", defaultOn: true)
-    private let snapGroupsSwitch = FeatureSwitch(key: "snapGroups", title: "Snap Groups", defaultOn: true)
+    private let snapGroupsSwitch = FeatureSwitch(key: "snapGroups", title: "Snap Groups", defaultOn: false)
     private let dragToTopLayoutsSwitch = FeatureSwitch(key: "drag-to-top-layouts", title: "Drag to top for layouts", defaultOn: true)
     private let dockPreviewsSwitch = FeatureSwitch(key: "dock-previews", title: "Dock previews", defaultOn: true)
     private let clickDockIconMinimizeSwitch = FeatureSwitch(key: "click-dock-icon-to-minimize", title: "Click Dock icon to minimize", defaultOn: true)
