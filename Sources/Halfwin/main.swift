@@ -16,17 +16,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let clickDockIconMinimizeSwitch = FeatureSwitch(key: "click-dock-icon-to-minimize", title: "Click Dock icon to minimize", defaultOn: true)
     private let layoutMenuSettings = LayoutMenuSettings.shared
     private let dockPreviewSettings = DockPreviewSettings.shared
+    private let autoTileSettings = AutoTileSettings.shared
     private lazy var dockPreviewsManager = MainActor.assumeIsolated { DockPreviewManager(settings: dockPreviewSettings) }
     private lazy var layoutMenuManager = LayoutMenuManager(settings: layoutMenuSettings)
+    private lazy var autoTileManager = AutoTileManager(settings: autoTileSettings)
     private lazy var windowExtrasManager = WindowExtrasManager()
     private let greenButtonSwitch = FeatureSwitch(key: "green-button-maximizes", title: "Green button maximizes", defaultOn: true)
     private let titleBarSwitch = FeatureSwitch(key: "title-bar-double-click-maximizes", title: "Double-click title bar maximizes", defaultOn: true)
     private let showDesktopSwitch = FeatureSwitch(key: "show-desktop-corner", title: "Show desktop corner", defaultOn: true)
     private let commandArrowSwitch = FeatureSwitch(key: "command-arrow-snapping", title: "Command-arrow snapping", defaultOn: true)
+    private let autoTileSwitch = FeatureSwitch(key: "auto-tile", title: "Auto-tile", defaultOn: false)
     private lazy var settingsWindowController = SettingsWindowController(
         settings: snapSettings,
         layoutMenuSettings: layoutMenuSettings,
-        dockPreviewSettings: dockPreviewSettings
+        dockPreviewSettings: dockPreviewSettings,
+        autoTileSettings: autoTileSettings
     )
     private let menu = NSMenu()
     private var statusItem: NSStatusItem!
@@ -74,12 +78,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         ) { [weak self] _ in
             self?.snapAssistManager.refreshPermission()
             self?.snapGroupsManager.refreshPermission()
+            self?.autoTileManager.refreshPermission()
             MainActor.assumeIsolated { self?.dockPreviewsManager.refreshPermission() }
         }
         SnapEvents.handler = { [weak self] window, action, screen in
             self?.snapAssistManager.didSnap(window: window, action: action, screen: screen)
             self?.snapGroupsManager.didSnap(window: window, action: action, screen: screen)
+            self?.autoTileManager.didSnap(window: window, action: action, screen: screen)
         }
+        autoTileSwitch.onChange = { [weak self] in self?.autoTileManager.setEnabled($0) }
         snapAssistSwitch.onChange = { [weak self] in self?.snapAssistManager.setEnabled($0) }
         snapGroupsSwitch.onChange = { [weak self] in self?.snapGroupsManager.setEnabled($0) }
         dragToTopLayoutsSwitch.onChange = { [weak self] in self?.snapManager.setDragToTopLayoutsEnabled($0) }
@@ -101,6 +108,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dragToTopLayoutsSwitch.start()
         dockPreviewsSwitch.start()
         clickDockIconMinimizeSwitch.start()
+        autoTileSwitch.start()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         keyboardExtras.onCutPendingChange = { [weak self] pending in
@@ -132,6 +140,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         dockPreviewsManager.stop()
         snapGroupsManager.stop()
         snapAssistManager.setEnabled(false)
+        autoTileManager.stop()
         keyboardExtras.stop()
     }
 
@@ -144,6 +153,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         snapGroupsManager.refreshPermission()
         windowExtrasManager.refreshPermission()
         dockPreviewsManager.refreshPermission()
+        autoTileManager.refreshPermission()
         keyboardExtras.refreshPermission()
     }
 
@@ -177,6 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(titleBarSwitch.makeMenuItem())
         menu.addItem(showDesktopSwitch.makeMenuItem())
         menu.addItem(commandArrowSwitch.makeMenuItem())
+        menu.addItem(autoTileSwitch.makeMenuItem())
 
         menu.addItem(.separator())
 

@@ -5,6 +5,7 @@ struct SettingsView: View {
     @ObservedObject var settings: SnapSettings
     @ObservedObject var layoutMenuSettings: LayoutMenuSettings
     @ObservedObject var dockPreviewSettings: DockPreviewSettings
+    @ObservedObject var autoTileSettings: AutoTileSettings
 
     var body: some View {
         Form {
@@ -33,6 +34,29 @@ struct SettingsView: View {
                     Text("Command Center side width: \(Int((layoutMenuSettings.commandCenterSideFraction * 100).rounded()))%")
                 }
             }
+            Section("Auto-tile") {
+                Picker("Layout", selection: $autoTileSettings.layout) {
+                    ForEach(AutoTileLayout.allCases) { layout in Text(layout.rawValue).tag(layout) }
+                }
+                Stepper(value: $autoTileSettings.columnWidth, in: 0.35...1.0, step: 0.05) {
+                    Text("Column width: \(Int((autoTileSettings.columnWidth * 100).rounded()))%")
+                }
+                Stepper(value: $autoTileSettings.gap, in: 0...24, step: 1) {
+                    Text("Gap: \(Int(autoTileSettings.gap)) pt")
+                }
+                Picker("Keyboard modifier", selection: $autoTileSettings.modifier) {
+                    ForEach(AutoTileModifier.allCases) { modifier in Text(modifier.rawValue).tag(modifier) }
+                }
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("Always-float app bundle IDs")
+                    TextEditor(text: Binding(
+                        get: { autoTileSettings.alwaysFloatAppIDs.joined(separator: "\n") },
+                        set: { autoTileSettings.alwaysFloatAppIDs = $0.components(separatedBy: .newlines) }
+                    ))
+                    .font(.system(.caption, design: .monospaced))
+                    .frame(height: 76)
+                }
+            }
             Section("Dock previews") {
                 Toggle("Peek at windows on hover", isOn: $dockPreviewSettings.peekOnHover)
                 Stepper(value: $dockPreviewSettings.hoverDelay, in: 0.0...0.5, step: 0.05) {
@@ -44,7 +68,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 420, height: 570)
+        .frame(width: 420, height: 690)
     }
 
     private func binding(for position: SnapPosition) -> Binding<SnapAction> {
@@ -57,9 +81,10 @@ struct SettingsView: View {
 
 /// Hosts `SettingsView` in a plain `NSWindow`, opened from the menu (Cmd-,).
 final class SettingsWindowController: NSWindowController {
-    convenience init(settings: SnapSettings, layoutMenuSettings: LayoutMenuSettings, dockPreviewSettings: DockPreviewSettings) {
+    convenience init(settings: SnapSettings, layoutMenuSettings: LayoutMenuSettings,
+                     dockPreviewSettings: DockPreviewSettings, autoTileSettings: AutoTileSettings) {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 570),
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 690),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -69,7 +94,8 @@ final class SettingsWindowController: NSWindowController {
             rootView: SettingsView(
                 settings: settings,
                 layoutMenuSettings: layoutMenuSettings,
-                dockPreviewSettings: dockPreviewSettings
+                dockPreviewSettings: dockPreviewSettings,
+                autoTileSettings: autoTileSettings
             )
         )
         window.center()
