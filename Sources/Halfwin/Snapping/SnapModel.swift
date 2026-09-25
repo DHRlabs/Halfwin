@@ -116,6 +116,26 @@ enum SnapMultiWindowLayout: CaseIterable, Equatable {
         }
     }
 
+    func zones(portrait: Bool) -> [SnapLayoutZone] {
+        guard portrait else { return zones }
+        return zones.map { zone in
+            let action: SnapAction
+            if self == .leftStack {
+                switch zone.action {
+                case .lastThirdTop: action = .lastThirdBottom
+                case .lastThirdBottom: action = .lastThirdTop
+                default: action = zone.action
+                }
+            } else {
+                action = zone.action
+            }
+            let rect = zone.rect
+            return SnapLayoutZone(action: action,
+                                  rect: CGRect(x: rect.minY, y: 1 - rect.maxX,
+                                               width: rect.height, height: rect.width))
+        }
+    }
+
     static func containing(_ action: SnapAction) -> Self? {
         allCases.first { $0.zones.contains { $0.action == action } }
     }

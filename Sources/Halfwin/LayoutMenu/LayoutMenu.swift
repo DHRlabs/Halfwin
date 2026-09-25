@@ -71,6 +71,7 @@ private enum LayoutMenuTiles {
 private final class LayoutMenuDropState: ObservableObject {
     @Published var highlightedZone: LayoutDropZone?
     @Published var isDropMode = false
+    @Published var isPortrait = false
     @Published var showCount = 0
 }
 
@@ -439,7 +440,7 @@ final class LayoutMenuManager {
 /// just below the menu bar on the triggering display. Non-activating so the
 /// frontmost app (whose window the picks affect) never loses focus.
 private final class LayoutMenuPanel: NSPanel {
-    fileprivate static let tileWidth: CGFloat = 50
+    fileprivate static let tileWidth: CGFloat = 66
     fileprivate static let tileHeight: CGFloat = 50
     fileprivate static let tileSpacing: CGFloat = 6
     fileprivate static let tileCount = 5 + LayoutMenuTiles.multiZone.count
@@ -448,9 +449,11 @@ private final class LayoutMenuPanel: NSPanel {
         height: 96
     )
     private static let thumbnailSize = CGSize(width: 44, height: 30)
+    private let dropState: LayoutMenuDropState
 
     init(dropState: LayoutMenuDropState, onPick: @escaping (LayoutPreset) -> Void,
          onPickZone: @escaping (SnapAction) -> Void) {
+        self.dropState = dropState
         super.init(contentRect: CGRect(origin: .zero, size: Self.size),
                    styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isOpaque = false
@@ -471,6 +474,7 @@ private final class LayoutMenuPanel: NSPanel {
     func show(on screen: NSScreen, ignoringMouseEvents: Bool = false) {
         // Below the menu bar (and any notch), not under it: `visibleFrame`
         // already excludes that area, unlike `frame`.
+        dropState.isPortrait = screen.frame.height > screen.frame.width
         let origin = CGPoint(x: screen.frame.midX - Self.size.width / 2, y: screen.visibleFrame.maxY - Self.size.height - 6)
         self.ignoresMouseEvents = ignoringMouseEvents
         setFrame(CGRect(origin: origin, size: Self.size), display: true)
@@ -498,7 +502,7 @@ private final class LayoutMenuPanel: NSPanel {
         guard thumbnail.contains(point) else { return nil }
         let unitPoint = CGPoint(x: (point.x - thumbnail.minX) / thumbnail.width,
                                 y: (point.y - thumbnail.minY) / thumbnail.height)
-        return tile.zones.first { $0.rect.contains(unitPoint) }.map { .layout($0.action) }
+        return tile.zones(portrait: dropState.isPortrait).first { $0.rect.contains(unitPoint) }.map { .layout($0.action) }
     }
 
     func hide() {
@@ -583,12 +587,13 @@ private struct MultiZoneTileView: View {
     private static let size = CGSize(width: 44, height: 30)
 
     var body: some View {
+        let zones = tile.zones(portrait: dropState.isPortrait)
         VStack(spacing: 4) {
             ZStack(alignment: .bottomLeading) {
                 RoundedRectangle(cornerRadius: 3)
                     .strokeBorder(Color.secondary.opacity(0.6), lineWidth: 1)
                     .background(RoundedRectangle(cornerRadius: 3).fill(Color.secondary.opacity(0.08)))
-                ForEach(tile.zones, id: \.action) { zone in
+                ForEach(zones, id: \.action) { zone in
                     zoneView(zone)
                 }
             }
