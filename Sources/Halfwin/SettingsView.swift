@@ -3,6 +3,7 @@ import AppKit
 
 struct SettingsView: View {
     @ObservedObject var settings: SnapSettings
+    @ObservedObject var snapAssistSettings: SnapAssistSettings
     @ObservedObject var layoutMenuSettings: LayoutMenuSettings
     @ObservedObject var dockPreviewSettings: DockPreviewSettings
     @ObservedObject var autoTileSettings: AutoTileSettings
@@ -22,6 +23,11 @@ struct SettingsView: View {
                 }
                 Button("Restore Lance's Defaults") {
                     settings.restoreLanceDefaults()
+                }
+            }
+            Section("Snap Assist") {
+                Picker("Fill empty spots", selection: $snapAssistSettings.fillEmptySpots) {
+                    ForEach(SnapAssistFillMode.allCases) { mode in Text(mode.title).tag(mode) }
                 }
             }
             Section("Layout menu") {
@@ -78,7 +84,7 @@ struct SettingsView: View {
             }
         }
         .formStyle(.grouped)
-        .frame(width: 420, height: 690)
+        .frame(width: 420, height: 740)
     }
 
     private func binding(for position: SnapPosition) -> Binding<SnapAction> {
@@ -97,10 +103,11 @@ struct SettingsView: View {
 
 /// Hosts `SettingsView` in a plain `NSWindow`, opened from the menu (Cmd-,).
 final class SettingsWindowController: NSWindowController {
-    convenience init(settings: SnapSettings, layoutMenuSettings: LayoutMenuSettings,
+    convenience init(settings: SnapSettings, snapAssistSettings: SnapAssistSettings,
+                     layoutMenuSettings: LayoutMenuSettings,
                      dockPreviewSettings: DockPreviewSettings, autoTileSettings: AutoTileSettings) {
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 420, height: 690),
+            contentRect: NSRect(x: 0, y: 0, width: 420, height: 740),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -109,6 +116,7 @@ final class SettingsWindowController: NSWindowController {
         window.contentViewController = NSHostingController(
             rootView: SettingsView(
                 settings: settings,
+                snapAssistSettings: snapAssistSettings,
                 layoutMenuSettings: layoutMenuSettings,
                 dockPreviewSettings: dockPreviewSettings,
                 autoTileSettings: autoTileSettings
