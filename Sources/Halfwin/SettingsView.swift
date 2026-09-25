@@ -25,6 +25,12 @@ struct SettingsView: View {
                 Stepper(value: $layoutMenuSettings.dwellDelay, in: 0.1...1.5, step: 0.05) {
                     Text("Dwell delay: \(layoutMenuSettings.dwellDelay, specifier: "%.2f")s")
                 }
+                Stepper(value: $layoutMenuSettings.hotZoneWidth, in: 200...1200, step: 50) {
+                    Text("Top hot zone width: \(Int(layoutMenuSettings.hotZoneWidth)) pt")
+                }
+                Stepper(value: $layoutMenuSettings.commandCenterSideFraction, in: 0.15...0.35, step: 0.01) {
+                    Text("Command Center side width: \(Int((layoutMenuSettings.commandCenterSideFraction * 100).rounded()))%")
+                }
             }
         }
         .formStyle(.grouped)
