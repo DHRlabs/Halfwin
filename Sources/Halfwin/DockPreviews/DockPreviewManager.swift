@@ -112,6 +112,7 @@ final class DockPreviewManager {
     private var shareableContentCache: CachedShareableContent?
     private var shareableContentTask: Task<(SCShareableContent?, Date), Never>?
     private var shareableContentRequestID: UUID?
+    private var shareableContentTaskIsForced = false
     private let panel = DockPreviewPanel()
     private let settings: DockPreviewSettings
 
@@ -283,6 +284,7 @@ final class DockPreviewManager {
         shareableContentTask?.cancel()
         shareableContentTask = nil
         shareableContentRequestID = nil
+        shareableContentTaskIsForced = false
         shareableContentCache = nil
         hidePreview()
     }
@@ -517,7 +519,7 @@ final class DockPreviewManager {
               let app = NSWorkspace.shared.runningApplications.first(where: { $0.processIdentifier == processID }),
               NSWorkspace.shared.frontmostApplication?.processIdentifier == processID else { return }
         refreshPreviewCacheLater(for: app)
-        refreshThumbnails(for: app, priority: .utility)
+        _ = captureFrontmostFocusedWindow(in: app, priority: .utility, usingSavedContent: true)
     }
 
     func windowWillMinimize(_ element: AXUIElement) {
@@ -673,6 +675,7 @@ final class DockPreviewManager {
               clickMayBeMinimizeButton(atQuartzPoint: point),
               var element = AXWindow.element(atQuartzPoint: point) else { return }
         for _ in 0..<8 {
+            AXUIElementSetMessagingTimeout(element, 0.1)
             if AXWindow.subrole(of: element) == (kAXMinimizeButtonSubrole as String),
                let windowElement: AXUIElement = attribute(element, kAXWindowAttribute) {
                 let window = AXWindow(element: windowElement)
@@ -691,19 +694,22 @@ final class DockPreviewManager {
 
     private func clickMayBeMinimizeButton(atQuartzPoint point: CGPoint) -> Bool {
         let point = point.axFlipped
-        guard dockListFrame?.contains(point) != true,
-              let windows = shareableContentCache?.content.windows else { return false }
-        return windows.contains { window in
-            guard window.isOnScreen, window.owningApplication?.processID != dockPID else { return false }
-            let frame = window.frame.axFlipped
-            let titleBarButtons = CGRect(
+        guard dockListFrame?.contains(point) != true else { return false }
+        let isInTitleBar: (CGRect) -> Bool = { frame in
+            CGRect(
                 x: frame.minX,
                 y: frame.maxY - min(30, frame.height),
                 width: min(90, frame.width),
                 height: min(30, frame.height)
-            )
-            return titleBarButtons.contains(point)
+            ).contains(point)
         }
+        if shareableContentCache?.content.windows.contains(where: { window in
+            guard window.isOnScreen, window.owningApplication?.processID != dockPID else { return false }
+            return isInTitleBar(window.frame.axFlipped)
+        }) == true { return true }
+        return windowRecordsIfReadable(options: .optionOnScreenOnly)?.contains { record in
+            record.isOnScreen && record.processID != dockPID && record.frame.map(isInTitleBar) == true
+        } == true
     }
 
     private func captureFrontmostFocusedWindow(
@@ -711,8 +717,7 @@ final class DockPreviewManager {
         priority: TaskPriority = .userInitiated,
         usingSavedContent: Bool = false
     ) -> Task<Void, Never>? {
-        guard previewsEnabled, running, Permissions.accessibilityGranted,
-              Permissions.screenRecordingGranted,
+        guard canCapturePreviews, Permissions.accessibilityGranted,
               let app,
               let window = AXWindow.focusedWindow(of: app),
               let processID = window.processIdentifier,
@@ -1053,8 +1058,9 @@ final class DockPreviewManager {
         var nextWindows: [Int: AXWindow] = [:]
         var screenshotIDs: [Int: CGWindowID] = [:]
         let icon = app.icon ?? NSWorkspace.shared.icon(forFile: app.bundleURL?.path ?? "")
-        let appWindows = AXWindow.standardWindows(of: app)
-        guard !appWindows.isEmpty else { return previewCache[processID] }
+        guard let appWindows = AXWindow.standardWindowsIfReadable(of: app) else {
+            return previewCache[processID]
+        }
 
         for window in appWindows {
             let minimized = window.isMinimized
@@ -1158,7 +1164,7 @@ final class DockPreviewManager {
         guard backgroundCaptureTimer == nil else { return }
         backgroundCaptureTimer = Timer.scheduledTimer(withTimeInterval: 4, repeats: true) { [weak self] _ in
             MainActor.assumeIsolated {
-                guard let self else { return }
+                guard let self, self.canCapturePreviews else { return }
                 self.backgroundCaptureTask?.cancel()
                 self.backgroundCaptureTask = self.captureFrontmostFocusedWindow(
                     in: NSWorkspace.shared.frontmostApplication,
@@ -1196,7 +1202,10 @@ final class DockPreviewManager {
         guard canCapturePreviews, !windowIDs.isEmpty else { return nil }
         let targetWidth = captureWidth
         let savedContent = usingSavedContent ? shareableContentCache?.content : nil
-        prefetchShareableContent()
+        let savedWindowIDs = Set(savedContent?.windows.map(\.windowID) ?? [])
+        let needsFreshContent = usingSavedContent && !windowIDs.allSatisfy(savedWindowIDs.contains)
+        let contentRefreshTask = needsFreshContent ? prefetchShareableContent(forceRefresh: true) : nil
+        if !needsFreshContent { prefetchShareableContent() }
         let taskID = UUID()
         let task = Task.detached(priority: priority) { [weak self] in
             guard let self else { return }
@@ -1205,8 +1214,10 @@ final class DockPreviewManager {
             }
             guard await self.canCapturePreviews, !Task.isCancelled else { return }
             let content: SCShareableContent?
-            if let savedContent {
+            if !needsFreshContent, let savedContent {
                 content = savedContent
+            } else if let contentRefreshTask {
+                content = (await contentRefreshTask.value).0
             } else {
                 content = await self.shareableContentForCapture()
             }
@@ -1243,16 +1254,25 @@ final class DockPreviewManager {
         for await _ in finished { break }
     }
 
-    private func prefetchShareableContent() {
-        if let cache = shareableContentCache, Date().timeIntervalSince(cache.loadedAt) <= 4 { return }
-        guard shareableContentTask == nil else { return }
+    @discardableResult
+    private func prefetchShareableContent(
+        forceRefresh: Bool = false
+    ) -> Task<(SCShareableContent?, Date), Never>? {
+        if !forceRefresh, let cache = shareableContentCache, Date().timeIntervalSince(cache.loadedAt) <= 4 {
+            return nil
+        }
+        if let shareableContentTask {
+            if !forceRefresh || shareableContentTaskIsForced { return shareableContentTask }
+            shareableContentTask.cancel()
+        }
         let requestID = UUID()
-        let task = Task.detached(priority: .utility) {
+        let task = Task.detached(priority: forceRefresh ? .userInitiated : .utility) {
             let content = try? await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
             return (content, Date())
         }
         shareableContentTask = task
         shareableContentRequestID = requestID
+        shareableContentTaskIsForced = forceRefresh
         Task { [weak self] in
             let (content, loadedAt) = await task.value
             guard let self, self.shareableContentRequestID == requestID else { return }
@@ -1261,7 +1281,9 @@ final class DockPreviewManager {
             }
             self.shareableContentTask = nil
             self.shareableContentRequestID = nil
+            self.shareableContentTaskIsForced = false
         }
+        return task
     }
 
     private func shareableContentForCapture() async -> SCShareableContent? {
@@ -1277,6 +1299,7 @@ final class DockPreviewManager {
             }
             shareableContentTask = nil
             shareableContentRequestID = nil
+            shareableContentTaskIsForced = false
         }
         return content
     }
