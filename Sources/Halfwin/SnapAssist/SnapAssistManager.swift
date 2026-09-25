@@ -37,10 +37,16 @@ final class SnapAssistManager {
     private var activationObserver: NSObjectProtocol?
     private var spaceObserver: NSObjectProtocol?
     private var screenObserver: NSObjectProtocol?
+    private var thumbnailTask: Task<Void, Never>?
 
     private var panel: SnapAssistPanel?
+    private let settings: SnapAssistSettings
+    private let thumbnailProvider: @MainActor ([CGWindowID]) async -> [CGWindowID: CGImage]
 
-    init() {
+    init(settings: SnapAssistSettings,
+         thumbnailProvider: @escaping @MainActor ([CGWindowID]) async -> [CGWindowID: CGImage]) {
+        self.settings = settings
+        self.thumbnailProvider = thumbnailProvider
         activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
         ) { [weak self] notification in
@@ -70,10 +76,10 @@ final class SnapAssistManager {
         refreshPermission()
     }
 
-    func didSnap(window: AXWindow, action: SnapAction, screen: NSScreen) {
+    func didSnap(window: AXWindow, action: SnapAction, screen: NSScreen, origin: SnapOrigin = .other) {
         let layout = remember(window: window, action: action, screen: screen)
         guard !suppressNextAssist else { return }
-        guard enabled, Permissions.accessibilityGranted, let layout else {
+        guard let layout else {
             hidePanel()
             return
         }
@@ -82,6 +88,13 @@ final class SnapAssistManager {
         activeLayout = layout
         pickedWindows = [window]
         lastSnappedProcessIdentifier = window.processIdentifier
+        if origin == .layoutMenu, settings.fillEmptySpots == .mostRecent {
+            fillEmptyZones(in: layout, excluding: window, on: screen)
+        }
+        guard enabled, Permissions.accessibilityGranted else {
+            hidePanel()
+            return
+        }
         showNextZone()
     }
 
@@ -143,6 +156,8 @@ final class SnapAssistManager {
     }
 
     private func hidePanel() {
+        thumbnailTask?.cancel()
+        thumbnailTask = nil
         panel?.hide()
         activeScreen = nil
         activeWindow = nil
@@ -221,6 +236,36 @@ final class SnapAssistManager {
         return layout
     }
 
+    private func fillEmptyZones(in layout: SnapMultiWindowLayout, excluding window: AXWindow, on screen: NSScreen) {
+        guard Permissions.accessibilityGranted else { return }
+        let display = Display(screen)
+        guard var memory = zoneMemory[display], memory.layout == layout else { return }
+        _ = prune(&memory, on: display)
+        zoneMemory[display] = memory
+
+        var excluded = Set(memory.windows.values.map(\.window))
+        excluded.insert(window)
+        var choices = SnapWindowInventory.choices(on: screen, excluding: excluded).makeIterator()
+        var filled: [(AXWindow, SnapAction)] = []
+        for zone in layout.zones where memory.windows[zone.action] == nil {
+            guard let choice = choices.next(), let current = choice.window.frame,
+                  let target = SnapGeometry.frame(for: zone.action, visibleFrame: screen.visibleFrame,
+                                                  currentWindowFrame: current,
+                                                  portrait: screen.frame.height > screen.frame.width) else { continue }
+            choice.window.setFrame(target)
+            guard let readBack = choice.window.frame, SnapGeometry.isClose(readBack, target) else { continue }
+            memory.windows[zone.action] = RememberedWindow(window: choice.window)
+            filled.append((choice.window, zone.action))
+        }
+        zoneMemory[display] = memory
+        for (window, action) in filled {
+            suppressNextAssist = true
+            SnapEvents.didSnap(window: window, action: action, screen: screen)
+            suppressNextAssist = false
+        }
+        zoneMemory[display] = memory
+    }
+
     private func showNextZone() {
         guard enabled, Permissions.accessibilityGranted,
               let screen = activeScreen, let layout = activeLayout else {
@@ -253,6 +298,13 @@ final class SnapAssistManager {
         let panel = self.panel ?? SnapAssistPanel { [weak self] choice in self?.pick(choice) }
         self.panel = panel
         panel.show(frame: frame, choices: choices)
+        thumbnailTask?.cancel()
+        let thumbnailProvider = self.thumbnailProvider
+        thumbnailTask = Task { @MainActor [weak self] in
+            let images = await thumbnailProvider(choices.map(\.id))
+            guard !Task.isCancelled, let self, self.activeAction == zone.action else { return }
+            self.panel?.setImages(images)
+        }
     }
 
     private func pruneGoneDisplays() {
@@ -310,7 +362,7 @@ enum SnapWindowInventory {
     static func choices(on screen: NSScreen, excluding excluded: Set<AXWindow>) -> [SnapWindowChoice] {
         let applications = Dictionary(
             NSWorkspace.shared.runningApplications
-                .filter { $0.activationPolicy == .regular }
+                .filter { $0.activationPolicy == .regular && !$0.isHidden }
                 .map { ($0.processIdentifier, $0) },
             uniquingKeysWith: { first, _ in first }
         )
@@ -377,13 +429,18 @@ enum SnapWindowInventory {
 
 private final class SnapAssistPanel: NSPanel {
     private let onPick: (SnapWindowChoice) -> Void
+    private var choices: [SnapWindowChoice] = []
+    private var images: [CGWindowID: CGImage] = [:]
+    private var assistView: AcceptingFirstMouseHostingView<SnapAssistView>?
 
     init(onPick: @escaping (SnapWindowChoice) -> Void) {
         self.onPick = onPick
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isOpaque = false
         backgroundColor = .clear
+        isFloatingPanel = true
         level = .floating
+        animationBehavior = .none
         hasShadow = true
         isReleasedWhenClosed = false
         hidesOnDeactivate = false
@@ -393,9 +450,18 @@ private final class SnapAssistPanel: NSPanel {
     override var canBecomeKey: Bool { false }
 
     func show(frame: CGRect, choices: [SnapWindowChoice]) {
-        contentView = AcceptingFirstMouseHostingView(rootView: SnapAssistView(choices: choices, onPick: onPick))
+        self.choices = choices
+        images = [:]
+        let assistView = AcceptingFirstMouseHostingView(rootView: SnapAssistView(choices: choices, images: images, onPick: onPick))
+        self.assistView = assistView
+        contentView = assistView
         setFrame(frame, display: true)
         orderFrontRegardless()
+    }
+
+    func setImages(_ images: [CGWindowID: CGImage]) {
+        self.images = images
+        assistView?.rootView = SnapAssistView(choices: choices, images: images, onPick: onPick)
     }
 
     func hide() { orderOut(nil) }
@@ -406,35 +472,65 @@ private final class AcceptingFirstMouseHostingView<Content: View>: NSHostingView
 }
 
 private struct SnapAssistView: View {
-    var choices: [SnapWindowChoice] = []
+    let choices: [SnapWindowChoice]
+    let images: [CGWindowID: CGImage]
     let onPick: (SnapWindowChoice) -> Void
 
     var body: some View {
-        ScrollView {
-            if choices.isEmpty {
-                Text("No other windows").foregroundStyle(.secondary)
-                    .frame(maxWidth: .infinity, minHeight: 60)
-            } else {
-                LazyVGrid(columns: [GridItem(.adaptive(minimum: 120, maximum: 190), spacing: 8)], spacing: 8) {
+        GeometryReader { geometry in
+            let size = geometry.size
+            let count = max(choices.count, 1)
+            let width = max(size.width - 20, 1)
+            let height = max(size.height - 20, 1)
+            let columns = min(count, max(1, Int(ceil(sqrt(Double(count) * Double(width / height))))))
+            let rows = (count + columns - 1) / columns
+            let cellHeight = max(70, (height - CGFloat(rows - 1) * 8) / CGFloat(rows))
+            let imageHeight = max(24, cellHeight - 58)
+            ZStack {
+                Rectangle().fill(.ultraThinMaterial)
+                Color.black.opacity(0.16)
+                LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: columns), spacing: 8) {
                     ForEach(choices) { choice in
                         Button { onPick(choice) } label: {
-                            HStack(alignment: .top, spacing: 8) {
-                                if let icon = choice.application.icon {
-                                    Image(nsImage: icon).resizable().frame(width: 28, height: 28)
+                            VStack(spacing: 6) {
+                                Group {
+                                    if let image = images[choice.id] {
+                                        Image(nsImage: NSImage(cgImage: image, size: .zero))
+                                            .resizable().scaledToFit()
+                                    } else {
+                                        appIcon(for: choice)
+                                            .frame(width: min(72, imageHeight * 0.55), height: min(72, imageHeight * 0.55))
+                                    }
                                 }
-                                Text(choice.title).font(.system(size: 12)).lineLimit(2)
-                                    .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
+                                .frame(maxWidth: .infinity).frame(height: imageHeight)
+                                .background(Color.black.opacity(0.22), in: RoundedRectangle(cornerRadius: 6))
+                                HStack(spacing: 6) {
+                                    appIcon(for: choice).frame(width: 20, height: 20)
+                                    Text(choice.title).font(.system(size: 12, weight: .medium)).lineLimit(2)
+                                        .multilineTextAlignment(.leading).frame(maxWidth: .infinity, alignment: .leading)
+                                }
+                                .frame(height: 32)
                             }
-                            .padding(8).frame(maxWidth: .infinity, minHeight: 48, alignment: .leading)
-                            .background(.quaternary, in: RoundedRectangle(cornerRadius: 8))
+                            .padding(7).frame(maxWidth: .infinity).frame(height: cellHeight)
+                            .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
+                            .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.white.opacity(0.12)))
                         }
                         .buttonStyle(.plain)
                         .accessibilityLabel(choice.title)
                     }
                 }
+                .padding(10)
             }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
-        .padding(10)
-        .background(.regularMaterial)
+    }
+
+    @ViewBuilder
+    private func appIcon(for choice: SnapWindowChoice) -> some View {
+        if let icon = choice.application.icon {
+            Image(nsImage: icon).resizable().scaledToFit()
+        } else {
+            Image(systemName: "app.fill").resizable().scaledToFit()
+        }
     }
 }
