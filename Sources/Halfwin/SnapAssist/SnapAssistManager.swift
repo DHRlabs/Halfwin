@@ -203,6 +203,9 @@ final class SnapAssistManager {
             let canUpdate = prune(&current, on: display)
             memory = current
             if !canUpdate {
+                if !window.isMinimized, window.frame != nil {
+                    current.windows[action] = RememberedWindow(window: window)
+                }
                 zoneMemory[display] = current
                 return layout
             }
