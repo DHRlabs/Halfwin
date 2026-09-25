@@ -200,8 +200,12 @@ final class SnapAssistManager {
         if memory?.layout != layout {
             memory = ZoneMemory(layout: layout, windows: [:])
         } else if var current = memory {
-            prune(&current, on: display, listReadFailureCountsAsPresent: false)
+            let canUpdate = prune(&current, on: display)
             memory = current
+            if !canUpdate {
+                zoneMemory[display] = current
+                return layout
+            }
         }
         guard var memory else { return layout }
         if let previous = memory.windows[action], previous.window != window {
@@ -226,7 +230,7 @@ final class SnapAssistManager {
             hidePanel()
             return
         }
-        prune(&memory, on: display, listReadFailureCountsAsPresent: true)
+        _ = prune(&memory, on: display)
         zoneMemory[display] = memory
         let filledActions = Set(memory.windows.keys)
         guard let zone = layout.zones.first(where: { !filledActions.contains($0.action) }),
@@ -253,7 +257,8 @@ final class SnapAssistManager {
         zoneMemory = zoneMemory.filter { displays.contains($0.key) }
     }
 
-    private func prune(_ memory: inout ZoneMemory, on display: Display, listReadFailureCountsAsPresent: Bool) {
+    private func prune(_ memory: inout ZoneMemory, on display: Display) -> Bool {
+        let savedWindows = memory.windows
         for action in Array(memory.windows.keys) {
             guard let member = memory.windows[action], let frame = member.window.frame,
                   !member.window.isMinimized,
@@ -268,12 +273,13 @@ final class SnapAssistManager {
                 memory.windows.removeValue(forKey: action)
                 continue
             }
-            if let present = SnapWindowInventory.isOnCurrentSpaceIfReadable(member.window, on: screen) {
-                if !present { memory.windows.removeValue(forKey: action) }
-            } else if !listReadFailureCountsAsPresent {
-                memory.windows.removeValue(forKey: action)
+            guard let present = SnapWindowInventory.isOnCurrentSpaceIfReadable(member.window, on: screen) else {
+                memory.windows = savedWindows
+                return false
             }
+            if !present { memory.windows.removeValue(forKey: action) }
         }
+        return true
     }
 }
 
