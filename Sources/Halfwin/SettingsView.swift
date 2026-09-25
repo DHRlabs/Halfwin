@@ -6,6 +6,7 @@ struct SettingsView: View {
     @ObservedObject var layoutMenuSettings: LayoutMenuSettings
     @ObservedObject var dockPreviewSettings: DockPreviewSettings
     @ObservedObject var autoTileSettings: AutoTileSettings
+    @ObservedObject var notificationCount: NotificationCountManager
     @State private var alwaysFloatAppIDsText: String?
     @FocusState private var alwaysFloatAppIDsFocused: Bool
 
@@ -73,6 +74,36 @@ struct SettingsView: View {
                     Text("Preview size: \(Int(dockPreviewSettings.previewSize * 100))%")
                 }
             }
+            Section("Notifications") {
+                Text("1. Leave Do Not Disturb on with no allowed apps to keep banners quiet.")
+                Button("Open Focus Settings") { openSystemSettings("com.apple.Focus-Settings.extension") }
+                Text("2. Turn off Desktop banners per app and choose By Application grouping.")
+                Button("Open Notifications Settings") { openSystemSettings("com.apple.Notifications-Settings.extension") }
+                if !notificationCount.hasAccessibility {
+                    Text("Accessibility access is required to read Dock badge counts.")
+                    Button("Open Accessibility Settings", action: Permissions.requestAccessibility)
+                } else if !notificationCount.isEnabled {
+                    Text("Turn on Notification count in Halfwin's menu to list Dock badges.")
+                } else {
+                    Text("Current waiting count: \(notificationCount.total)")
+                    if notificationCount.apps.isEmpty {
+                        Text("No app Dock badges are visible right now.").foregroundStyle(.secondary)
+                    }
+                    ForEach(notificationCount.apps) { app in
+                        Toggle(isOn: Binding(
+                            get: { notificationCount.isIncluded(app.id) },
+                            set: { notificationCount.setIncluded($0, for: app.id) }
+                        )) {
+                            HStack {
+                                Text(app.name)
+                                Spacer()
+                                Text("\(app.count)").foregroundStyle(.secondary)
+                            }
+                        }
+                        .toggleStyle(.checkbox)
+                    }
+                }
+            }
         }
         .formStyle(.grouped)
         .frame(width: 420, height: 690)
@@ -90,12 +121,17 @@ struct SettingsView: View {
         autoTileSettings.alwaysFloatAppIDs = text.components(separatedBy: .newlines)
         alwaysFloatAppIDsText = autoTileSettings.alwaysFloatAppIDs.joined(separator: "\n")
     }
+
+    private func openSystemSettings(_ pane: String) {
+        if let url = URL(string: "x-apple.systempreferences:\(pane)") { NSWorkspace.shared.open(url) }
+    }
 }
 
 /// Hosts `SettingsView` in a plain `NSWindow`, opened from the menu (Cmd-,).
 final class SettingsWindowController: NSWindowController {
     convenience init(settings: SnapSettings, layoutMenuSettings: LayoutMenuSettings,
-                     dockPreviewSettings: DockPreviewSettings, autoTileSettings: AutoTileSettings) {
+                     dockPreviewSettings: DockPreviewSettings, autoTileSettings: AutoTileSettings,
+                     notificationCount: NotificationCountManager) {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 690),
             styleMask: [.titled, .closable],
@@ -108,7 +144,8 @@ final class SettingsWindowController: NSWindowController {
                 settings: settings,
                 layoutMenuSettings: layoutMenuSettings,
                 dockPreviewSettings: dockPreviewSettings,
-                autoTileSettings: autoTileSettings
+                autoTileSettings: autoTileSettings,
+                notificationCount: notificationCount
             )
         )
         window.center()
