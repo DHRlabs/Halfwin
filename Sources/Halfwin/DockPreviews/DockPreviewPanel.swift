@@ -33,6 +33,7 @@ final class DockPreviewPanel {
         self.panel = panel
         panel.isOpaque = false
         panel.backgroundColor = .clear
+        panel.animationBehavior = .none
         // isFloatingPanel resets level, so set it before level.
         panel.isFloatingPanel = true
         panel.level = .popUpMenu
