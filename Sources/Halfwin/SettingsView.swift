@@ -6,6 +6,7 @@ struct SettingsView: View {
     @ObservedObject var layoutMenuSettings: LayoutMenuSettings
     @ObservedObject var dockPreviewSettings: DockPreviewSettings
     @ObservedObject var autoTileSettings: AutoTileSettings
+    @State private var alwaysFloatAppIDsText: String?
 
     var body: some View {
         Form {
@@ -50,11 +51,16 @@ struct SettingsView: View {
                 VStack(alignment: .leading, spacing: 4) {
                     Text("Always-float app bundle IDs")
                     TextEditor(text: Binding(
-                        get: { autoTileSettings.alwaysFloatAppIDs.joined(separator: "\n") },
-                        set: { autoTileSettings.alwaysFloatAppIDs = $0.components(separatedBy: .newlines) }
+                        get: { alwaysFloatAppIDsText ?? autoTileSettings.alwaysFloatAppIDs.joined(separator: "\n") },
+                        set: { alwaysFloatAppIDsText = $0 }
                     ))
                     .font(.system(.caption, design: .monospaced))
                     .frame(height: 76)
+                    Button("Save IDs") {
+                        let text = alwaysFloatAppIDsText ?? autoTileSettings.alwaysFloatAppIDs.joined(separator: "\n")
+                        autoTileSettings.alwaysFloatAppIDs = text.components(separatedBy: .newlines)
+                        alwaysFloatAppIDsText = autoTileSettings.alwaysFloatAppIDs.joined(separator: "\n")
+                    }
                 }
             }
             Section("Dock previews") {

@@ -20,14 +20,20 @@ final class AutoTileManager {
         var windows = Set<AXWindow>()
     }
 
+    private struct WindowIdentity: Hashable {
+        let bundleID: String
+        let title: String
+    }
+
     private struct Parking {
         let originalFrame: CGRect
         let display: Display
+        let identity: WindowIdentity?
     }
 
     private struct ExpectedFrame {
         let frames: [CGRect]
-        let expiresAt: TimeInterval
+        var notifications: Set<String>
     }
 
     private struct AppliedFrame {
@@ -52,9 +58,13 @@ final class AutoTileManager {
     private var activeCountByDisplay: [Display: Int] = [:]
     private var arrivalOrder: [AXWindow: Int] = [:]
     private var focusOrder: [AXWindow: Int] = [:]
+    private var lastFocusedWindow: AXWindow?
     private var userFloated = Set<AXWindow>()
     private var handPlaced = Set<AXWindow>()
     private var parked: [AXWindow: Parking] = [:]
+    private var identities: [AXWindow: WindowIdentity] = [:]
+    private var originalSizes: [AXWindow: CGSize] = [:]
+    private var savedFramesByIdentity: [WindowIdentity: CGRect] = [:]
     private var expectedFrames: [AXWindow: ExpectedFrame] = [:]
     private var appliedFrames: [AXWindow: AppliedFrame] = [:]
     private var nextOrder = 0
@@ -117,6 +127,7 @@ final class AutoTileManager {
         userFloated.remove(window)
         removeFromManagedWindows(window)
         parked.removeValue(forKey: window)
+        if let frame = window.frame { originalSizes[window] = frame.size }
         expectedFrames.removeValue(forKey: window)
         appliedFrames.removeValue(forKey: window)
         if enabled { scheduleReflow() }
@@ -145,6 +156,10 @@ final class AutoTileManager {
             workspaceObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] notification in
                 guard let self else { return }
                 if notification.name == NSWorkspace.activeSpaceDidChangeNotification { self.restoreParkedWindows() }
+                if notification.name == NSWorkspace.didTerminateApplicationNotification,
+                   let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication {
+                    self.rememberParkedFrames(for: app)
+                }
                 if notification.name == NSWorkspace.didActivateApplicationNotification,
                    let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                    let focused = AXWindow.focusedWindow(of: app) {
@@ -189,9 +204,16 @@ final class AutoTileManager {
             guard let windows = AXWindow.standardWindowsIfReadable(of: app) else { continue }
             readableProcesses.insert(app.processIdentifier)
             liveWindows.formUnion(windows)
-            for window in windows where arrivalOrder[window] == nil {
-                arrivalOrder[window] = nextOrder
-                nextOrder += 1
+            for window in windows {
+                if arrivalOrder[window] == nil {
+                    arrivalOrder[window] = nextOrder
+                    nextOrder += 1
+                }
+                if let bundleID = app.bundleIdentifier, let title = window.title {
+                    identities[window] = WindowIdentity(bundleID: bundleID, title: title)
+                }
+                if let frame = window.frame, originalSizes[window] == nil { originalSizes[window] = frame.size }
+                recoverUnexpectedParking(window, app: app)
             }
             updateObservation(for: app, windows: windows)
         }
@@ -204,9 +226,11 @@ final class AutoTileManager {
             for choice in SnapWindowInventory.choices(on: screen, excluding: []) {
                 let window = choice.window
                 guard !choice.application.isHidden, let frame = window.frame,
-                      frame.width >= 200, frame.height >= 200,
+                      (originalSizes[window] ?? frame.size).width >= 200,
+                      (originalSizes[window] ?? frame.size).height >= 200,
                       !floatApps.contains(choice.application.bundleIdentifier ?? ""),
                       !window.isMinimized, !isFullScreen(window), isResizable(window) else { continue }
+                if originalSizes[window] == nil { originalSizes[window] = frame.size }
                 liveWindows.insert(window)
                 if arrivalOrder[window] == nil {
                     arrivalOrder[window] = nextOrder
@@ -233,7 +257,7 @@ final class AutoTileManager {
                 }
             }
             active = (windowsByDisplay[display] ?? []).filter { active.contains($0) }
-            if let frontmost, active.contains(frontmost), settings.layout == .columns {
+            if let frontmost, active.contains(frontmost) {
                 revealFocusedWindow(frontmost, among: active, on: display, screen: screen)
             }
             switch settings.layout {
@@ -284,8 +308,11 @@ final class AutoTileManager {
         guard enabled else { return }
         if notification == kAXMovedNotification as String || notification == kAXResizedNotification as String {
             let window = AXWindow(element: element)
-            if isExpectedFrame(window) { return }
+            if isExpectedFrame(window, notification: notification) { return }
             guard !userFloated.contains(window), !handPlaced.contains(window) else { return }
+            if notification == kAXResizedNotification as String, let frame = window.frame {
+                originalSizes[window] = frame.size
+            }
             handPlaced.insert(window)
             removeFromManagedWindows(window)
             parked.removeValue(forKey: window)
@@ -301,14 +328,17 @@ final class AutoTileManager {
         scheduleReflow()
     }
 
-    private func isExpectedFrame(_ window: AXWindow) -> Bool {
-        guard let expected = expectedFrames[window] else { return false }
-        if ProcessInfo.processInfo.systemUptime > expected.expiresAt {
+    private func isExpectedFrame(_ window: AXWindow, notification: String) -> Bool {
+        guard var expected = expectedFrames[window] else { return false }
+        guard let frame = window.frame else { return false }
+        guard expected.frames.contains(where: { SnapGeometry.isClose(frame, $0, tolerance: 5) }) else {
             expectedFrames.removeValue(forKey: window)
             return false
         }
-        guard let frame = window.frame else { return false }
-        return expected.frames.contains { SnapGeometry.isClose(frame, $0, tolerance: 5) }
+        expected.notifications.remove(notification)
+        if expected.notifications.isEmpty { expectedFrames.removeValue(forKey: window) }
+        else { expectedFrames[window] = expected }
+        return true
     }
 
     private func isFullScreen(_ window: AXWindow) -> Bool {
@@ -348,6 +378,9 @@ final class AutoTileManager {
         removeFromManagedWindows(window)
         arrivalOrder.removeValue(forKey: window)
         focusOrder.removeValue(forKey: window)
+        if lastFocusedWindow == window { lastFocusedWindow = nil }
+        identities.removeValue(forKey: window)
+        originalSizes.removeValue(forKey: window)
         userFloated.remove(window)
         handPlaced.remove(window)
         expectedFrames.removeValue(forKey: window)
@@ -360,6 +393,7 @@ final class AutoTileManager {
             guard let pid = window.processIdentifier else { removeAllState(for: window); continue }
             if apps[pid] != nil && !readableProcesses.contains(pid) { continue }
             guard liveWindows.contains(window) else {
+                if apps[pid] == nil { rememberParkedFrame(for: window) }
                 removeAllState(for: window)
                 continue
             }
@@ -373,8 +407,12 @@ final class AutoTileManager {
             guard let frame = window.frame,
                   let screen = NSScreen.screens.first(where: { $0.frame.contains(CGPoint(x: frame.midX, y: frame.midY)) }),
                   let bundleID = app.bundleIdentifier,
-                  !settings.alwaysFloatAppIDs.contains(bundleID), !isFullScreen(window), isResizable(window),
-                  frame.width >= 200, frame.height >= 200 else {
+                  !settings.alwaysFloatAppIDs.contains(bundleID), !isFullScreen(window), isResizable(window) else {
+                removeFromManagedWindows(window)
+                continue
+            }
+            let originalSize = originalSizes[window] ?? frame.size
+            guard originalSize.width >= 200, originalSize.height >= 200 else {
                 removeFromManagedWindows(window)
                 continue
             }
@@ -406,15 +444,15 @@ final class AutoTileManager {
             scrollStartByDisplay.removeValue(forKey: display)
             activeCountByDisplay.removeValue(forKey: display)
         }
-        let now = ProcessInfo.processInfo.systemUptime
-        for window in Array(expectedFrames.keys) where (expectedFrames[window]?.expiresAt ?? 0) < now {
-            expectedFrames.removeValue(forKey: window)
-        }
     }
 
     private func noteFocus(_ window: AXWindow) {
         focusOrder[window] = nextOrder
         nextOrder += 1
+        if window.processIdentifier != ProcessInfo.processInfo.processIdentifier,
+           AXWindow.subrole(of: window.element) == kAXStandardWindowSubrole {
+            lastFocusedWindow = window
+        }
     }
 
     private func orderedForBig(_ windows: [AXWindow], on display: Display, preferred: AXWindow?) -> [AXWindow] {
@@ -437,25 +475,40 @@ final class AutoTileManager {
 
     private func tileBigLeft(_ windows: [AXWindow], on display: Display, screen: NSScreen, preferred: AXWindow?) {
         guard !windows.isEmpty else { return }
-        let area = screen.visibleFrame.insetBy(dx: CGFloat(settings.gap), dy: CGFloat(settings.gap))
         let gap = CGFloat(settings.gap)
+        let area = screen.visibleFrame.insetBy(dx: gap, dy: gap)
+        guard area.width >= 200, area.height >= 200 else { return }
         let ordered = orderedForBig(windows, on: display, preferred: preferred)
+        let leftWidth = floor(max(0, area.width - gap) * 2 / 3)
+        let rightWidth = area.width - leftWidth - gap
+        let stackCapacity = leftWidth >= 200 && rightWidth >= 200
+            ? Int(floor((area.height + gap) / (200 + gap))) : 0
+        let visibleCount = min(ordered.count, 1 + stackCapacity)
         let targets: [CGRect]
-        if ordered.count == 1 {
+        if visibleCount == 1 {
             targets = [area]
         } else {
-            let leftWidth = floor(max(0, area.width - gap) * 2 / 3)
-            let rightX = area.minX + leftWidth + gap
-            let stackHeight = max(0, area.height - gap * CGFloat(ordered.count - 2)) / CGFloat(ordered.count - 1)
+            let stackHeight = (area.height - gap * CGFloat(visibleCount - 2)) / CGFloat(visibleCount - 1)
             targets = [
                 CGRect(x: area.minX, y: area.minY, width: leftWidth, height: area.height)
-            ] + (1..<ordered.count).map { index in
+            ] + (1..<visibleCount).map { index in
                 let slot = index - 1
-                return CGRect(x: rightX, y: area.maxY - CGFloat(slot + 1) * stackHeight - CGFloat(slot) * gap,
-                              width: max(0, area.maxX - rightX), height: stackHeight)
+                return CGRect(x: area.minX + leftWidth + gap,
+                              y: area.maxY - CGFloat(slot + 1) * stackHeight - CGFloat(slot) * gap,
+                              width: rightWidth, height: stackHeight)
             }
         }
         for (window, target) in zip(ordered, targets) { place(window, at: target, clearParking: true) }
+        let extras = Array(ordered.dropFirst(visibleCount))
+        if !extras.isEmpty {
+            let size = CGSize(width: ordered.compactMap { $0.frame?.width }.max() ?? 0,
+                              height: ordered.compactMap { $0.frame?.height }.max() ?? 0)
+            if let corner = parkingCorner(on: screen, size: size) {
+                for window in extras { parkWindow(window, in: corner, display: display) }
+            } else {
+                for window in extras where parked[window] != nil { restoreParked(window) }
+            }
+        }
     }
 
     private func tileColumns(_ windows: [AXWindow], on display: Display, screen: NSScreen) {
@@ -463,20 +516,16 @@ final class AutoTileManager {
         guard !windows.isEmpty else { return }
         let gap = CGFloat(settings.gap)
         let area = screen.visibleFrame.insetBy(dx: gap, dy: gap)
-        let width = max(1, area.width * CGFloat(settings.columnWidth))
         let capacity = columnCapacity(in: screen)
+        guard capacity > 0, area.height >= 200 else { return }
+        let width = max(0, (area.width - gap * CGFloat(capacity - 1)) * CGFloat(settings.columnWidth))
+        let visibleCount = min(windows.count, capacity)
+        let columnWidth = windows.count < capacity
+            ? (area.width - gap * CGFloat(visibleCount - 1)) / CGFloat(visibleCount)
+            : width
         let parkingSize = CGSize(width: windows.map { $0.frame?.width ?? 0 }.max() ?? 0,
                                  height: windows.map { $0.frame?.height ?? 0 }.max() ?? 0)
         let corner = parkingCorner(on: screen, size: parkingSize)
-        if windows.count <= capacity || corner == nil {
-            let colWidth = max(0, (area.width - gap * CGFloat(windows.count - 1)) / CGFloat(windows.count))
-            for (index, window) in windows.enumerated() {
-                place(window, at: CGRect(x: area.minX + CGFloat(index) * (colWidth + gap), y: area.minY,
-                                         width: colWidth, height: area.height), clearParking: true)
-            }
-            return
-        }
-
         let maxStart = max(0, windows.count - capacity)
         let start = min(max(scrollStartByDisplay[display, default: 0], 0), maxStart)
         scrollStartByDisplay[display] = start
@@ -485,10 +534,12 @@ final class AutoTileManager {
             let window = windows[index]
             if index >= start && index < end {
                 let visibleIndex = index - start
-                place(window, at: CGRect(x: area.minX + CGFloat(visibleIndex) * (width + gap), y: area.minY,
-                                         width: width, height: area.height), clearParking: true)
+                place(window, at: CGRect(x: area.minX + CGFloat(visibleIndex) * (columnWidth + gap), y: area.minY,
+                                         width: columnWidth, height: area.height), clearParking: true)
             } else if let corner {
                 parkWindow(window, in: corner, display: display)
+            } else if parked[window] != nil {
+                restoreParked(window)
             }
         }
     }
@@ -497,7 +548,7 @@ final class AutoTileManager {
 
     private func parkingCorner(on screen: NSScreen, size: CGSize) -> ParkingCorner? {
         for corner in [ParkingCorner.bottomLeft, .bottomRight, .topLeft, .topRight] {
-            let parkedFrame = parkingFrame(size: size, corner: corner, displayFrame: screen.frame)
+            let parkedFrame = parkingFrame(size: size, corner: corner, usableFrame: screen.visibleFrame)
             if !NSScreen.screens.contains(where: { $0 != screen && $0.frame.intersects(parkedFrame) }) { return corner }
         }
         return nil
@@ -505,17 +556,37 @@ final class AutoTileManager {
 
     private func parkWindow(_ window: AXWindow, in corner: ParkingCorner, display: Display) {
         guard let frame = window.frame else { return }
-        if parked[window] == nil { parked[window] = Parking(originalFrame: frame, display: display) }
-        place(window, at: parkingFrame(size: frame.size, corner: corner, displayFrame: display.frame))
+        if parked[window] == nil {
+            parked[window] = Parking(originalFrame: frame, display: display, identity: identities[window])
+        }
+        let usableFrame = NSScreen.screens.first(where: { Display($0) == display })?.visibleFrame ?? display.frame
+        place(window, at: parkingFrame(size: frame.size, corner: corner, usableFrame: usableFrame))
     }
 
-    private func parkingFrame(size: CGSize, corner: ParkingCorner, displayFrame: CGRect) -> CGRect {
+    private func parkingFrame(size: CGSize, corner: ParkingCorner, usableFrame: CGRect) -> CGRect {
         let sliver: CGFloat = 18
         let x = corner == .bottomLeft || corner == .topLeft
-            ? displayFrame.minX - size.width + sliver : displayFrame.maxX - sliver
+            ? usableFrame.minX - size.width + sliver : usableFrame.maxX - sliver
         let y = corner == .bottomLeft || corner == .bottomRight
-            ? displayFrame.minY - size.height + sliver : displayFrame.maxY - sliver
+            ? usableFrame.minY - size.height + sliver : usableFrame.maxY - sliver
         return CGRect(x: x, y: y, width: size.width, height: size.height)
+    }
+
+    private func parkingCorner(of frame: CGRect, on screen: NSScreen) -> ParkingCorner? {
+        let bounds = screen.visibleFrame
+        let sliver: CGFloat = 23
+        let visible = frame.intersection(bounds)
+        guard frame.width > 0, frame.height > 0,
+              visible.width * visible.height <= frame.width * frame.height * 0.2 else { return nil }
+        if frame.minX < bounds.minX, frame.maxX <= bounds.minX + sliver,
+           frame.minY < bounds.minY, frame.maxY <= bounds.minY + sliver { return .bottomLeft }
+        if frame.minX < bounds.minX, frame.maxX <= bounds.minX + sliver,
+           frame.minY >= bounds.maxY - sliver, frame.maxY > bounds.maxY { return .topLeft }
+        if frame.minX >= bounds.maxX - sliver, frame.maxX > bounds.maxX,
+           frame.minY < bounds.minY, frame.maxY <= bounds.minY + sliver { return .bottomRight }
+        if frame.minX >= bounds.maxX - sliver, frame.maxX > bounds.maxX,
+           frame.minY >= bounds.maxY - sliver, frame.maxY > bounds.maxY { return .topRight }
+        return nil
     }
 
     private func place(_ window: AXWindow, at target: CGRect, clearParking: Bool = false) {
@@ -527,16 +598,11 @@ final class AutoTileManager {
         if let applied = appliedFrames[window], SnapGeometry.isClose(applied.target, target),
            SnapGeometry.isClose(current, applied.actual, tolerance: 2) { return }
         let transition = CGRect(origin: current.origin, size: target.size)
-        expectedFrames[window] = ExpectedFrame(
-            frames: [transition, target],
-            expiresAt: ProcessInfo.processInfo.systemUptime + 0.5
-        )
+        let notifications: Set<String> = [kAXMovedNotification as String, kAXResizedNotification as String]
+        expectedFrames[window] = ExpectedFrame(frames: [transition, target], notifications: notifications)
         window.setFrame(target)
         if let readBack = window.frame {
-            expectedFrames[window] = ExpectedFrame(
-                frames: [transition, target, readBack],
-                expiresAt: ProcessInfo.processInfo.systemUptime + 0.5
-            )
+            expectedFrames[window] = ExpectedFrame(frames: [transition, target, readBack], notifications: notifications)
             if !SnapGeometry.isClose(readBack, target, tolerance: 5) {
                 appliedFrames[window] = AppliedFrame(target: target, actual: readBack)
             } else {
@@ -547,15 +613,73 @@ final class AutoTileManager {
     }
 
     private func revealFocusedWindow(_ window: AXWindow, among windows: [AXWindow], on display: Display, screen: NSScreen) {
-        guard parked[window] != nil, let index = windows.firstIndex(of: window) else { return }
-        let capacity = columnCapacity(in: screen)
-        let start = scrollStartByDisplay[display, default: 0]
-        if index < start { scrollStartByDisplay[display] = index }
-        else if index >= start + capacity { scrollStartByDisplay[display] = index - capacity + 1 }
+        guard let index = windows.firstIndex(of: window) else { return }
+        if settings.layout == .columns {
+            let capacity = columnCapacity(in: screen)
+            guard capacity > 0 else { return }
+            let start = scrollStartByDisplay[display, default: 0]
+            if index < start { scrollStartByDisplay[display] = index }
+            else if index >= start + capacity { scrollStartByDisplay[display] = index - capacity + 1 }
+        } else {
+            let ordered = orderedForBig(windows, on: display, preferred: nil)
+            let gap = CGFloat(settings.gap)
+            let area = screen.visibleFrame.insetBy(dx: gap, dy: gap)
+            let leftWidth = floor(max(0, area.width - gap) * 2 / 3)
+            let rightWidth = area.width - leftWidth - gap
+            let stackCapacity = leftWidth >= 200 && rightWidth >= 200
+                ? Int(floor((area.height + gap) / (200 + gap))) : 0
+            let capacity = min(ordered.count, 1 + stackCapacity)
+            guard let focusedIndex = ordered.firstIndex(of: window), focusedIndex >= capacity, capacity > 0 else { return }
+            var reordered = ordered
+            reordered.swapAt(focusedIndex, capacity - 1)
+            if capacity == 1 { mainWindowByDisplay[display] = window }
+            windowsByDisplay[display] = reordered
+        }
     }
 
     private func restoreParkedWindows() {
         for (window, _) in Array(parked) { restoreParked(window) }
+        guard Permissions.accessibilityGranted else { return }
+        for app in NSWorkspace.shared.runningApplications where app.activationPolicy == .regular && !app.isTerminated {
+            guard let windows = AXWindow.standardWindowsIfReadable(of: app) else { continue }
+            for window in windows {
+                guard parked[window] == nil, let frame = window.frame,
+                      let screen = NSScreen.screens.first(where: { parkingCorner(of: frame, on: $0) != nil }) else { continue }
+                let identity = app.bundleIdentifier.flatMap { bundleID in
+                    window.title.map { WindowIdentity(bundleID: bundleID, title: $0) }
+                }
+                let target = identity.flatMap { savedFramesByIdentity.removeValue(forKey: $0) }
+                    .map { clamped($0, to: screen.visibleFrame) } ?? centered(frame, in: screen.visibleFrame)
+                appliedFrames.removeValue(forKey: window)
+                place(window, at: target)
+            }
+        }
+    }
+
+    private func recoverUnexpectedParking(_ window: AXWindow, app: NSRunningApplication) {
+        guard parked[window] == nil, let frame = window.frame,
+              let screen = NSScreen.screens.first(where: { parkingCorner(of: frame, on: $0) != nil }) else { return }
+        let identity = app.bundleIdentifier.flatMap { bundleID in
+            window.title.map { WindowIdentity(bundleID: bundleID, title: $0) }
+        }
+        let target = identity.flatMap { savedFramesByIdentity.removeValue(forKey: $0) }
+            .map { clamped($0, to: screen.visibleFrame) } ?? centered(frame, in: screen.visibleFrame)
+        appliedFrames.removeValue(forKey: window)
+        place(window, at: target)
+        if let recoveredFrame = window.frame, !SnapGeometry.isClose(frame, recoveredFrame) { scheduleReflow() }
+    }
+
+    private func rememberParkedFrames(for app: NSRunningApplication) {
+        for (window, parking) in parked where window.processIdentifier == app.processIdentifier {
+            if let identity = parking.identity ?? identities[window] {
+                savedFramesByIdentity[identity] = parking.originalFrame
+            }
+        }
+    }
+
+    private func rememberParkedFrame(for window: AXWindow) {
+        guard let parking = parked[window], let identity = parking.identity ?? identities[window] else { return }
+        savedFramesByIdentity[identity] = parking.originalFrame
     }
 
     private func restoreParked(_ window: AXWindow) {
@@ -583,10 +707,22 @@ final class AutoTileManager {
                       y: min(max(frame.minY, bounds.minY), bounds.maxY - height), width: width, height: height)
     }
 
+    private func centered(_ frame: CGRect, in bounds: CGRect) -> CGRect {
+        let fitted = clamped(frame, to: bounds)
+        return CGRect(x: bounds.midX - fitted.width / 2, y: bounds.midY - fitted.height / 2,
+                      width: fitted.width, height: fitted.height)
+    }
+
     private func columnCapacity(in screen: NSScreen) -> Int {
         let gap = CGFloat(settings.gap)
-        let width = max(1, (screen.visibleFrame.width - gap * 2) * CGFloat(settings.columnWidth))
-        return max(1, Int(floor((screen.visibleFrame.width - gap * 2 + gap) / (width + gap))))
+        let area = screen.visibleFrame.insetBy(dx: gap, dy: gap)
+        let fraction = CGFloat(settings.columnWidth)
+        guard area.height >= 200 else { return 0 }
+        let configuredCapacity = max(1, Int(floor(1 / fraction)))
+        for count in stride(from: configuredCapacity, through: 1, by: -1) {
+            if (area.width - gap * CGFloat(count - 1)) * fraction >= 200 { return count }
+        }
+        return 0
     }
 
     private func isVisibleOnCurrentSpace(_ window: AXWindow) -> Bool {
@@ -613,12 +749,14 @@ final class AutoTileManager {
     }
 
     private func handleFocusedKey(_ keyCode: Int64, swap: Bool = false, scroll: Bool = false) {
-        guard let window = AXWindow.focusedWindow() else { return }
+        let window = NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier
+            ? lastFocusedWindow : AXWindow.focusedWindow()
+        guard let window else { return }
         let display = displayContaining(window)
         if scroll, let display, settings.layout == .columns {
             let direction = keyCode == 123 ? -1 : 1
             let count = activeCountByDisplay[display, default: 0]
-            let capacity = NSScreen.screens.first(where: { Display($0) == display }).map(columnCapacity(in:)) ?? 1
+            let capacity = NSScreen.screens.first(where: { Display($0) == display }).map(columnCapacity(in:)) ?? 0
             scrollStartByDisplay[display] = min(max(scrollStartByDisplay[display, default: 0] + direction, 0), max(0, count - capacity))
             scheduleReflow()
         } else if swap, let display, let windows = windowsByDisplay[display], windows.contains(window) {
@@ -651,7 +789,9 @@ final class AutoTileManager {
               let frame = window.frame,
               app.activationPolicy == .regular, !app.isHidden, !window.isMinimized,
               AXWindow.subrole(of: window.element) == kAXStandardWindowSubrole,
-              frame.width >= 200, frame.height >= 200, !isFullScreen(window), isResizable(window),
+              (originalSizes[window] ?? frame.size).width >= 200,
+              (originalSizes[window] ?? frame.size).height >= 200,
+              !isFullScreen(window), isResizable(window),
               !settings.alwaysFloatAppIDs.contains(app.bundleIdentifier ?? "") else { return }
         let isManaged = windowsByDisplay.values.contains { $0.contains(window) }
         guard let display = displayContaining(window) else { return }
@@ -706,8 +846,7 @@ final class AutoTileManager {
             if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
             return Unmanaged.passUnretained(event)
         }
-        guard enabled, Permissions.accessibilityGranted,
-              NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
+        guard enabled, Permissions.accessibilityGranted else {
             return Unmanaged.passUnretained(event)
         }
         if type == .keyUp {
@@ -715,6 +854,11 @@ final class AutoTileManager {
             return swallowedKeys.remove(keyCode) == nil ? Unmanaged.passUnretained(event) : nil
         }
         guard type == .keyDown else { return Unmanaged.passUnretained(event) }
+        if NSWorkspace.shared.frontmostApplication?.processIdentifier == ProcessInfo.processInfo.processIdentifier,
+           let responder = NSApp.keyWindow?.firstResponder,
+           responder is NSTextView || responder is NSTextField {
+            return Unmanaged.passUnretained(event)
+        }
         let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
         let modifiers: CGEventFlags = [.maskControl, .maskAlternate, .maskCommand, .maskShift]
         var required: CGEventFlags = [.maskControl, .maskAlternate]
@@ -725,7 +869,7 @@ final class AutoTileManager {
         let toggle = keyCode == 3 && held == required
         guard swap || scroll || toggle else { return Unmanaged.passUnretained(event) }
         swallowedKeys.insert(keyCode)
-        if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+        if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 || swap || scroll {
             DispatchQueue.main.async { [weak self] in self?.handleFocusedKey(keyCode, swap: swap, scroll: scroll) }
         }
         return nil
