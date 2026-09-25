@@ -17,6 +17,7 @@ struct DockPreviewItem: Identifiable {
 @MainActor
 final class DockPreviewPanel {
     var onSelect: ((Int) -> Void)?
+    var onHover: ((Int, Bool) -> Void)?
     var frame: CGRect { panel.frame }
 
     private let panel: NSPanel
@@ -40,9 +41,11 @@ final class DockPreviewPanel {
         panel.isMovableByWindowBackground = false
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.stationary, .ignoresCycle, .fullScreenAuxiliary]
-        panel.contentView = NSHostingView(rootView: DockPreviewTilesView(state: state) { [weak self] id in
-            self?.onSelect?(id)
-        })
+        panel.contentView = NSHostingView(rootView: DockPreviewTilesView(
+            state: state,
+            onSelect: { [weak self] id in self?.onSelect?(id) },
+            onHover: { [weak self] id, inside in self?.onHover?(id, inside) }
+        ))
     }
 
     /// `dockFrame`, `itemFrame`, and `visibleFrame` use AppKit's global screen coordinates.
@@ -147,6 +150,7 @@ private final class DockPreviewPanelState: ObservableObject {
 private struct DockPreviewTilesView: View {
     @ObservedObject var state: DockPreviewPanelState
     let onSelect: (Int) -> Void
+    let onHover: (Int, Bool) -> Void
 
     private var horizontalDock: Bool {
         state.edge == .bottom
@@ -183,7 +187,7 @@ private struct DockPreviewTilesView: View {
         let iconSize = min(42 * tileScale, min(state.tileSize.width, state.tileSize.height) * 0.45)
         return Button { onSelect(item.id) } label: {
             VStack(alignment: .leading, spacing: rowSpacing) {
-                ZStack {
+                ZStack(alignment: .topLeading) {
                     RoundedRectangle(cornerRadius: 8)
                         .fill(.quaternary)
                     if let image = state.images[item.id] {
@@ -198,21 +202,25 @@ private struct DockPreviewTilesView: View {
                             .scaledToFit()
                             .frame(width: iconSize, height: iconSize)
                     }
+                    if item.minimized {
+                        RoundedRectangle(cornerRadius: 8)
+                            .fill(.black.opacity(0.25))
+                        Label("Minimized", systemImage: "minus.rectangle.fill")
+                            .font(.system(size: max(8, min(11 * tileScale, 12)), weight: .semibold))
+                            .foregroundStyle(.white)
+                            .padding(.horizontal, 6 * tileScale)
+                            .padding(.vertical, 4 * tileScale)
+                            .background(.black.opacity(0.78), in: Capsule())
+                            .padding(6 * tileScale)
+                    }
                 }
                 .frame(height: imageHeight)
                 .clipShape(RoundedRectangle(cornerRadius: 8))
 
-                HStack(spacing: 5) {
-                    Text(item.title.isEmpty ? "Window" : item.title)
-                        .lineLimit(1)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                    if item.minimized {
-                        Text("Minimized")
-                            .font(.system(size: 10))
-                            .foregroundStyle(.secondary)
-                    }
-                }
-                .font(.system(size: titleSize))
+                Text(item.title.isEmpty ? "Window" : item.title)
+                    .lineLimit(1)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .font(.system(size: titleSize))
             }
             .padding(inset)
             .background(.background.opacity(0.72), in: RoundedRectangle(cornerRadius: 10))
@@ -220,6 +228,9 @@ private struct DockPreviewTilesView: View {
             .contentShape(RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.plain)
-        .accessibilityLabel(item.title.isEmpty ? "Window" : item.title)
+        .onHover { onHover(item.id, $0) }
+        .accessibilityLabel(item.minimized
+            ? "\(item.title.isEmpty ? "Window" : item.title), Minimized"
+            : item.title.isEmpty ? "Window" : item.title)
     }
 }
