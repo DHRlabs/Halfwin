@@ -2,6 +2,22 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 
+enum ShowDesktopStyle: String, CaseIterable, Identifiable {
+    case pushWindowsAside = "push-windows-aside"
+    case hideApps = "hide-apps"
+
+    static let defaultsKey = "Halfwin.showDesktopStyle"
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .pushWindowsAside: return "Push windows aside"
+        case .hideApps: return "Hide apps"
+        }
+    }
+}
+
 /// Adds the small system-wide window actions that do not belong to drag snapping.
 final class WindowExtrasManager {
     private static let eventMask: CGEventMask = [
@@ -15,21 +31,12 @@ final class WindowExtrasManager {
     private var eventTap: CFMachPort?
     private var runLoopSource: CFRunLoopSource?
     private var permissionTimer: Timer?
-    private var activationObserver: NSObjectProtocol?
     private var swallowedMouseDownEventNumber: Int64?
     private var swallowedCommandArrowKeyCodes = Set<Int64>()
     private var hiddenApplications: [NSRunningApplication]?
+    private var pushedWindows: [AXWindow: (frame: CGRect, application: NSRunningApplication)] = [:]
     private var applicationToReactivate: NSRunningApplication?
-    private var ignoreActivationsUntil: TimeInterval = 0
     private let frameMemory = WindowFrameMemory()
-
-    init() {
-        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
-        ) { [weak self] notification in
-            self?.applicationDidActivate(notification)
-        }
-    }
 
     func setGreenButtonEnabled(_ enabled: Bool) {
         greenButtonEnabled = enabled
@@ -43,7 +50,10 @@ final class WindowExtrasManager {
 
     func setShowDesktopEnabled(_ enabled: Bool) {
         showDesktopEnabled = enabled
-        if !enabled { restoreHiddenApplications() }
+        if !enabled {
+            restoreHiddenApplications()
+            restorePushedWindows()
+        }
         refreshPermission()
     }
 
@@ -83,11 +93,8 @@ final class WindowExtrasManager {
         permissionTimer = nil
         stopTap()
         restoreHiddenApplications()
+        restorePushedWindows()
         frameMemory.removeAll()
-        if let activationObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(activationObserver)
-            self.activationObserver = nil
-        }
     }
 
     fileprivate func handleTap(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
@@ -105,9 +112,15 @@ final class WindowExtrasManager {
         switch type {
         case .leftMouseDown:
             let point = event.location.axFlipped
+            prunePushedWindows()
             if showDesktopEnabled, isDesktopCorner(point) {
                 swallowMouseDown(event)
                 DispatchQueue.main.async { [weak self] in self?.toggleDesktop() }
+                return nil
+            }
+            if showDesktopEnabled, let hit = AXWindow.hitTest(at: point), pushedWindows[hit.window] != nil {
+                swallowMouseDown(event)
+                DispatchQueue.main.async { [weak self] in self?.restorePushedWindow(hit.window) }
                 return nil
             }
             let clickCount = event.getIntegerValueField(.mouseEventClickState)
@@ -292,35 +305,115 @@ final class WindowExtrasManager {
     }
 
     private func toggleDesktop() {
-        if let applications = hiddenApplications {
-            hiddenApplications = nil
-            for application in applications where !application.isTerminated { application.unhide() }
-            _ = applicationToReactivate?.activate(options: [])
-            applicationToReactivate = nil
+        prunePushedWindows()
+        if hiddenApplications != nil {
+            restoreHiddenApplications(reactivateApplication: true)
             return
         }
+        if !pushedWindows.isEmpty {
+            restorePushedWindows(reactivateApplication: true)
+            return
+        }
+        let style = ShowDesktopStyle(rawValue: UserDefaults.standard.string(forKey: ShowDesktopStyle.defaultsKey) ?? "")
+            ?? .pushWindowsAside
+        switch style {
+        case .pushWindowsAside:
+            pushWindowsAside()
+        case .hideApps:
+            hideApplications()
+        }
+    }
+
+    private func hideApplications() {
         let applications = NSWorkspace.shared.runningApplications.filter {
             $0.activationPolicy == .regular && !$0.isHidden && !$0.isTerminated
         }
+        guard !applications.isEmpty else { return }
         hiddenApplications = applications
         applicationToReactivate = NSWorkspace.shared.frontmostApplication
-        ignoreActivationsUntil = ProcessInfo.processInfo.systemUptime + 1
         for application in applications { application.hide() }
-        ignoreActivationsUntil = ProcessInfo.processInfo.systemUptime + 1
     }
 
-    private func restoreHiddenApplications() {
+    private func pushWindowsAside() {
+        let choices = NSScreen.screens.flatMap { SnapWindowInventory.choices(on: $0, excluding: []) }
+        let previousApplication = NSWorkspace.shared.frontmostApplication
+        var pushed: [AXWindow: (frame: CGRect, application: NSRunningApplication)] = [:]
+        for choice in choices {
+            let window = choice.window
+            guard !choice.application.isHidden, !choice.application.isTerminated,
+                  !window.isMinimized, !isFullScreen(window), let frame = window.frame,
+                  let screen = NSScreen.screens.first(where: {
+                      $0.frame.contains(CGPoint(x: frame.midX, y: frame.midY))
+                  }) ?? NSScreen.main else { continue }
+            let visibleFrame = screen.visibleFrame
+            let targetX = frame.midX < screen.frame.midX
+                ? visibleFrame.minX + 12 - frame.width
+                : visibleFrame.maxX - 12
+            let target = CGRect(x: targetX, y: frame.minY, width: frame.width, height: frame.height)
+            guard !SnapGeometry.isClose(frame, target) else { continue }
+            window.setFrame(target)
+            guard let movedFrame = window.frame, SnapGeometry.isClose(movedFrame, target, tolerance: 4) else {
+                if let movedFrame = window.frame, !SnapGeometry.isClose(movedFrame, frame) { window.setFrame(frame) }
+                continue
+            }
+            pushed[window] = (frame, choice.application)
+        }
+        pushedWindows = pushed
+        applicationToReactivate = pushed.isEmpty ? nil : previousApplication
+    }
+
+    private func restorePushedWindow(_ window: AXWindow) {
+        prunePushedWindows()
+        guard let pushed = pushedWindows.removeValue(forKey: window) else { return }
+        guard !pushed.application.isTerminated, window.frame != nil else {
+            clearDesktopRestoreApplicationIfNeeded()
+            return
+        }
+        window.setFrame(pushed.frame)
+        window.restoreAndRaise(in: pushed.application)
+        clearDesktopRestoreApplicationIfNeeded()
+    }
+
+    private func restorePushedWindows(reactivateApplication: Bool = false) {
+        let windows = pushedWindows
+        pushedWindows.removeAll()
+        let application = applicationToReactivate
+        applicationToReactivate = nil
+        for (window, pushed) in windows where !pushed.application.isTerminated && window.frame != nil {
+            window.setFrame(pushed.frame)
+        }
+        if reactivateApplication, let application, !application.isTerminated {
+            _ = application.activate(options: [])
+        }
+    }
+
+    private func prunePushedWindows() {
+        let unreadable = pushedWindows.keys.filter { window in
+            guard let application = pushedWindows[window]?.application else { return true }
+            return application.isTerminated || window.frame == nil
+        }
+        for window in unreadable { pushedWindows.removeValue(forKey: window) }
+        clearDesktopRestoreApplicationIfNeeded()
+    }
+
+    private func clearDesktopRestoreApplicationIfNeeded() {
+        if hiddenApplications == nil && pushedWindows.isEmpty { applicationToReactivate = nil }
+    }
+
+    private func isFullScreen(_ window: AXWindow) -> Bool {
+        let fullScreen: Bool? = axAttribute("AXFullScreen", of: window.element)
+        return fullScreen == true
+    }
+
+    private func restoreHiddenApplications(reactivateApplication: Bool = false) {
         guard let applications = hiddenApplications else { return }
         hiddenApplications = nil
+        let previousApplication = applicationToReactivate
         applicationToReactivate = nil
         for application in applications where !application.isTerminated { application.unhide() }
-    }
-
-    private func applicationDidActivate(_ notification: Notification) {
-        guard hiddenApplications != nil,
-              ProcessInfo.processInfo.systemUptime >= ignoreActivationsUntil else { return }
-        hiddenApplications = nil
-        applicationToReactivate = nil
+        if reactivateApplication, let previousApplication, !previousApplication.isTerminated {
+            _ = previousApplication.activate(options: [])
+        }
     }
 
     private func toggleToVisibleFrame(_ window: AXWindow, current: CGRect) -> Bool {

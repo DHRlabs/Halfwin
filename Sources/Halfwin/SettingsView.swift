@@ -6,6 +6,7 @@ struct SettingsView: View {
     @ObservedObject var layoutMenuSettings: LayoutMenuSettings
     @ObservedObject var dockPreviewSettings: DockPreviewSettings
     @ObservedObject var autoTileSettings: AutoTileSettings
+    @AppStorage(ShowDesktopStyle.defaultsKey) private var showDesktopStyle: ShowDesktopStyle = .pushWindowsAside
     @State private var alwaysFloatAppIDsText: String?
     @FocusState private var alwaysFloatAppIDsFocused: Bool
 
@@ -71,6 +72,11 @@ struct SettingsView: View {
                 }
                 Stepper(value: $dockPreviewSettings.previewSize, in: 1.0...3.0, step: 0.25) {
                     Text("Preview size: \(Int(dockPreviewSettings.previewSize * 100))%")
+                }
+            }
+            Section("Show desktop") {
+                Picker("Show desktop style", selection: $showDesktopStyle) {
+                    ForEach(ShowDesktopStyle.allCases) { style in Text(style.title).tag(style) }
                 }
             }
         }
