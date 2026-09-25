@@ -32,6 +32,9 @@ struct SettingsView: View {
                 Stepper(value: $layoutMenuSettings.hotZoneWidth, in: 200...1200, step: 50) {
                     Text("Top hot zone width: \(Int(layoutMenuSettings.hotZoneWidth)) pt")
                 }
+                Stepper(value: $layoutMenuSettings.sizePercent, in: 75...200, step: 25) {
+                    Text("Layout menu size: \(Int(layoutMenuSettings.sizePercent))%")
+                }
                 Stepper(value: $layoutMenuSettings.commandCenterSideFraction, in: 0.15...0.35, step: 0.01) {
                     Text("Command Center side width: \(Int((layoutMenuSettings.commandCenterSideFraction * 100).rounded()))%")
                 }
