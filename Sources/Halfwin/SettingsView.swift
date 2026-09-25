@@ -6,6 +6,7 @@ struct SettingsView: View {
     @ObservedObject var layoutMenuSettings: LayoutMenuSettings
     @ObservedObject var dockPreviewSettings: DockPreviewSettings
     @ObservedObject var autoTileSettings: AutoTileSettings
+    @ObservedObject var macTweaks: MacTweaks
     @State private var alwaysFloatAppIDsText: String?
     @FocusState private var alwaysFloatAppIDsFocused: Bool
 
@@ -22,6 +23,35 @@ struct SettingsView: View {
                 }
                 Button("Restore Lance's Defaults") {
                     settings.restoreLanceDefaults()
+                }
+            }
+            Section("Mac tweaks") {
+                ForEach(MacTweakGroup.allCases) { group in
+                    GroupBox(group.rawValue) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(MacTweak.all.filter { $0.group == group }) { tweak in
+                                Toggle(tweak.title, isOn: Binding(
+                                    get: { macTweaks.isEnabled(tweak.id) },
+                                    set: { macTweaks.setEnabled($0, for: tweak.id) }
+                                ))
+                            }
+                            if group == .animations {
+                                Text("Apps pick up these changes when they reopen.")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            } else if group == .finder, macTweaks.finderAutomationDenied,
+                                      macTweaks.isEnabled(.listView) {
+                                Text("Automation access was denied; existing Finder folders may keep their saved views.")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            } else if group == .desktop {
+                                Button("Reduce Motion…", action: macTweaks.openReduceMotionSettings)
+                                Text("macOS only lets you change Reduce Motion in System Settings.")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
                 }
             }
             Section("Layout menu") {
@@ -95,7 +125,8 @@ struct SettingsView: View {
 /// Hosts `SettingsView` in a plain `NSWindow`, opened from the menu (Cmd-,).
 final class SettingsWindowController: NSWindowController {
     convenience init(settings: SnapSettings, layoutMenuSettings: LayoutMenuSettings,
-                     dockPreviewSettings: DockPreviewSettings, autoTileSettings: AutoTileSettings) {
+                     dockPreviewSettings: DockPreviewSettings, autoTileSettings: AutoTileSettings,
+                     macTweaks: MacTweaks) {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 690),
             styleMask: [.titled, .closable],
@@ -108,7 +139,8 @@ final class SettingsWindowController: NSWindowController {
                 settings: settings,
                 layoutMenuSettings: layoutMenuSettings,
                 dockPreviewSettings: dockPreviewSettings,
-                autoTileSettings: autoTileSettings
+                autoTileSettings: autoTileSettings,
+                macTweaks: macTweaks
             )
         )
         window.center()
