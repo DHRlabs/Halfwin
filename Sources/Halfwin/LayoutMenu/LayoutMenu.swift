@@ -32,6 +32,10 @@ final class LayoutMenuSettings: ObservableObject {
         }
     }
 
+    @Published var commandCenterSideFraction = SnapGeometry.commandCenterSideFraction {
+        didSet { SnapGeometry.commandCenterSideFraction = commandCenterSideFraction }
+    }
+
     private init() {
         enabled = defaults.object(forKey: enabledKey) == nil ? true : defaults.bool(forKey: enabledKey)
         let saved = defaults.object(forKey: dwellKey) as? Double ?? Self.defaultDwellDelay
@@ -58,36 +62,9 @@ enum LayoutDropZone: Equatable {
     case layout(SnapAction)
 }
 
-private struct LayoutTileZone {
-    let action: SnapAction
-    let rect: CGRect
-}
-
-private struct LayoutMultiZoneTile {
-    let title: String
-    let zones: [LayoutTileZone]
-}
-
 private enum LayoutMenuTiles {
-    static var multiZone: [LayoutMultiZoneTile] {
-        let side = SnapGeometry.commandCenterSideFraction
-        return [
-            LayoutMultiZoneTile(title: "Left + Stack", zones: [
-                LayoutTileZone(action: .firstTwoThirds, rect: CGRect(x: 0, y: 0, width: 2.0 / 3, height: 1)),
-                LayoutTileZone(action: .lastThirdTop, rect: CGRect(x: 2.0 / 3, y: 0.5, width: 1.0 / 3, height: 0.5)),
-                LayoutTileZone(action: .lastThirdBottom, rect: CGRect(x: 2.0 / 3, y: 0, width: 1.0 / 3, height: 0.5)),
-            ]),
-            LayoutMultiZoneTile(title: "Thirds", zones: [
-                LayoutTileZone(action: .firstThird, rect: CGRect(x: 0, y: 0, width: 1.0 / 3, height: 1)),
-                LayoutTileZone(action: .centerThird, rect: CGRect(x: 1.0 / 3, y: 0, width: 1.0 / 3, height: 1)),
-                LayoutTileZone(action: .lastThird, rect: CGRect(x: 2.0 / 3, y: 0, width: 1.0 / 3, height: 1)),
-            ]),
-            LayoutMultiZoneTile(title: "Command Center", zones: [
-                LayoutTileZone(action: .commandCenterLeft, rect: CGRect(x: 0, y: 0, width: side, height: 1)),
-                LayoutTileZone(action: .commandCenter, rect: CGRect(x: side, y: 0, width: 1 - 2 * side, height: 1)),
-                LayoutTileZone(action: .commandCenterRight, rect: CGRect(x: 1 - side, y: 0, width: side, height: 1)),
-            ]),
-        ]
+    static var multiZone: [SnapMultiWindowLayout] {
+        SnapMultiWindowLayout.allCases.filter { $0 != .halves }
     }
 }
 
@@ -397,8 +374,8 @@ final class LayoutMenuManager {
     /// their picked zones directly to one.
     private func snapAction(for preset: LayoutPreset) -> SnapAction? {
         switch preset {
-        case .leftHalf: return .leftHalf
-        case .rightHalf: return .rightHalf
+        case .leftHalf: return SnapMultiWindowLayout.halves.zones[0].action
+        case .rightHalf: return SnapMultiWindowLayout.halves.zones[1].action
         case .center: return .center
         case .maximize: return .maximize
         case .restore: return nil
@@ -538,10 +515,11 @@ private struct LayoutMenuView: View {
     let onPickZone: (SnapAction) -> Void
 
     var body: some View {
+        let halves = SnapMultiWindowLayout.halves.zones
         HStack(spacing: LayoutMenuPanel.tileSpacing) {
-            SingleTile(title: "Left Half", rect: CGRect(x: 0, y: 0, width: 0.5, height: 1),
+            SingleTile(title: "Left Half", rect: halves[0].rect,
                        zone: .preset(.leftHalf), dropState: dropState) { onPick(.leftHalf) }
-            SingleTile(title: "Right Half", rect: CGRect(x: 0.5, y: 0, width: 0.5, height: 1),
+            SingleTile(title: "Right Half", rect: halves[1].rect,
                        zone: .preset(.rightHalf), dropState: dropState) { onPick(.rightHalf) }
             SingleTile(title: "Center", rect: CGRect(x: 0.2, y: 0.15, width: 0.6, height: 0.7),
                        zone: .preset(.center), dropState: dropState) { onPick(.center) }
@@ -597,7 +575,7 @@ private struct SingleTile: View {
 
 /// A thumbnail whose zones share their unit geometry for drawing and drops.
 private struct MultiZoneTileView: View {
-    let tile: LayoutMultiZoneTile
+    let tile: SnapMultiWindowLayout
     @ObservedObject var dropState: LayoutMenuDropState
     let onPickZone: (SnapAction) -> Void
     @State private var hovered: SnapAction?
@@ -620,7 +598,7 @@ private struct MultiZoneTileView: View {
         .frame(width: LayoutMenuPanel.tileWidth, height: LayoutMenuPanel.tileHeight)
     }
 
-    private func zoneView(_ zone: LayoutTileZone) -> some View {
+    private func zoneView(_ zone: SnapLayoutZone) -> some View {
         Rectangle()
             .fill((dropState.isDropMode ? dropState.highlightedZone == .layout(zone.action) : hovered == zone.action || dropState.highlightedZone == .layout(zone.action))
                   ? Color.accentColor : Color.accentColor.opacity(0.55))

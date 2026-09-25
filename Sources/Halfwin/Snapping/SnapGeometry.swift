@@ -60,14 +60,6 @@ enum SnapGeometry {
 
     enum Side { case left, right }
 
-    static func oppositeHalf(for action: SnapAction) -> SnapAction? {
-        switch action {
-        case .leftHalf: return .rightHalf
-        case .rightHalf: return .leftHalf
-        default: return nil
-        }
-    }
-
     static func isClose(_ a: CGRect, _ b: CGRect, tolerance: CGFloat = 2) -> Bool {
         abs(a.minX - b.minX) <= tolerance && abs(a.minY - b.minY) <= tolerance &&
             abs(a.width - b.width) <= tolerance && abs(a.height - b.height) <= tolerance
