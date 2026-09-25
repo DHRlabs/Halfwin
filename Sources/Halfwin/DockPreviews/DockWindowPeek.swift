@@ -22,6 +22,7 @@ final class DockWindowPeek {
         panel.ignoresMouseEvents = true
         panel.hidesOnDeactivate = false
         panel.hasShadow = false
+        panel.animationBehavior = .none
         panel.isReleasedWhenClosed = false
         panel.collectionBehavior = [.stationary, .ignoresCycle, .fullScreenAuxiliary]
         panel.contentView = NSHostingView(rootView: DockWindowPeekView(state: state))
