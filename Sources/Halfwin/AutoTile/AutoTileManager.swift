@@ -395,7 +395,7 @@ final class AutoTileManager {
             guard let pid = window.processIdentifier else { removeAllState(for: window); continue }
             if apps[pid] != nil && !readableProcesses.contains(pid) { continue }
             guard liveWindows.contains(window) else {
-                if apps[pid] == nil { rememberParkedFrame(for: window) }
+                rememberParkedFrame(for: window)
                 removeAllState(for: window)
                 continue
             }
@@ -502,17 +502,21 @@ final class AutoTileManager {
                               width: rightWidth, height: stackHeight)
             }
         }
-        for (window, target) in zip(ordered, targets) { place(window, at: target, clearParking: true) }
         let extras = Array(ordered.dropFirst(visibleCount))
+        let corner: ParkingCorner?
         if !extras.isEmpty {
             let size = CGSize(width: ordered.compactMap { $0.frame?.width }.max() ?? 0,
                               height: ordered.compactMap { $0.frame?.height }.max() ?? 0)
-            if let corner = parkingCorner(on: screen, size: size) {
-                for window in extras { parkWindow(window, in: corner, display: display) }
-            } else {
-                for window in extras where parked[window] != nil { restoreParked(window) }
+            corner = parkingCorner(on: screen, size: size)
+            if corner == nil {
+                tileEqualColumns(ordered, in: area, gap: gap)
+                return
             }
+        } else {
+            corner = nil
         }
+        for (window, target) in zip(ordered, targets) { place(window, at: target, clearParking: true) }
+        if let corner { for window in extras { parkWindow(window, in: corner, display: display) } }
     }
 
     private func tileColumns(_ windows: [AXWindow], on display: Display, screen: NSScreen) {
@@ -530,6 +534,11 @@ final class AutoTileManager {
         let parkingSize = CGSize(width: windows.map { $0.frame?.width ?? 0 }.max() ?? 0,
                                  height: windows.map { $0.frame?.height ?? 0 }.max() ?? 0)
         let corner = parkingCorner(on: screen, size: parkingSize)
+        if windows.count > capacity, corner == nil {
+            scrollStartByDisplay[display] = 0
+            tileEqualColumns(windows, in: area, gap: gap)
+            return
+        }
         let maxStart = max(0, windows.count - capacity)
         let start = min(max(scrollStartByDisplay[display, default: 0], 0), maxStart)
         scrollStartByDisplay[display] = start
@@ -545,6 +554,15 @@ final class AutoTileManager {
             } else if parked[window] != nil {
                 restoreParked(window)
             }
+        }
+    }
+
+    private func tileEqualColumns(_ windows: [AXWindow], in area: CGRect, gap: CGFloat) {
+        let count = CGFloat(windows.count)
+        let width = max(0, (area.width - gap * (count - 1)) / count)
+        for (index, window) in windows.enumerated() {
+            place(window, at: CGRect(x: area.minX + CGFloat(index) * (width + gap), y: area.minY,
+                                     width: width, height: area.height), clearParking: true)
         }
     }
 

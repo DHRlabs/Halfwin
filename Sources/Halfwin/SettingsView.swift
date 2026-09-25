@@ -7,6 +7,7 @@ struct SettingsView: View {
     @ObservedObject var dockPreviewSettings: DockPreviewSettings
     @ObservedObject var autoTileSettings: AutoTileSettings
     @State private var alwaysFloatAppIDsText: String?
+    @FocusState private var alwaysFloatAppIDsFocused: Bool
 
     var body: some View {
         Form {
@@ -56,11 +57,11 @@ struct SettingsView: View {
                     ))
                     .font(.system(.caption, design: .monospaced))
                     .frame(height: 76)
-                    Button("Save IDs") {
-                        let text = alwaysFloatAppIDsText ?? autoTileSettings.alwaysFloatAppIDs.joined(separator: "\n")
-                        autoTileSettings.alwaysFloatAppIDs = text.components(separatedBy: .newlines)
-                        alwaysFloatAppIDsText = autoTileSettings.alwaysFloatAppIDs.joined(separator: "\n")
+                    .focused($alwaysFloatAppIDsFocused)
+                    .onChange(of: alwaysFloatAppIDsFocused) { _, focused in
+                        if !focused { saveAlwaysFloatAppIDs() }
                     }
+                    Button("Save IDs", action: saveAlwaysFloatAppIDs)
                 }
             }
             Section("Dock previews") {
@@ -82,6 +83,12 @@ struct SettingsView: View {
             get: { settings.action(for: position) },
             set: { settings.map[position] = $0 }
         )
+    }
+
+    private func saveAlwaysFloatAppIDs() {
+        let text = alwaysFloatAppIDsText ?? autoTileSettings.alwaysFloatAppIDs.joined(separator: "\n")
+        autoTileSettings.alwaysFloatAppIDs = text.components(separatedBy: .newlines)
+        alwaysFloatAppIDsText = autoTileSettings.alwaysFloatAppIDs.joined(separator: "\n")
     }
 }
 
