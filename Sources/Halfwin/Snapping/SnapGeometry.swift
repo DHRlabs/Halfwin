@@ -1,3 +1,4 @@
+import Foundation
 import CoreGraphics
 
 /// Zone detection and target-frame math. All in AppKit screen coordinates
@@ -7,6 +8,22 @@ import CoreGraphics
 /// classes (MIT), collapsed into plain frame math since this port only needs
 /// the handful of layouts below.
 enum SnapGeometry {
+    private static let commandCenterSideFractionKey = "Halfwin.commandCenterSideFraction"
+    static let defaultCommandCenterSideFraction: CGFloat = 0.25
+
+    static var commandCenterSideFraction: CGFloat {
+        get {
+            let saved = UserDefaults.standard.object(forKey: commandCenterSideFractionKey) as? Double
+                ?? Double(defaultCommandCenterSideFraction)
+            let value = saved.isFinite ? CGFloat(saved) : defaultCommandCenterSideFraction
+            return min(max(value, 0.15), 0.35)
+        }
+        set {
+            let value = newValue.isFinite ? newValue : defaultCommandCenterSideFraction
+            UserDefaults.standard.set(Double(min(max(value, 0.15), 0.35)), forKey: commandCenterSideFractionKey)
+        }
+    }
+
     /// Rectangle's per-edge margin and corner size, per the goal: 5pt edges,
     /// 20pt corners, checked against the display's full frame (so the menu
     /// bar strip still counts as the top edge).
@@ -42,14 +59,6 @@ enum SnapGeometry {
     }
 
     enum Side { case left, right }
-
-    static func oppositeHalf(for action: SnapAction) -> SnapAction? {
-        switch action {
-        case .leftHalf: return .rightHalf
-        case .rightHalf: return .leftHalf
-        default: return nil
-        }
-    }
 
     static func isClose(_ a: CGRect, _ b: CGRect, tolerance: CGFloat = 2) -> Bool {
         abs(a.minX - b.minX) <= tolerance && abs(a.minY - b.minY) <= tolerance &&
@@ -159,6 +168,34 @@ enum SnapGeometry {
             }
             let w = floor(vf.width / 3)
             return CGRect(x: vf.minX + w, y: vf.minY, width: w, height: vf.height)
+        case .commandCenterLeft, .commandCenter, .commandCenterRight:
+            let sideFraction = commandCenterSideFraction
+            if portrait {
+                let sideHeight = floor(vf.height * sideFraction)
+                let centerHeight = vf.height - 2 * sideHeight
+                switch action {
+                case .commandCenterLeft:
+                    return CGRect(x: vf.minX, y: vf.maxY - sideHeight, width: vf.width, height: sideHeight)
+                case .commandCenter:
+                    return CGRect(x: vf.minX, y: vf.minY + sideHeight, width: vf.width, height: centerHeight)
+                case .commandCenterRight:
+                    return CGRect(x: vf.minX, y: vf.minY, width: vf.width, height: sideHeight)
+                default:
+                    return nil
+                }
+            }
+            let sideWidth = floor(vf.width * sideFraction)
+            let centerWidth = vf.width - 2 * sideWidth
+            switch action {
+            case .commandCenterLeft:
+                return CGRect(x: vf.minX, y: vf.minY, width: sideWidth, height: vf.height)
+            case .commandCenter:
+                return CGRect(x: vf.minX + sideWidth, y: vf.minY, width: centerWidth, height: vf.height)
+            case .commandCenterRight:
+                return CGRect(x: vf.maxX - sideWidth, y: vf.minY, width: sideWidth, height: vf.height)
+            default:
+                return nil
+            }
         case .firstTwoThirds:
             if portrait {
                 let h = floor(vf.height * 2 / 3)
