@@ -33,7 +33,6 @@ final class AutoTileManager {
 
     private struct ExpectedFrame {
         let frames: [CGRect]
-        var notifications: Set<String>
     }
 
     private struct AppliedFrame {
@@ -59,6 +58,8 @@ final class AutoTileManager {
     private var arrivalOrder: [AXWindow: Int] = [:]
     private var focusOrder: [AXWindow: Int] = [:]
     private var lastFocusedWindow: AXWindow?
+    private var observedFocusedWindow: AXWindow?
+    private var focusRevealPending = false
     private var userFloated = Set<AXWindow>()
     private var handPlaced = Set<AXWindow>()
     private var parked: [AXWindow: Parking] = [:]
@@ -163,7 +164,7 @@ final class AutoTileManager {
                 if notification.name == NSWorkspace.didActivateApplicationNotification,
                    let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                    let focused = AXWindow.focusedWindow(of: app) {
-                    self.noteFocus(focused)
+                    self.noteFocus(focused, followFocus: true)
                 }
                 self.scheduleReflow()
             })
@@ -245,6 +246,8 @@ final class AutoTileManager {
 
         let frontmost = AXWindow.focusedWindow()
         if let frontmost { noteFocus(frontmost) }
+        let followFocus = focusRevealPending
+        focusRevealPending = false
         cleanupGoneWindows(liveWindows: liveWindows, apps: appByPID, readableProcesses: readableProcesses)
         for screen in NSScreen.screens {
             let display = Display(screen)
@@ -257,8 +260,8 @@ final class AutoTileManager {
                 }
             }
             active = (windowsByDisplay[display] ?? []).filter { active.contains($0) }
-            if let frontmost, active.contains(frontmost) {
-                revealFocusedWindow(frontmost, among: active, on: display, screen: screen)
+            if followFocus, let frontmost, active.contains(frontmost) {
+                active = revealFocusedWindow(frontmost, among: active, on: display, screen: screen)
             }
             switch settings.layout {
             case .columns: tileColumns(active, on: display, screen: screen)
@@ -308,7 +311,7 @@ final class AutoTileManager {
         guard enabled else { return }
         if notification == kAXMovedNotification as String || notification == kAXResizedNotification as String {
             let window = AXWindow(element: element)
-            if isExpectedFrame(window, notification: notification) { return }
+            if isExpectedFrame(window) { return }
             guard !userFloated.contains(window), !handPlaced.contains(window) else { return }
             if notification == kAXResizedNotification as String, let frame = window.frame {
                 originalSizes[window] = frame.size
@@ -319,25 +322,24 @@ final class AutoTileManager {
             expectedFrames.removeValue(forKey: window)
             appliedFrames.removeValue(forKey: window)
         } else if notification == kAXUIElementDestroyedNotification as String {
-            removeAllState(for: AXWindow(element: element))
+            let window = AXWindow(element: element)
+            rememberParkedFrame(for: window)
+            removeAllState(for: window)
         } else if notification == kAXFocusedWindowChangedNotification as String,
                   let app = NSWorkspace.shared.runningApplications.first(where: { $0.processIdentifier == AXWindow(element: element).processIdentifier }),
                   let focused = AXWindow.focusedWindow(of: app) {
-            noteFocus(focused)
+            noteFocus(focused, followFocus: true)
         }
         scheduleReflow()
     }
 
-    private func isExpectedFrame(_ window: AXWindow, notification: String) -> Bool {
-        guard var expected = expectedFrames[window] else { return false }
+    private func isExpectedFrame(_ window: AXWindow) -> Bool {
+        guard let expected = expectedFrames[window] else { return false }
         guard let frame = window.frame else { return false }
         guard expected.frames.contains(where: { SnapGeometry.isClose(frame, $0, tolerance: 5) }) else {
             expectedFrames.removeValue(forKey: window)
             return false
         }
-        expected.notifications.remove(notification)
-        if expected.notifications.isEmpty { expectedFrames.removeValue(forKey: window) }
-        else { expectedFrames[window] = expected }
         return true
     }
 
@@ -446,9 +448,11 @@ final class AutoTileManager {
         }
     }
 
-    private func noteFocus(_ window: AXWindow) {
+    private func noteFocus(_ window: AXWindow, followFocus: Bool = false) {
         focusOrder[window] = nextOrder
         nextOrder += 1
+        if observedFocusedWindow != window || followFocus { focusRevealPending = true }
+        observedFocusedWindow = window
         if window.processIdentifier != ProcessInfo.processInfo.processIdentifier,
            AXWindow.subrole(of: window.element) == kAXStandardWindowSubrole {
             lastFocusedWindow = window
@@ -598,11 +602,10 @@ final class AutoTileManager {
         if let applied = appliedFrames[window], SnapGeometry.isClose(applied.target, target),
            SnapGeometry.isClose(current, applied.actual, tolerance: 2) { return }
         let transition = CGRect(origin: current.origin, size: target.size)
-        let notifications: Set<String> = [kAXMovedNotification as String, kAXResizedNotification as String]
-        expectedFrames[window] = ExpectedFrame(frames: [transition, target], notifications: notifications)
+        expectedFrames[window] = ExpectedFrame(frames: [transition, target])
         window.setFrame(target)
         if let readBack = window.frame {
-            expectedFrames[window] = ExpectedFrame(frames: [transition, target, readBack], notifications: notifications)
+            expectedFrames[window] = ExpectedFrame(frames: [transition, target, readBack])
             if !SnapGeometry.isClose(readBack, target, tolerance: 5) {
                 appliedFrames[window] = AppliedFrame(target: target, actual: readBack)
             } else {
@@ -612,14 +615,15 @@ final class AutoTileManager {
         }
     }
 
-    private func revealFocusedWindow(_ window: AXWindow, among windows: [AXWindow], on display: Display, screen: NSScreen) {
-        guard let index = windows.firstIndex(of: window) else { return }
+    private func revealFocusedWindow(_ window: AXWindow, among windows: [AXWindow], on display: Display, screen: NSScreen) -> [AXWindow] {
+        guard let index = windows.firstIndex(of: window) else { return windows }
         if settings.layout == .columns {
             let capacity = columnCapacity(in: screen)
-            guard capacity > 0 else { return }
+            guard capacity > 0 else { return windows }
             let start = scrollStartByDisplay[display, default: 0]
             if index < start { scrollStartByDisplay[display] = index }
             else if index >= start + capacity { scrollStartByDisplay[display] = index - capacity + 1 }
+            return windows
         } else {
             let ordered = orderedForBig(windows, on: display, preferred: nil)
             let gap = CGFloat(settings.gap)
@@ -629,11 +633,12 @@ final class AutoTileManager {
             let stackCapacity = leftWidth >= 200 && rightWidth >= 200
                 ? Int(floor((area.height + gap) / (200 + gap))) : 0
             let capacity = min(ordered.count, 1 + stackCapacity)
-            guard let focusedIndex = ordered.firstIndex(of: window), focusedIndex >= capacity, capacity > 0 else { return }
+            guard let focusedIndex = ordered.firstIndex(of: window), focusedIndex >= capacity, capacity > 0 else { return windows }
             var reordered = ordered
             reordered.swapAt(focusedIndex, capacity - 1)
             if capacity == 1 { mainWindowByDisplay[display] = window }
             windowsByDisplay[display] = reordered
+            return reordered
         }
     }
 
