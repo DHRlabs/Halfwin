@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import Combine
 import CoreGraphics
 import ScreenCaptureKit
 
@@ -81,6 +82,8 @@ final class DockPreviewManager {
     private var hoverTimer: Timer?
     private var hideTimer: Timer?
     private var pointerTimer: Timer?
+    private var peekHoverTimer: Timer?
+    private var peekLeaveTimer: Timer?
     private var clickMonitor: Any?
     private var pendingDockClick: DockClick?
     private var dockClickInFlight = false
@@ -103,6 +106,10 @@ final class DockPreviewManager {
     private var generation = 0
     private var isShowing = false
     private var captureTask: Task<Void, Never>?
+    private var peekCaptureTask: Task<Void, Never>?
+    private var peekCaptureGeneration = 0
+    private var hoveredTileID: Int?
+    private var peekedTileID: Int?
     private var backgroundCaptureTask: Task<Void, Never>?
     private var warmThumbnailTasks: [UUID: Task<Void, Never>] = [:]
     private var thumbnailCache: [CGWindowID: CachedThumbnail] = [:]
@@ -115,11 +122,18 @@ final class DockPreviewManager {
     private var shareableContentTaskIsForced = false
     private var cachedOnScreenWindowRecords: (records: [CGWindowRecord], loadedAt: TimeInterval)?
     private let panel = DockPreviewPanel()
+    private let peekPanel = DockWindowPeek()
     private let settings: DockPreviewSettings
+    private var settingsObserver: AnyCancellable?
 
     init(settings: DockPreviewSettings) {
         self.settings = settings
         panel.onSelect = { [weak self] in self?.selectWindow($0) }
+        panel.onHover = { [weak self] id, inside in self?.previewTileHoverChanged(id, inside: inside) }
+        settingsObserver = settings.$peekOnHover.dropFirst().sink { [weak self] enabled in
+            guard !enabled else { return }
+            Task { @MainActor [weak self] in self?.clearPeek() }
+        }
     }
 
     func setEnabled(_ enabled: Bool) {
@@ -1039,6 +1053,7 @@ final class DockPreviewManager {
 
     private func present(_ preview: CachedPreview, preservingImages: Bool) {
         guard let placement = previewPlacement else { return }
+        if let peekedTileID, !preview.items.contains(where: { $0.id == peekedTileID }) { clearPeek() }
         windows = preview.windows
         screenshotIDsByTile = preview.screenshotIDs
         panel.show(
@@ -1341,6 +1356,113 @@ final class DockPreviewManager {
         panel.setImage(NSImage(cgImage: image, size: .zero), for: tileID)
     }
 
+    private func previewTileHoverChanged(_ id: Int, inside: Bool) {
+        if !inside {
+            guard hoveredTileID == id else { return }
+            hoveredTileID = nil
+            peekHoverTimer?.invalidate()
+            peekHoverTimer = nil
+            guard peekedTileID != nil else { return }
+            peekLeaveTimer?.invalidate()
+            peekLeaveTimer = Timer.scheduledTimer(withTimeInterval: 0.06, repeats: false) { [weak self] _ in
+                MainActor.assumeIsolated { self?.clearPeek() }
+            }
+            return
+        }
+        guard isShowing, settings.peekOnHover, canCapturePreviews else {
+            clearPeek()
+            return
+        }
+        peekLeaveTimer?.invalidate()
+        peekLeaveTimer = nil
+        guard hoveredTileID != id else { return }
+        hoveredTileID = id
+        peekHoverTimer?.invalidate()
+        if peekedTileID != nil {
+            showPeek(for: id)
+            return
+        }
+        peekHoverTimer = Timer.scheduledTimer(withTimeInterval: 0.08, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.hoveredTileID == id else { return }
+                self.peekHoverTimer = nil
+                self.showPeek(for: id)
+            }
+        }
+    }
+
+    private func showPeek(for id: Int) {
+        guard settings.peekOnHover, canCapturePreviews,
+              let window = windows[id] else {
+            clearPeek()
+            return
+        }
+        AXUIElementSetMessagingTimeout(window.element, 0.1)
+        guard let frame = window.frame, frame.width > 0, frame.height > 0,
+              let screen = NSScreen.screens.first(where: { $0.frame.contains(CGPoint(x: frame.midX, y: frame.midY)) })
+                ?? NSScreen.screens.first(where: { $0.frame.intersects(frame) }) else {
+            clearPeek()
+            return
+        }
+        peekCaptureTask?.cancel()
+        peekCaptureTask = nil
+        peekCaptureGeneration += 1
+        let captureGeneration = peekCaptureGeneration
+        peekedTileID = id
+        let windowID = screenshotIDsByTile[id]
+        let cachedImage = windowID.flatMap { thumbnailCache[$0]?.image }
+        let minimized = window.isMinimized
+        peekPanel.show(frame: frame, on: screen.frame, image: cachedImage, minimized: minimized)
+        guard let windowID else { return }
+
+        let targetWidth = min(4096, max(1, Int((frame.width * screen.backingScaleFactor).rounded())))
+        let cachedContent = shareableContentCache?.content
+        let hasWindow = cachedContent?.windows.contains(where: { $0.windowID == windowID }) == true
+        let freshContentTask = hasWindow ? nil : prefetchShareableContent(forceRefresh: true)
+        peekCaptureTask = Task.detached(priority: .userInitiated) { [weak self] in
+            guard let self, await self.canCapturePreviews, !Task.isCancelled else { return }
+            let content: SCShareableContent?
+            if hasWindow {
+                content = cachedContent
+            } else if let freshContentTask {
+                content = (await freshContentTask.value).0
+            } else {
+                content = await self.shareableContentForCapture()
+            }
+            guard let content, !Task.isCancelled,
+                  let captureWindow = content.windows.first(where: { $0.windowID == windowID }),
+                  let image = await captureWindowThumbnail(captureWindow, width: targetWidth, maxHeight: nil),
+                  !Task.isCancelled else { return }
+            await self.setPeekImage(
+                image,
+                for: id,
+                windowID: windowID,
+                generation: captureGeneration
+            )
+        }
+    }
+
+    private func setPeekImage(_ image: CGImage, for id: Int, windowID: CGWindowID, generation: Int) {
+        guard canCapturePreviews, !thumbnailImageIsBlank(image),
+              peekCaptureGeneration == generation,
+              peekedTileID == id,
+              screenshotIDsByTile[id] == windowID else { return }
+        peekPanel.setImage(image)
+    }
+
+    private func clearPeek() {
+        peekHoverTimer?.invalidate()
+        peekHoverTimer = nil
+        peekLeaveTimer?.invalidate()
+        peekLeaveTimer = nil
+        peekCaptureGeneration += 1
+        peekCaptureTask?.cancel()
+        peekCaptureTask = nil
+        hoveredTileID = nil
+        peekedTileID = nil
+        peekPanel.hide()
+    }
+
     private func selectWindow(_ id: Int) {
         guard let app = activeApp, let window = windows[id] else { return }
         mouseDownGeneration += 1
@@ -1390,6 +1512,7 @@ final class DockPreviewManager {
         generation += 1
         captureTask?.cancel()
         captureTask = nil
+        clearPeek()
         clearSelection()
         panel.hide()
         isShowing = false
@@ -1550,13 +1673,14 @@ private func captureWindowImages(
     return images
 }
 
-private func captureWindowThumbnail(_ window: SCWindow, width: Int) async -> CGImage? {
+private func captureWindowThumbnail(_ window: SCWindow, width: Int, maxHeight: Int? = 2048) async -> CGImage? {
     guard !Task.isCancelled else { return nil }
     let filter = SCContentFilter(desktopIndependentWindow: window)
     let configuration = SCStreamConfiguration()
     let sourceWidth = max(window.frame.width, 1)
     let sourceHeight = max(window.frame.height, 1)
-    let scale = min(CGFloat(width) / sourceWidth, 2048 / sourceHeight)
+    let widthScale = CGFloat(width) / sourceWidth
+    let scale = maxHeight.map { min(widthScale, CGFloat($0) / sourceHeight) } ?? widthScale
     configuration.width = max(1, Int(sourceWidth * scale))
     configuration.height = max(1, Int(sourceHeight * scale))
     configuration.showsCursor = false
