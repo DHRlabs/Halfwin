@@ -6,8 +6,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let mouseFeatures = MouseFeatures()
     private let keyboardExtras = KeyboardExtras()
     private let snapSettings = SnapSettings.shared
+    private let snapAssistSettings = SnapAssistSettings.shared
     private lazy var snapManager = SnapManager(settings: snapSettings, layoutMenu: layoutMenuManager)
-    private let snapAssistManager = SnapAssistManager()
+    private lazy var snapAssistManager = SnapAssistManager(settings: snapAssistSettings) { [weak self] windowIDs in
+        guard let self else { return [:] }
+        return await self.dockPreviewsManager.snapAssistThumbnails(for: windowIDs)
+    }
     private let snapGroupsManager = SnapGroupsManager()
     private let snapAssistSwitch = FeatureSwitch(key: "snapAssist", title: "Snap Assist", defaultOn: true)
     private let snapGroupsSwitch = FeatureSwitch(key: "snapGroups", title: "Snap Groups", defaultOn: false)
@@ -28,6 +32,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let autoTileSwitch = FeatureSwitch(key: "auto-tile", title: "Auto-tile", defaultOn: false)
     private lazy var settingsWindowController = SettingsWindowController(
         settings: snapSettings,
+        snapAssistSettings: snapAssistSettings,
         layoutMenuSettings: layoutMenuSettings,
         dockPreviewSettings: dockPreviewSettings,
         autoTileSettings: autoTileSettings
@@ -81,8 +86,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.autoTileManager.refreshPermission()
             MainActor.assumeIsolated { self?.dockPreviewsManager.refreshPermission() }
         }
-        SnapEvents.handler = { [weak self] window, action, screen in
-            self?.snapAssistManager.didSnap(window: window, action: action, screen: screen)
+        SnapEvents.handler = { [weak self] window, action, screen, origin in
+            self?.snapAssistManager.didSnap(window: window, action: action, screen: screen, origin: origin)
             self?.snapGroupsManager.didSnap(window: window, action: action, screen: screen)
             self?.autoTileManager.didSnap(window: window, action: action, screen: screen)
         }

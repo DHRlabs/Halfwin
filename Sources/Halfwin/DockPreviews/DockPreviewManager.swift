@@ -1143,6 +1143,22 @@ final class DockPreviewManager {
             && !captureSuspendedForSession && !captureSuspendedForSleep
     }
 
+    func snapAssistThumbnails(for windowIDs: [CGWindowID]) async -> [CGWindowID: CGImage] {
+        guard Permissions.screenRecordingGranted else { return [:] }
+        var images: [CGWindowID: CGImage] = [:]
+        for id in windowIDs {
+            if let cached = thumbnailCache[id], cached.width >= 320 { images[id] = cached.image }
+        }
+        let missing = Set(windowIDs).subtracting(images.keys)
+        guard !missing.isEmpty, let content = await shareableContentForCapture() else { return images }
+        let captured = await captureWindowImages(Array(missing), content: content, width: 320)
+        for (id, image) in captured where !thumbnailImageIsBlank(image) {
+            thumbnailCache[id] = CachedThumbnail(image: image, width: 320)
+            images[id] = image
+        }
+        return images
+    }
+
     private func captureThumbnails(_ idsByTile: [Int: CGWindowID], generation: Int) {
         guard canCapturePreviews, !idsByTile.isEmpty else { return }
         let targetWidth = captureWidth
