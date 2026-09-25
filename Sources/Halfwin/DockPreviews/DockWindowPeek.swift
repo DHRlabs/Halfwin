@@ -16,8 +16,9 @@ final class DockWindowPeek {
         self.panel = panel
         panel.isOpaque = false
         panel.backgroundColor = .clear
-        panel.level = .statusBar
+        // isFloatingPanel resets level, so set it before level.
         panel.isFloatingPanel = true
+        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.dockWindow)) - 1)
         panel.ignoresMouseEvents = true
         panel.hidesOnDeactivate = false
         panel.hasShadow = false
