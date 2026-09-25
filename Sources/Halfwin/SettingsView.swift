@@ -34,6 +34,7 @@ struct SettingsView: View {
                 }
             }
             Section("Dock previews") {
+                Toggle("Peek at windows on hover", isOn: $dockPreviewSettings.peekOnHover)
                 Stepper(value: $dockPreviewSettings.hoverDelay, in: 0.0...0.5, step: 0.05) {
                     Text("Hover delay: \(dockPreviewSettings.hoverDelay, specifier: "%.2f")s")
                 }
