@@ -72,7 +72,7 @@ struct MacTweak: Identifiable {
         .init(id: .listView, title: "List view everywhere", group: .finder,
               preferences: [.init(domain: "com.apple.finder", key: "FXPreferredViewStyle", value: "Nlsv", restartPolicy: .finder)]),
         .init(id: .fileExtensions, title: "Show all file extensions", group: .finder,
-              preferences: [.init(domain: "NSGlobalDomain", key: "AppleShowAllExtensions", value: true, restartPolicy: .none)]),
+              preferences: [.init(domain: "NSGlobalDomain", key: "AppleShowAllExtensions", value: true, restartPolicy: .finder)]),
         .init(id: .pathBar, title: "Path bar", group: .finder,
               preferences: [.init(domain: "com.apple.finder", key: "ShowPathbar", value: true, restartPolicy: .finder)]),
         .init(id: .statusBar, title: "Status bar", group: .finder,
@@ -88,6 +88,7 @@ final class MacTweaks: ObservableObject {
     static let shared = MacTweaks()
 
     @Published private var states: [MacTweakID: Bool]
+    @Published private var changedOutsideHalfwin = Set<MacTweakID>()
     @Published private(set) var finderAutomationDenied = false
 
     private let defaults = UserDefaults.standard
@@ -104,24 +105,30 @@ final class MacTweaks: ObservableObject {
     }
 
     func isEnabled(_ id: MacTweakID) -> Bool { states[id] ?? true }
+    func wasChangedOutsideHalfwin(_ id: MacTweakID) -> Bool { changedOutsideHalfwin.contains(id) }
 
     func setEnabled(_ enabled: Bool, for id: MacTweakID) {
         guard states[id] != enabled else { return }
         states[id] = enabled
+        changedOutsideHalfwin.remove(id)
         defaults.set(enabled, forKey: Self.toggleKey(id))
         apply(id, enabled: enabled)
         if id == .listView { finderListViewMonitor.setEnabled(enabled) }
     }
 
     func start() {
+        var changedOutside = Set<MacTweakID>()
         for tweak in MacTweak.all where isEnabled(tweak.id) {
-            apply(tweak.id, enabled: true, skipIfExternallyChanged: true)
+            if apply(tweak.id, enabled: true, skipIfExternallyChanged: true) {
+                changedOutside.insert(tweak.id)
+            }
         }
+        changedOutsideHalfwin = changedOutside
         finderListViewMonitor.setEnabled(isEnabled(.listView))
     }
 
     func openReduceMotionSettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.Accessibility-Settings.extension?AXDisplay") {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.Accessibility-Settings.extension?Seeing_Display") {
             NSWorkspace.shared.open(url)
         }
     }
@@ -130,10 +137,12 @@ final class MacTweaks: ObservableObject {
         finderListViewMonitor.retryAutomation()
     }
 
-    private func apply(_ id: MacTweakID, enabled: Bool, skipIfExternallyChanged: Bool = false) {
-        guard let tweak = MacTweak.all.first(where: { $0.id == id }) else { return }
+    @discardableResult
+    private func apply(_ id: MacTweakID, enabled: Bool, skipIfExternallyChanged: Bool = false) -> Bool {
+        guard let tweak = MacTweak.all.first(where: { $0.id == id }) else { return false }
+        var changedOutside = false
         for preference in tweak.preferences {
-            DockPreference.setFeature(
+            let skipped = DockPreference.setFeature(
                 enabled,
                 domain: preference.domain,
                 key: preference.key,
@@ -142,7 +151,9 @@ final class MacTweaks: ObservableObject {
                 savedPreviousKey: "Halfwin.macTweaks.\(id.rawValue).\(preference.key).PreviousValue",
                 skipIfExternallyChanged: skipIfExternallyChanged
             )
+            changedOutside = changedOutside || skipped
         }
+        return changedOutside
     }
 
     private static func toggleKey(_ id: MacTweakID) -> String { "Halfwin.macTweaks.\(id.rawValue).enabled" }
@@ -159,6 +170,8 @@ private final class FinderListViewMonitor {
     private var observerSource: CFRunLoopSource?
     private var observedProcessID: pid_t?
     private var updateScheduled = false
+    private var pendingWindowName: String?
+    private var lastWindowName: String?
 
     init(onAutomationDenied: @escaping (Bool) -> Void) {
         self.onAutomationDenied = onAutomationDenied
@@ -193,16 +206,18 @@ private final class FinderListViewMonitor {
         guard enabled, automationDenied else { return }
         automationDenied = false
         onAutomationDenied(false)
-        scheduleListViewCheck()
+        if let lastWindowName { scheduleListViewCheck(for: lastWindowName) }
     }
 
     func accessibilityChanged(_ element: AXUIElement, notification: String) {
         guard enabled, !automationDenied else { return }
-        observeWindows()
         if notification == kAXWindowCreatedNotification as String {
-            scheduleListViewCheck()
+            for window in observeWindows() {
+                if let name = standardFinderWindowName(window) { scheduleListViewCheck(for: name) }
+            }
         } else if notification == kAXTitleChangedNotification as String {
-            scheduleListViewCheck()
+            observeWindows()
+            if let name = standardFinderWindowName(element) { scheduleListViewCheck(for: name) }
         }
     }
 
@@ -213,7 +228,7 @@ private final class FinderListViewMonitor {
             onAutomationDenied(false)
         }
         observeFinder()
-        if shouldRetry { scheduleListViewCheck() }
+        if shouldRetry, let lastWindowName { scheduleListViewCheck(for: lastWindowName) }
     }
 
     private func observeFinder() {
@@ -244,53 +259,83 @@ private final class FinderListViewMonitor {
         observeWindows()
     }
 
-    private func observeWindows() {
-        guard let accessibilityObserver, let observedApplication else { return }
+    @discardableResult
+    private func observeWindows() -> [AXUIElement] {
+        guard let accessibilityObserver, let observedApplication else { return [] }
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(observedApplication, kAXWindowsAttribute as CFString, &value) == .success,
-              let windows = value as? [AXUIElement] else { return }
+              let windows = value as? [AXUIElement] else { return [] }
+        let newWindows = windows.filter { window in !observedWindows.contains(where: { CFEqual($0, window) }) }
         for window in observedWindows where !windows.contains(where: { CFEqual($0, window) }) {
             AXObserverRemoveNotification(accessibilityObserver, window, kAXTitleChangedNotification as CFString)
         }
-        for window in windows where !observedWindows.contains(where: { CFEqual($0, window) }) {
+        for window in newWindows {
             _ = AXObserverAddNotification(
                 accessibilityObserver, window, kAXTitleChangedNotification as CFString,
                 Unmanaged.passUnretained(self).toOpaque()
             )
         }
         observedWindows = windows
+        return newWindows
     }
 
-    private func scheduleListViewCheck() {
-        guard enabled, !automationDenied, !updateScheduled else { return }
+    private func standardFinderWindowName(_ window: AXUIElement) -> String? {
+        AXUIElementSetMessagingTimeout(window, 0.1)
+        func stringAttribute(_ attribute: String) -> String? {
+            var value: CFTypeRef?
+            guard AXUIElementCopyAttributeValue(window, attribute as CFString, &value) == .success else { return nil }
+            return value as? String
+        }
+        guard stringAttribute(kAXRoleAttribute as String) == kAXWindowRole as String,
+              stringAttribute(kAXSubroleAttribute as String) == kAXStandardWindowSubrole as String else { return nil }
+        return stringAttribute(kAXTitleAttribute as String)
+    }
+
+    private func scheduleListViewCheck(for windowName: String) {
+        guard enabled, !automationDenied else { return }
+        lastWindowName = windowName
+        guard !updateScheduled else {
+            pendingWindowName = windowName
+            return
+        }
         updateScheduled = true
         finderScriptQueue.async { [weak self] in
             guard let self else { return }
-            let denied = self.setFinderWindowToListView()
+            let denied = self.setFinderWindowToListView(named: windowName)
             DispatchQueue.main.async {
                 self.updateScheduled = false
-                guard denied, !self.automationDenied else { return }
-                self.automationDenied = true
-                self.onAutomationDenied(true)
+                if denied, self.enabled, !self.automationDenied {
+                    self.automationDenied = true
+                    self.onAutomationDenied(true)
+                }
+                let pendingWindowName = self.pendingWindowName
+                self.pendingWindowName = nil
+                if self.enabled, !self.automationDenied, let pendingWindowName {
+                    self.scheduleListViewCheck(for: pendingWindowName)
+                }
             }
         }
     }
 
     private let finderScriptQueue = DispatchQueue(label: "Halfwin.finder-list-view", qos: .utility)
     private var finderScript: NSAppleScript?
+    private var finderScriptWindowName: String?
     private var finderScriptCompiled = false
 
-    private func setFinderWindowToListView() -> Bool {
-        if !finderScriptCompiled {
-            finderScriptCompiled = true
+    private func setFinderWindowToListView(named windowName: String) -> Bool {
+        if !finderScriptCompiled || finderScriptWindowName != windowName {
+            finderScriptCompiled = false
+            // ponytail: same-title windows can collide; use a stable AX-to-Finder window ID if one becomes available.
+            let escapedWindowName = windowName
+                .replacingOccurrences(of: "\\", with: "\\\\")
+                .replacingOccurrences(of: "\"", with: "\\\"")
             let source = """
             with timeout of 2 seconds
                 tell application id "com.apple.finder"
-                    if (count of windows) > 0 then
-                        try
-                            if current view of window 1 is not list view then set current view of window 1 to list view
-                        end try
-                    end if
+                    try
+                        set finderWindow to first window whose name is "\(escapedWindowName)"
+                        if current view of finderWindow is not list view then set current view of finderWindow to list view
+                    end try
                 end tell
             end timeout
             """
@@ -298,6 +343,8 @@ private final class FinderListViewMonitor {
             var compileError: NSDictionary?
             guard script?.compileAndReturnError(&compileError) == true else { return false }
             finderScript = script
+            finderScriptWindowName = windowName
+            finderScriptCompiled = true
         }
         guard let finderScript else { return false }
         var error: NSDictionary?
