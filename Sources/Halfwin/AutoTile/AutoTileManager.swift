@@ -62,6 +62,7 @@ final class AutoTileManager {
     private var focusRevealPending = false
     private var userFloated = Set<AXWindow>()
     private var handPlaced = Set<AXWindow>()
+    private var showDesktopPushedWindows = Set<AXWindow>()
     private var parked: [AXWindow: Parking] = [:]
     private var identities: [AXWindow: WindowIdentity] = [:]
     private var originalSizes: [AXWindow: CGSize] = [:]
@@ -125,6 +126,7 @@ final class AutoTileManager {
 
     func didManuallyPlace(_ window: AXWindow) {
         handPlaced.insert(window)
+        showDesktopPushedWindows.remove(window)
         userFloated.remove(window)
         removeFromManagedWindows(window)
         parked.removeValue(forKey: window)
@@ -146,6 +148,7 @@ final class AutoTileManager {
         removeWorkspaceObservers()
         stopKeyboardTap()
         for pid in Array(observers.keys) { removeObservation(for: pid) }
+        showDesktopPushedWindows.removeAll()
     }
 
     private func addWorkspaceObservers() {
@@ -175,6 +178,26 @@ final class AutoTileManager {
             self?.restoreParkedWindows()
             self?.scheduleReflow()
         })
+        workspaceObservers.append(NotificationCenter.default.addObserver(
+            forName: ShowDesktopEvents.windowFrameWillChange, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let self,
+                  let window = notification.userInfo?["window"] as? AXWindow,
+                  let pushedAside = notification.userInfo?["pushedAside"] as? Bool else { return }
+            if let frame = notification.userInfo?["frame"] as? CGRect {
+                self.expectedFrames[window] = ExpectedFrame(frames: [frame])
+            } else {
+                self.expectedFrames.removeValue(forKey: window)
+            }
+            if pushedAside {
+                self.showDesktopPushedWindows.insert(window)
+                self.reflowTimer?.invalidate()
+                self.reflowTimer = nil
+            } else {
+                self.showDesktopPushedWindows.remove(window)
+                self.scheduleReflow()
+            }
+        })
     }
 
     private func removeWorkspaceObservers() {
@@ -186,7 +209,7 @@ final class AutoTileManager {
     }
 
     private func scheduleReflow() {
-        guard enabled, Permissions.accessibilityGranted else { return }
+        guard enabled, Permissions.accessibilityGranted, showDesktopPushedWindows.isEmpty else { return }
         reflowTimer?.invalidate()
         reflowTimer = Timer.scheduledTimer(withTimeInterval: 0.075, repeats: false) { [weak self] _ in
             self?.reflowTimer = nil
@@ -195,7 +218,7 @@ final class AutoTileManager {
     }
 
     private func reflow() {
-        guard enabled, Permissions.accessibilityGranted else { return }
+        guard enabled, Permissions.accessibilityGranted, showDesktopPushedWindows.isEmpty else { return }
         let applications = NSWorkspace.shared.runningApplications.filter { $0.activationPolicy == .regular && !$0.isTerminated }
         var appByPID: [pid_t: NSRunningApplication] = [:]
         var liveWindows = Set<AXWindow>()
@@ -311,7 +334,7 @@ final class AutoTileManager {
         guard enabled else { return }
         if notification == kAXMovedNotification as String || notification == kAXResizedNotification as String {
             let window = AXWindow(element: element)
-            if isExpectedFrame(window) { return }
+            if showDesktopPushedWindows.contains(window) || isExpectedFrame(window) { return }
             guard !userFloated.contains(window), !handPlaced.contains(window) else { return }
             if notification == kAXResizedNotification as String, let frame = window.frame {
                 originalSizes[window] = frame.size
@@ -377,6 +400,7 @@ final class AutoTileManager {
     }
 
     private func removeAllState(for window: AXWindow) {
+        showDesktopPushedWindows.remove(window)
         removeFromManagedWindows(window)
         arrivalOrder.removeValue(forKey: window)
         focusOrder.removeValue(forKey: window)
