@@ -22,6 +22,7 @@ final class KeyboardExtras {
     private var clipboardRunning = false
     private var runtimeRunning = false
     var onCutPendingChange: ((Bool) -> Void)?
+    var onFinderMovePaste: ((URL, [URL]) -> Void)?
     private var cutState: CutState? {
         didSet {
             onCutPendingChange?(cutState != nil)
@@ -579,10 +580,19 @@ final class KeyboardExtras {
             return
         }
         let moveFiles = matched || (cutState?.awaitingFileCopy == false && clipboardHistory.entries.isEmpty)
+        let sourceURLs = cutState?.expectedURLs
         pendingFinderPasteID = nil
         cutState = nil
         if moveFiles {
             pastePress = nil
+            if let application = press.application,
+               isFrontmost(application),
+               let destination = CopyProgressWindow.finderDestination(in: application),
+               let sourceURLs {
+                onFinderMovePaste?(destination, sourceURLs.map {
+                    destination.appendingPathComponent($0.lastPathComponent).standardizedFileURL
+                })
+            }
             replayKeyCombo(to: press.application, keyCode: 9, flags: [.maskCommand, .maskAlternate]) { [weak self] in
                 self?.replayQueuedPastes()
             }
