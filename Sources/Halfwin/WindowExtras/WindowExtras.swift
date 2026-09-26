@@ -311,7 +311,14 @@ final class WindowExtrasManager {
     private func applyCommandArrow(_ keyCode: Int64) {
         guard let window = AXWindow.focusedWindow(), let frame = window.frame else { return }
         frameMemory.pruneUnreadableFrames()
-        let snapped = snappedAction(for: frame)
+        let registry = SnapWindowRegistry.shared
+        registry.validate()
+        let snapped: (action: SnapAction, screen: NSScreen)?
+        if registry.hasRecord(for: window) {
+            snapped = registry.snappedLane(for: window).map { ($0.action, $0.screen) }
+        } else {
+            snapped = snappedAction(for: frame)
+        }
         let action: SnapAction
         var rememberFrame = true
         var screen: NSScreen?
@@ -354,11 +361,17 @@ final class WindowExtrasManager {
             case .topLeftQuarter: action = .leftHalf
             case .topRightQuarter: action = .rightHalf
             case .bottomLeftQuarter, .bottomRightQuarter, .maximize:
-                if frameMemory.restore(window, current: frame) { return }
+                if frameMemory.restore(window, current: frame) {
+                    registry.unsnap(window)
+                    return
+                }
                 action = .center
                 rememberFrame = false
             default:
-                if frameMemory.restore(window, current: frame) { return }
+                if frameMemory.restore(window, current: frame) {
+                    registry.unsnap(window)
+                    return
+                }
                 action = .center
                 rememberFrame = false
             }
@@ -370,9 +383,7 @@ final class WindowExtrasManager {
         if let hopFromScreen { frameMemory.moveRestoreFrame(window, from: hopFromScreen, to: target.screen) }
         var destination = target.frame
         if SnapSettings.shared.fillAvailableSpace, SnapGeometry.isHalf(action) {
-            let frames = SnapAssistManager.rememberedSnapFrames(on: target.screen)
-            let neighbors = SnapAssistManager.fillNeighborFrames(for: action, on: target.screen,
-                                                                 excluding: window, from: frames)
+            let neighbors = registry.fillNeighborFrames(on: target.screen, excluding: window)
             destination = SnapGeometry.fillFrame(for: action, fixedFrame: target.frame,
                                                   visibleFrame: target.screen.visibleFrame,
                                                   snappedFrames: neighbors) ?? destination
@@ -383,7 +394,7 @@ final class WindowExtrasManager {
             window.setFrame(destination)
         }
         if let readBack = window.frame, SnapGeometry.isClose(readBack, destination) {
-            SnapEvents.didSnap(window: window, action: action, screen: target.screen)
+            SnapEvents.didSnap(window: window, action: action, screen: target.screen, frame: readBack)
         }
     }
 
@@ -623,6 +634,7 @@ final class WindowExtrasManager {
     private func toggleToVisibleFrame(_ window: AXWindow, current: CGRect) -> Bool {
         frameMemory.pruneUnreadableFrames()
         guard let target = targetFrame(.maximize, for: window, current: current) else { return false }
+        SnapWindowRegistry.shared.unsnap(window)
         frameMemory.toggle(window, current: current, to: target.frame)
         return true
     }

@@ -7,26 +7,6 @@ final class SnapAssistManager {
         $0 | (CGEventMask(1) << $1.rawValue)
     }
 
-    private struct Display: Hashable {
-        let number: UInt32
-        let frame: CGRect
-
-        init(_ screen: NSScreen) {
-            number = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
-            frame = screen.frame
-        }
-    }
-
-    private struct RememberedWindow {
-        let window: AXWindow
-        var frame: CGRect
-    }
-
-    private struct ZoneMemory {
-        let layout: SnapMultiWindowLayout
-        var windows: [SnapAction: RememberedWindow]
-    }
-
     private var enabled = false
     private var globalMonitor: Any?
     private var localMonitor: Any?
@@ -39,9 +19,6 @@ final class SnapAssistManager {
     private var activeLayout: SnapMultiWindowLayout?
     private var activeAction: SnapAction?
     private var pickedWindows = Set<AXWindow>()
-    nonisolated(unsafe) private static var zoneMemory: [Display: ZoneMemory] = [:]
-    nonisolated(unsafe) private static var snappedFrames: [Display: [AXWindow: CGRect]] = [:]
-    nonisolated(unsafe) private static var snapFrameGeneration = 0
     private var suppressNextAssist = false
     private var lastSnappedProcessIdentifier: pid_t?
     private var activationObserver: NSObjectProtocol?
@@ -87,25 +64,18 @@ final class SnapAssistManager {
     }
 
     func didSnap(window: AXWindow, action: SnapAction, screen: NSScreen, origin: SnapOrigin = .other) {
-        let frame = window.frame
+        let frame = SnapWindowRegistry.shared.record(for: window)?.frame
         let fixed = frame.flatMap {
             SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
                                currentWindowFrame: $0, portrait: screen.frame.height > screen.frame.width)
         }
-        let filledFrame: CGRect?
-        if origin != .layoutMenu, SnapSettings.shared.fillAvailableSpace, SnapGeometry.isHalf(action),
-           let frame, let fixed, !SnapGeometry.isClose(frame, fixed) {
-            filledFrame = frame
-        } else {
-            filledFrame = nil
-        }
-        let layout = remember(window: window, action: action, screen: screen, filledFrame: filledFrame)
         guard !suppressNextAssist else { return }
-        if filledFrame != nil {
+        if origin != .layoutMenu, SnapGeometry.isHalf(action), let frame, let fixed,
+           !SnapGeometry.isClose(frame, fixed) {
             hidePanel()
             return
         }
-        guard let layout else {
+        guard let layout = SnapMultiWindowLayout.containing(action) else {
             hidePanel()
             return
         }
@@ -114,7 +84,7 @@ final class SnapAssistManager {
         activeLayout = layout
         pickedWindows = [window]
         lastSnappedProcessIdentifier = window.processIdentifier
-        if origin == .layoutMenu, filledFrame == nil {
+        if origin == .layoutMenu {
             switch settings.fillEmptySpots {
             case .mostRecent: fillEmptyZones(in: layout, excluding: window, placing: action, on: screen)
             case .letMePick: break
@@ -295,75 +265,21 @@ final class SnapAssistManager {
         pickedWindows.insert(choice.window)
         activeWindow = choice.window
         suppressNextAssist = true
-        SnapEvents.didSnap(window: choice.window, action: action, screen: screen)
+        SnapEvents.didSnap(window: choice.window, action: action, screen: screen, frame: readBack)
         suppressNextAssist = false
         showNextZone()
-    }
-
-    private func remember(window: AXWindow, action: SnapAction, screen: NSScreen,
-                          filledFrame: CGRect? = nil) -> SnapMultiWindowLayout? {
-        if let frame = window.frame {
-            if action == .maximize || action == .center {
-                Self.forgetSnap(window: window)
-            } else {
-                Self.rememberSnap(window: window, frame: frame, on: screen)
-            }
-        }
-        guard let layout = SnapMultiWindowLayout.containing(action) else { return nil }
-        Self.pruneGoneDisplays()
-        let display = Display(screen)
-        var memory = Self.zoneMemory[display]
-        if memory?.layout != layout {
-            memory = ZoneMemory(layout: layout, windows: [:])
-        } else if var current = memory {
-            let canUpdate = Self.prune(&current, on: display)
-            memory = current
-            if !canUpdate {
-                if !window.isMinimized, let frame = window.frame {
-                    current.windows[action] = RememberedWindow(window: window, frame: frame)
-                }
-                Self.zoneMemory[display] = current
-                return layout
-            }
-        }
-        guard var memory else { return layout }
-        if let previous = memory.windows[action], previous.window != window {
-            previous.window.setMinimized(true)
-        }
-        if !window.isMinimized, let frame = window.frame {
-            memory.windows[action] = RememberedWindow(window: window, frame: frame)
-            if let filledFrame {
-                let portrait = screen.frame.height > screen.frame.width
-                for zone in layout.zones(portrait: portrait) where zone.action != action {
-                    let target = CGRect(x: screen.visibleFrame.minX + zone.rect.minX * screen.visibleFrame.width,
-                                        y: screen.visibleFrame.minY + zone.rect.minY * screen.visibleFrame.height,
-                                        width: zone.rect.width * screen.visibleFrame.width,
-                                        height: zone.rect.height * screen.visibleFrame.height)
-                    guard filledFrame.intersects(target), memory.windows[zone.action] == nil else { continue }
-                    memory.windows[zone.action] = RememberedWindow(window: window, frame: frame)
-                }
-            }
-        }
-        Self.zoneMemory[display] = memory
-        return layout
     }
 
     private func fillEmptyZones(in layout: SnapMultiWindowLayout, excluding window: AXWindow,
                                 placing action: SnapAction, on screen: NSScreen) {
         guard Permissions.accessibilityGranted else { return }
-        let display = Display(screen)
-        guard var memory = Self.zoneMemory[display], memory.layout == layout else { return }
-        _ = Self.prune(&memory, on: display)
-        if let frame = window.frame, !window.isMinimized {
-            memory.windows[action] = RememberedWindow(window: window, frame: frame)
-        }
-        Self.zoneMemory[display] = memory
-
-        var excluded = Set(memory.windows.values.map(\.window))
+        let registry = SnapWindowRegistry.shared
+        var occupants = registry.zoneOccupants(for: layout, on: screen)
+        var excluded = Set(occupants.values)
         excluded.insert(window)
         var choices = SnapWindowInventory.choices(on: screen, excluding: excluded).makeIterator()
-        var filled: [(AXWindow, SnapAction)] = []
-        for zone in layout.zones where zone.action != action && memory.windows[zone.action] == nil {
+        var filled: [(AXWindow, SnapAction, CGRect)] = []
+        for zone in layout.zones where zone.action != action && occupants[zone.action] == nil {
             while let choice = choices.next() {
                 guard let current = choice.window.frame,
                       let target = SnapGeometry.frame(for: zone.action, visibleFrame: screen.visibleFrame,
@@ -375,18 +291,16 @@ final class SnapAssistManager {
                     continue
                 }
                 LayoutMenuManager.rememberMove(window: choice.window, target: readBack, currentFrame: current)
-                memory.windows[zone.action] = RememberedWindow(window: choice.window, frame: readBack)
-                filled.append((choice.window, zone.action))
+                occupants[zone.action] = choice.window
+                filled.append((choice.window, zone.action, readBack))
                 break
             }
         }
-        Self.zoneMemory[display] = memory
-        for (window, action) in filled {
+        for (window, action, frame) in filled {
             suppressNextAssist = true
-            SnapEvents.didSnap(window: window, action: action, screen: screen)
+            SnapEvents.didSnap(window: window, action: action, screen: screen, frame: frame)
             suppressNextAssist = false
         }
-        Self.zoneMemory[display] = memory
     }
 
     private func showNextZone() {
@@ -395,15 +309,8 @@ final class SnapAssistManager {
             hidePanel()
             return
         }
-        Self.pruneGoneDisplays()
-        let display = Display(screen)
-        guard var memory = Self.zoneMemory[display], memory.layout == layout else {
-            hidePanel()
-            return
-        }
-        _ = Self.prune(&memory, on: display)
-        Self.zoneMemory[display] = memory
-        let filledActions = Set(memory.windows.keys)
+        let occupants = SnapWindowRegistry.shared.zoneOccupants(for: layout, on: screen)
+        let filledActions = Set(occupants.keys)
         guard let zone = layout.zones.first(where: { !filledActions.contains($0.action) }),
               let frame = SnapGeometry.frame(for: zone.action, visibleFrame: screen.visibleFrame,
                                                currentWindowFrame: activeWindow?.frame ?? .zero,
@@ -411,7 +318,7 @@ final class SnapAssistManager {
             hidePanel()
             return
         }
-        let excluded = Set(memory.windows.values.map(\.window)).union(pickedWindows)
+        let excluded = Set(occupants.values).union(pickedWindows)
         let choices = SnapWindowInventory.choices(on: screen, excluding: excluded)
         guard !choices.isEmpty else {
             hidePanel()
@@ -431,180 +338,6 @@ final class SnapAssistManager {
         }
     }
 
-    static func rememberedWindows(for layout: SnapMultiWindowLayout, on screen: NSScreen) -> [SnapAction: AXWindow] {
-        pruneGoneDisplays()
-        let display = Display(screen)
-        guard var memory = zoneMemory[display], memory.layout == layout else { return [:] }
-        _ = prune(&memory, on: display)
-        zoneMemory[display] = memory
-        return memory.windows.mapValues(\.window)
-    }
-
-    /// A single window-server and Accessibility snapshot for fill and divider
-    /// geometry. The returned on-screen list is front-to-back.
-    static func rememberedSnapSnapshot() -> SnapAssistSnapshot {
-        pruneGoneDisplays()
-        guard let onScreen = SnapWindowInventory.onScreenWindows() else {
-            return SnapAssistSnapshot(panes: [], windows: [], generation: snapFrameGeneration)
-        }
-        let visible = onScreen.filter { $0.pid != ProcessInfo.processInfo.processIdentifier }
-        var panes: [SnapAssistPane] = []
-        for display in Array(snappedFrames.keys) {
-            guard let screen = NSScreen.screens.first(where: { Display($0) == display }),
-                  var frames = snappedFrames[display] else { continue }
-            for (window, savedFrame) in frames {
-                let title = window.title
-                guard let frame = window.frame, !window.isMinimized,
-                      let pid = window.processIdentifier,
-                      let app = NSRunningApplication(processIdentifier: pid), !app.isHidden,
-                      screen.frame.contains(CGPoint(x: frame.midX, y: frame.midY)),
-                      isRememberedFrame(savedFrame, current: frame, visibleFrame: screen.visibleFrame),
-                      let index = visible.firstIndex(where: {
-                          $0.pid == pid && screen.frame.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) &&
-                              SnapGeometry.isClose($0.frame, frame, tolerance: 8) &&
-                              (title == nil || $0.title == nil || title == $0.title)
-                      }) else {
-                    frames.removeValue(forKey: window)
-                    snapFrameGeneration &+= 1
-                    continue
-                }
-                if SnapWindowInventory.isCovered(frame, by: visible[..<index].map(\.frame)) { continue }
-                if !SnapGeometry.isClose(frame, savedFrame, tolerance: 2) {
-                    frames[window] = frame
-                    updateRememberedSnapFrame(window: window, frame: frame)
-                }
-                panes.append(SnapAssistPane(window: window, frame: frame, screen: screen, windowID: visible[index].id))
-            }
-            snappedFrames[display] = frames
-        }
-        return SnapAssistSnapshot(panes: panes, windows: visible, generation: snapFrameGeneration)
-    }
-
-    static func rememberedSnapFrames(on screen: NSScreen) -> [AXWindow: CGRect] {
-        let display = Display(screen)
-        return Dictionary(uniqueKeysWithValues: rememberedSnapSnapshot().panes
-            .filter { Display($0.screen) == display }
-            .map { ($0.window, $0.frame) })
-    }
-
-    static var currentSnapFrameGeneration: Int { snapFrameGeneration }
-
-    static func forgetRememberedSnap(window: AXWindow) { forgetSnap(window: window) }
-
-    static func fillNeighborFrames(for action: SnapAction, on screen: NSScreen,
-                                   excluding window: AXWindow,
-                                   from frames: [AXWindow: CGRect]) -> [CGRect] {
-        let display = Display(screen)
-        let occupant = SnapMultiWindowLayout.containing(action).flatMap { layout -> AXWindow? in
-            guard let memory = zoneMemory[display], memory.layout == layout else { return nil }
-            return memory.windows[action]?.window
-        }
-        return frames.filter { $0.key != window && $0.key != occupant }.map(\.value)
-    }
-
-    /// Keeps divider resizes in both snap indexes so a later drag or hover
-    /// compares against the updated snapped frame.
-    static func updateRememberedSnapFrame(window: AXWindow, frame: CGRect) {
-        var changed = false
-        for display in Array(snappedFrames.keys) where snappedFrames[display]?[window] != nil {
-            snappedFrames[display]?[window] = frame
-            changed = true
-        }
-        for display in Array(zoneMemory.keys) {
-            guard var memory = zoneMemory[display] else { continue }
-            for action in Array(memory.windows.keys) {
-                guard var member = memory.windows[action], member.window == window else { continue }
-                member.frame = frame
-                memory.windows[action] = member
-            }
-            zoneMemory[display] = memory
-        }
-        if changed { snapFrameGeneration &+= 1 }
-    }
-
-    private static func rememberSnap(window: AXWindow, frame: CGRect, on screen: NSScreen) {
-        let display = Display(screen)
-        if snappedFrames[display]?[window] != frame {
-            snappedFrames[display, default: [:]][window] = frame
-            snapFrameGeneration &+= 1
-        }
-    }
-
-    private static func forgetSnap(window: AXWindow) {
-        var changed = false
-        for display in Array(snappedFrames.keys) {
-            if snappedFrames[display]?.removeValue(forKey: window) != nil { changed = true }
-        }
-        if changed { snapFrameGeneration &+= 1 }
-    }
-
-    private static func isRememberedFrame(_ saved: CGRect, current: CGRect, visibleFrame: CGRect) -> Bool {
-        if SnapGeometry.isClose(current, saved, tolerance: 2) { return true }
-        let tolerance: CGFloat = 20
-        let sameVerticalSpan = abs(saved.minY - current.minY) <= tolerance &&
-            abs(saved.maxY - current.maxY) <= tolerance &&
-            saved.minY <= visibleFrame.minY + tolerance && current.minY <= visibleFrame.minY + tolerance &&
-            saved.maxY >= visibleFrame.maxY - tolerance && current.maxY >= visibleFrame.maxY - tolerance
-        let sameHorizontalSpan = abs(saved.minX - current.minX) <= tolerance &&
-            abs(saved.maxX - current.maxX) <= tolerance &&
-            saved.minX <= visibleFrame.minX + tolerance && current.minX <= visibleFrame.minX + tolerance &&
-            saved.maxX >= visibleFrame.maxX - tolerance && current.maxX >= visibleFrame.maxX - tolerance
-        let sameOuterVerticalEdge =
-            (abs(saved.minX - visibleFrame.minX) <= tolerance && abs(current.minX - visibleFrame.minX) <= tolerance) ||
-            (abs(saved.maxX - visibleFrame.maxX) <= tolerance && abs(current.maxX - visibleFrame.maxX) <= tolerance)
-        let sameOuterHorizontalEdge =
-            (abs(saved.minY - visibleFrame.minY) <= tolerance && abs(current.minY - visibleFrame.minY) <= tolerance) ||
-            (abs(saved.maxY - visibleFrame.maxY) <= tolerance && abs(current.maxY - visibleFrame.maxY) <= tolerance)
-        return (sameVerticalSpan && sameOuterVerticalEdge) || (sameHorizontalSpan && sameOuterHorizontalEdge)
-    }
-
-    private static func pruneGoneDisplays() {
-        let displays = Set(NSScreen.screens.map(Display.init))
-        let oldCount = zoneMemory.count + snappedFrames.count
-        zoneMemory = zoneMemory.filter { displays.contains($0.key) }
-        snappedFrames = snappedFrames.filter { displays.contains($0.key) }
-        if oldCount != zoneMemory.count + snappedFrames.count { snapFrameGeneration &+= 1 }
-    }
-
-    private static func prune(_ memory: inout ZoneMemory, on display: Display) -> Bool {
-        guard let visible = SnapWindowInventory.onScreenWindows() else { return false }
-        for action in Array(memory.windows.keys) {
-            guard let member = memory.windows[action], let frame = member.window.frame,
-                  !member.window.isMinimized,
-                  let processIdentifier = member.window.processIdentifier,
-                  let application = NSRunningApplication(processIdentifier: processIdentifier), !application.isHidden,
-                  let screen = NSScreen.screens.first(where: { $0.frame.contains(CGPoint(x: frame.midX, y: frame.midY)) }),
-                  Display(screen) == display else {
-                memory.windows.removeValue(forKey: action)
-                continue
-            }
-            guard Self.isRememberedFrame(member.frame, current: frame, visibleFrame: screen.visibleFrame) else {
-                memory.windows.removeValue(forKey: action)
-                continue
-            }
-            let pid = processIdentifier
-            let title = member.window.title
-            guard visible.contains(where: {
-                $0.pid == pid && screen.frame.contains(CGPoint(x: $0.frame.midX, y: $0.frame.midY)) &&
-                    SnapGeometry.isClose($0.frame, frame, tolerance: 8) &&
-                    (title == nil || $0.title == nil || title == $0.title)
-            }) else { memory.windows.removeValue(forKey: action); continue }
-        }
-        return true
-    }
-}
-
-struct SnapAssistPane {
-    let window: AXWindow
-    var frame: CGRect
-    let screen: NSScreen
-    let windowID: CGWindowID
-}
-
-struct SnapAssistSnapshot {
-    var panes: [SnapAssistPane]
-    var windows: [SnapWindowInventory.VisibleWindow]
-    var generation: Int
 }
 
 struct SnapWindowChoice: Identifiable {

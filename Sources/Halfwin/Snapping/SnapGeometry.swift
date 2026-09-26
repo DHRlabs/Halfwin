@@ -29,6 +29,7 @@ enum SnapGeometry {
     /// bar strip still counts as the top edge).
     static let edgeMargin: CGFloat = 5
     static let cornerSize: CGFloat = 20
+    static let edgeTolerance: CGFloat = 20
 
     /// Halves-compound threshold: within this distance of a top/bottom
     /// corner, the left/right edge acts like the top/bottom half instead.
@@ -74,7 +75,7 @@ enum SnapGeometry {
     static func fillFrame(for action: SnapAction, fixedFrame: CGRect, visibleFrame: CGRect,
                           snappedFrames: [CGRect]) -> CGRect? {
         guard isHalf(action), fixedFrame.width > 0, fixedFrame.height > 0 else { return nil }
-        let tolerance: CGFloat = 20
+        let tolerance = edgeTolerance
         let spansHeight = fixedFrame.minY <= visibleFrame.minY + tolerance &&
             fixedFrame.maxY >= visibleFrame.maxY - tolerance
         let spansWidth = fixedFrame.minX <= visibleFrame.minX + tolerance &&
@@ -86,7 +87,7 @@ enum SnapGeometry {
                 abs($0.maxX - visibleFrame.maxX) <= tolerance && $0.minX > visibleFrame.minX + 1
             }
             for edge in Set(candidates.map(\.minX)).sorted() {
-                let ranges = candidates.filter { abs($0.minX - edge) <= 2 }.map { $0.minY...$0.maxY }
+                let ranges = candidates.filter { abs($0.minX - edge) <= tolerance }.map { $0.minY...$0.maxY }
                 if covers(ranges, from: visibleFrame.minY, to: visibleFrame.maxY, tolerance: tolerance) {
                     return CGRect(x: visibleFrame.minX, y: visibleFrame.minY,
                                   width: edge - visibleFrame.minX, height: visibleFrame.height)
@@ -97,7 +98,7 @@ enum SnapGeometry {
                 abs($0.minX - visibleFrame.minX) <= tolerance && $0.maxX < visibleFrame.maxX - 1
             }
             for edge in Set(candidates.map(\.maxX)).sorted(by: >) {
-                let ranges = candidates.filter { abs($0.maxX - edge) <= 2 }.map { $0.minY...$0.maxY }
+                let ranges = candidates.filter { abs($0.maxX - edge) <= tolerance }.map { $0.minY...$0.maxY }
                 if covers(ranges, from: visibleFrame.minY, to: visibleFrame.maxY, tolerance: tolerance) {
                     return CGRect(x: edge, y: visibleFrame.minY,
                                   width: visibleFrame.maxX - edge, height: visibleFrame.height)
@@ -108,7 +109,7 @@ enum SnapGeometry {
                 abs($0.minY - visibleFrame.minY) <= tolerance && $0.maxY < visibleFrame.maxY - 1
             }
             for edge in Set(candidates.map(\.maxY)).sorted(by: >) {
-                let ranges = candidates.filter { abs($0.maxY - edge) <= 2 }.map { $0.minX...$0.maxX }
+                let ranges = candidates.filter { abs($0.maxY - edge) <= tolerance }.map { $0.minX...$0.maxX }
                 if covers(ranges, from: visibleFrame.minX, to: visibleFrame.maxX, tolerance: tolerance) {
                     return CGRect(x: visibleFrame.minX, y: edge, width: visibleFrame.width,
                                   height: visibleFrame.maxY - edge)
@@ -119,7 +120,7 @@ enum SnapGeometry {
                 abs($0.maxY - visibleFrame.maxY) <= tolerance && $0.minY > visibleFrame.minY + 1
             }
             for edge in Set(candidates.map(\.minY)).sorted() {
-                let ranges = candidates.filter { abs($0.minY - edge) <= 2 }.map { $0.minX...$0.maxX }
+                let ranges = candidates.filter { abs($0.minY - edge) <= tolerance }.map { $0.minX...$0.maxX }
                 if covers(ranges, from: visibleFrame.minX, to: visibleFrame.maxX, tolerance: tolerance) {
                     return CGRect(x: visibleFrame.minX, y: visibleFrame.minY,
                                   width: visibleFrame.width, height: edge - visibleFrame.minY)
