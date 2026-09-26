@@ -71,7 +71,7 @@ final class SnapAssistManager {
         }
         guard !suppressNextAssist else { return }
         if origin != .layoutMenu, SnapGeometry.isHalf(action), let frame, let fixed,
-           !SnapGeometry.isClose(frame, fixed) {
+           !SnapGeometry.isClose(frame, fixed, tolerance: SnapGeometry.edgeTolerance) {
             hidePanel()
             return
         }
@@ -262,7 +262,8 @@ final class SnapAssistManager {
             choice.application.activate(options: [])
         }
         guard let readBack = choice.window.frame,
-              SnapGeometry.matchesSnapEdges(readBack, target: target, screenFrame: screen.visibleFrame) else {
+              SnapGeometry.matchesSnapEdges(readBack, target: target, screenFrame: screen.visibleFrame),
+              SnapGeometry.matchesSnapSize(readBack, target: target) else {
             hidePanel()
             return
         }
@@ -291,7 +292,8 @@ final class SnapAssistManager {
                                                       portrait: screen.frame.height > screen.frame.width) else { continue }
                 choice.window.setFrame(target)
                 guard let readBack = choice.window.frame,
-                      SnapGeometry.matchesSnapEdges(readBack, target: target, screenFrame: screen.visibleFrame) else {
+                      SnapGeometry.matchesSnapEdges(readBack, target: target, screenFrame: screen.visibleFrame),
+                      SnapGeometry.matchesSnapSize(readBack, target: target) else {
                     choice.window.setFrame(current)
                     continue
                 }

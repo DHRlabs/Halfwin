@@ -291,7 +291,8 @@ final class SnapManager {
         // there — a failed AX write shouldn't let a later drag "restore" to
         // a size it was never snapped from.
         if let readBack = draggedWindow.frame,
-           SnapGeometry.matchesSnapEdges(readBack, target: filledTarget, screenFrame: zone.screen.visibleFrame) {
+           SnapGeometry.matchesSnapEdges(readBack, target: filledTarget, screenFrame: zone.screen.visibleFrame),
+           SnapGeometry.matchesSnapSize(readBack, target: filledTarget) {
             preSnapSizes[draggedWindow] = frame.size
             snapNotification = (draggedWindow, zone.action, zone.screen, readBack)
         }

@@ -282,6 +282,7 @@ final class WindowExtrasManager {
     }
 
     private func pushedWindow(at point: CGPoint) -> AXWindow? {
+        guard NSScreen.screens.contains(where: { $0.visibleFrame.axFlipped.contains(point) }) else { return nil }
         guard let windows = CGWindowListCopyWindowInfo(
             [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
         ) as? [[String: Any]] else { return nil }
@@ -415,7 +416,8 @@ final class WindowExtrasManager {
             window.setFrame(destination)
         }
         if let readBack = window.frame,
-           SnapGeometry.matchesSnapEdges(readBack, target: destination, screenFrame: target.screen.visibleFrame) {
+           SnapGeometry.matchesSnapEdges(readBack, target: destination, screenFrame: target.screen.visibleFrame),
+           SnapGeometry.matchesSnapSize(readBack, target: destination) {
             SnapEvents.didSnap(window: window, action: action, screen: target.screen, frame: readBack)
         }
     }
@@ -430,7 +432,8 @@ final class WindowExtrasManager {
                 guard let target = SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
                                                       currentWindowFrame: frame,
                                                       portrait: screen.frame.height > screen.frame.width) else { continue }
-                if SnapGeometry.matchesSnapEdges(frame, target: target, screenFrame: screen.visibleFrame) {
+                if SnapGeometry.matchesSnapEdges(frame, target: target, screenFrame: screen.visibleFrame,
+                                                 requireInnerEdges: true) {
                     return (action, screen)
                 }
             }
