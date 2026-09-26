@@ -60,8 +60,8 @@ enum SnapAction: String, CaseIterable, Codable {
         case .lastTwoThirds: return "Last Two Thirds"
         case .lastThirdTop: return "Last Third Top Half"
         case .lastThirdBottom: return "Last Third Bottom Half"
-        case .leftTopBottomHalfCompound: return "Left Half (Top/Bottom Half Near Corners)"
-        case .rightTopBottomHalfCompound: return "Right Half (Top/Bottom Half Near Corners)"
+        case .leftTopBottomHalfCompound: return "Left Half (Optional Top/Bottom Half Near Corners)"
+        case .rightTopBottomHalfCompound: return "Right Half (Optional Top/Bottom Half Near Corners)"
         case .bottomThirdsCompound: return "Thirds (Drag to Center for Two Thirds)"
         }
     }
