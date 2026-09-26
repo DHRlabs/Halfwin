@@ -23,6 +23,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let layoutMenuSettings = LayoutMenuSettings.shared
     private let dockPreviewSettings = DockPreviewSettings.shared
     private let autoTileSettings = AutoTileSettings.shared
+    private let macTweaks = MacTweaks.shared
     private lazy var dockPreviewsManager = MainActor.assumeIsolated { DockPreviewManager(settings: dockPreviewSettings) }
     private lazy var layoutMenuManager = LayoutMenuManager(settings: layoutMenuSettings)
     private lazy var autoTileManager = AutoTileManager(settings: autoTileSettings)
@@ -38,7 +39,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         layoutMenuSettings: layoutMenuSettings,
         dockPreviewSettings: dockPreviewSettings,
         autoTileSettings: autoTileSettings,
-        notificationCount: notificationCountManager
+        notificationCount: notificationCountManager,
+        macTweaks: macTweaks
     )
     private let menu = NSMenu()
     private var statusItem: NSStatusItem!
@@ -80,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         launchSessionObservers.removeAll()
         MainActor.assumeIsolated { dockPreviewsManager.setSessionActive(!sessionInactiveAtLaunch) }
+        macTweaks.start()
 
         activationRefreshObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main

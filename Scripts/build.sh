@@ -30,6 +30,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
     <key>LSMinimumSystemVersion</key>      <string>14.0</string>
     <key>LSUIElement</key>                 <true/>
     <key>NSPrincipalClass</key>            <string>NSApplication</string>
+    <key>NSAppleEventsUsageDescription</key> <string>Halfwin sets Finder windows to list view.</string>
 </dict>
 </plist>
 PLIST
