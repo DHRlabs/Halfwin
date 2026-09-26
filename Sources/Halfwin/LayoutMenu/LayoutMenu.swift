@@ -756,7 +756,8 @@ final class LayoutMenuManager {
         window.setFrame(target)
         if let readBack = window.frame {
             Self.lastMoved[window] = (target: readBack, preMove: preMove)
-            if SnapGeometry.matchesSnapEdges(readBack, target: target, screenFrame: screen.visibleFrame) {
+            if SnapGeometry.matchesSnapEdges(readBack, target: target, screenFrame: screen.visibleFrame),
+               SnapGeometry.matchesSnapSize(readBack, target: target) {
                 SnapEvents.didSnap(window: window, action: action, screen: screen, origin: .layoutMenu, frame: readBack)
             }
             return readBack

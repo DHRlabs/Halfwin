@@ -18,6 +18,9 @@ final class SnapDividerManager {
         let appQueues: [pid_t: DispatchQueue]
         let primaryScreenHeight: CGFloat
         var clampedEdges: [AXWindow: CGFloat] = [:]
+        var lastRequestedCoordinate: CGFloat?
+        var lastPassStartedAt: TimeInterval?
+        var lastShrinkingSide: Side?
     }
 
     private struct ResizeResult {
@@ -32,6 +35,7 @@ final class SnapDividerManager {
     private var resizeSession: ResizeSession?
     private var dividerDrag = false
     private var latestDividerPoint: CGPoint?
+    private var latestDividerMovement: CGFloat = 0
     private var nativeResizePending = false
     private var resizeFinishPending = false
     private var resizeWorkInFlight = false
@@ -74,6 +78,7 @@ final class SnapDividerManager {
             resizeSession = nil
             dividerDrag = false
             latestDividerPoint = nil
+            latestDividerMovement = 0
             nativeResizePending = false
             resizeFinishPending = false
             draggedSnapWindow = nil
@@ -91,8 +96,10 @@ final class SnapDividerManager {
             updateHover(at: point)
         case .leftMouseDown:
             resizeSession = nil
+            stopResizeTimer()
             dividerDrag = false
             latestDividerPoint = nil
+            latestDividerMovement = 0
             nativeResizePending = false
             resizeFinishPending = false
             if nearCachedSeam(point) { SnapWindowRegistry.shared.refreshVisibleWindows() }
@@ -193,7 +200,7 @@ final class SnapDividerManager {
                 along = point.x
                 guard abs(point.y - seam.coordinate) <= 6, seam.range.contains(along) else { return false }
             }
-            return visiblePane(seam.low, side: .low, in: seam, at: along) != nil &&
+            return visiblePane(seam.low, side: .low, in: seam, at: along) != nil ||
                 visiblePane(seam.high, side: .high, in: seam, at: along) != nil
         }.min { distance($0, point) < distance($1, point) }
     }
@@ -209,7 +216,11 @@ final class SnapDividerManager {
             side = point.y < seam.coordinate ? .low : .high
             along = point.x
         }
-        return visiblePane(side == .low ? seam.low : seam.high, side: side, in: seam, at: along)
+        if let pane = visiblePane(side == .low ? seam.low : seam.high, side: side, in: seam, at: along) {
+            return pane
+        }
+        let otherSide: Side = side == .low ? .high : .low
+        return visiblePane(otherSide == .low ? seam.low : seam.high, side: otherSide, in: seam, at: along)
     }
 
     private func visiblePane(_ panes: [Pane], side: Side, in seam: Divider, at along: CGFloat) -> Pane? {
@@ -266,6 +277,7 @@ final class SnapDividerManager {
         resizeSession = makeResizeSession(divider: divider, owner: nil, ownerSide: nil)
         dividerDrag = true
         latestDividerPoint = point
+        latestDividerMovement = divider.axis == .vertical ? point.x - divider.coordinate : point.y - divider.coordinate
         resizeFinishPending = false
         nativeResizePending = false
         validationTimer?.invalidate()
@@ -275,12 +287,20 @@ final class SnapDividerManager {
 
     private func dragDivider() {
         guard dividerDrag else { return }
-        latestDividerPoint = NSEvent.mouseLocation
+        let point = NSEvent.mouseLocation
+        if let previous = latestDividerPoint, let axis = resizeSession?.divider.axis {
+            latestDividerMovement = axis == .vertical ? point.x - previous.x : point.y - previous.y
+        }
+        latestDividerPoint = point
     }
 
     private func endDividerDrag() {
         guard dividerDrag else { return }
-        latestDividerPoint = NSEvent.mouseLocation
+        let point = NSEvent.mouseLocation
+        if let previous = latestDividerPoint, let axis = resizeSession?.divider.axis {
+            latestDividerMovement = axis == .vertical ? point.x - previous.x : point.y - previous.y
+        }
+        latestDividerPoint = point
         finishResizeSession()
     }
 
@@ -312,31 +332,49 @@ final class SnapDividerManager {
     }
 
     private func processResize() {
-        guard enabled, let session = resizeSession else { return }
+        guard enabled, let session = resizeSession else {
+            stopResizeTimer()
+            return
+        }
         let final = resizeFinishPending
         let isDividerDrag = dividerDrag
         let requested: CGFloat?
+        var movement: CGFloat = 0
+        let now = ProcessInfo.processInfo.systemUptime
         if isDividerDrag, let point = latestDividerPoint {
-            requested = session.divider.axis == .vertical ? point.x : point.y
-            let coordinate = constrainedCoordinate(requested ?? session.divider.coordinate, in: session)
+            let pointerCoordinate = session.divider.axis == .vertical ? point.x : point.y
+            requested = pointerCoordinate
+            let previous = session.lastRequestedCoordinate ?? session.divider.coordinate
+            let pointerMoved = abs(pointerCoordinate - previous) > 0.1
+            movement = abs(latestDividerMovement) > 0.1
+                ? latestDividerMovement : pointerCoordinate - previous
+            let coordinate = constrainedCoordinate(pointerCoordinate, in: session)
             var preview = session.divider
             preview.coordinate = coordinate
             panel.show(frame: panelFrame(for: preview), vertical: preview.axis == .vertical)
             guard !resizeWorkInFlight else { return }
-            if !final, abs(coordinate - session.divider.coordinate) <= 0.1 { return }
+            if !final, !pointerMoved { return }
+            if let lastPass = session.lastPassStartedAt, now - lastPass < 1.0 / 60 { return }
+            if final, !pointerMoved { movement = 0 }
         } else {
             requested = nil
             guard !resizeWorkInFlight else { return }
             guard final || nativeResizePending else { return }
+            if let lastPass = session.lastPassStartedAt, now - lastPass < 1.0 / 60 { return }
         }
+        var passSession = session
+        if isDividerDrag, let requested { passSession.lastRequestedCoordinate = requested }
+        passSession.lastPassStartedAt = now
+        let passMovement = movement
         nativeResizePending = false
         resizeWorkInFlight = true
         DispatchQueue.global(qos: .userInteractive).async { [weak self] in
             guard let self else { return }
-            let result = self.resize(session: session, requested: requested, native: !isDividerDrag, final: final)
+            let result = self.resize(session: passSession, requested: requested, pointerMovement: passMovement,
+                                     native: !isDividerDrag, final: final)
             DispatchQueue.main.async {
                 self.resizeWorkInFlight = false
-                let sessionIsCurrent = self.resizeSession?.id == session.id
+                let sessionIsCurrent = self.resizeSession?.id == passSession.id
                 if let result {
                     for (window, frame) in result.frames {
                         SnapWindowRegistry.shared.recordFrameWrite(window: window, frame: frame)
@@ -348,28 +386,33 @@ final class SnapDividerManager {
                     }
                 }
                 guard sessionIsCurrent else {
-                    if final, self.resizeSession == nil {
-                        self.resizeTimer?.invalidate()
-                        self.resizeTimer = nil
-                        if self.enabled { SnapWindowRegistry.shared.refreshVisibleWindows() }
+                    if self.resizeSession == nil {
+                        self.stopResizeTimer()
+                        if final, self.enabled { SnapWindowRegistry.shared.refreshVisibleWindows() }
                     }
                     return
                 }
                 if final {
                     self.completeResizeSession()
-                } else if self.resizeFinishPending || self.nativeResizePending || self.dividerDrag {
+                } else if self.resizeFinishPending || self.nativeResizePending || self.dividerDrag,
+                          ProcessInfo.processInfo.systemUptime - now >= 1.0 / 60 {
                     self.processResize()
                 }
             }
         }
     }
 
-    private func completeResizeSession() {
+    private func stopResizeTimer() {
         resizeTimer?.invalidate()
         resizeTimer = nil
+    }
+
+    private func completeResizeSession() {
+        stopResizeTimer()
         resizeSession = nil
         dividerDrag = false
         latestDividerPoint = nil
+        latestDividerMovement = 0
         nativeResizePending = false
         resizeFinishPending = false
         SnapWindowRegistry.shared.refreshVisibleWindows()
@@ -389,8 +432,8 @@ final class SnapDividerManager {
         }
     }
 
-    private func resize(session original: ResizeSession, requested: CGFloat?, native: Bool,
-                        final: Bool) -> ResizeResult? {
+    private func resize(session original: ResizeSession, requested: CGFloat?, pointerMovement: CGFloat,
+                        native: Bool, final: Bool) -> ResizeResult? {
         var session = original
         var divider = session.divider
         var frames: [AXWindow: CGRect] = [:]
@@ -400,17 +443,31 @@ final class SnapDividerManager {
         if let owner = session.owner { AXUIElementSetMessagingTimeout(owner.element, 0.1) }
         let ownerFrame = native ? session.owner?.frame(primaryScreenHeight: session.primaryScreenHeight) : nil
         var desired = requested
+        var movement = pointerMovement
         if native, let ownerFrame, let oldOwnerFrame, let ownerSide = session.ownerSide {
             guard validEdgeResize(from: oldOwnerFrame, to: ownerFrame, axis: divider.axis, side: ownerSide) else {
                 return final ? verifyFinal(session) : nil
             }
-            desired = edge(ownerFrame, axis: divider.axis, side: ownerSide)
+            let ownerCoordinate = edge(ownerFrame, axis: divider.axis, side: ownerSide)
+            desired = ownerCoordinate
+            movement = ownerCoordinate - (session.lastRequestedCoordinate ??
+                edge(oldOwnerFrame, axis: divider.axis, side: ownerSide))
+            session.lastRequestedCoordinate = ownerCoordinate
         }
         guard let requestedCoordinate = desired else { return final ? verifyFinal(session) : nil }
-        if !final, abs(requestedCoordinate - divider.coordinate) <= 0.1 { return nil }
+        if final, !native, abs(movement) <= 0.1 {
+            guard let shrinkingSide = session.lastShrinkingSide else { return verifyFinal(session) }
+            let expandingSide: Side = shrinkingSide == .low ? .high : .low
+            let expandingPanes = expandingSide == .low ? divider.low : divider.high
+            let frames = applyFrames(expandingPanes, side: expandingSide, coordinate: divider.coordinate,
+                                     session: session, nativeOwner: nil, ownerFrame: nil, readBack: false,
+                                     forceWrite: true)
+            return verifyFinal(session, seededFrames: frames)
+        }
+        if !final, native, abs(requestedCoordinate - divider.coordinate) <= 0.1 { return nil }
 
         var coordinate = constrainedCoordinate(requestedCoordinate, in: session)
-        if !final, abs(coordinate - divider.coordinate) <= 0.1 {
+        if !final, native, abs(coordinate - divider.coordinate) <= 0.1 {
             let ownerNeedsCorrection: Bool
             if native, let ownerSide = session.ownerSide, let ownerFrame {
                 ownerNeedsCorrection = abs(edge(ownerFrame, axis: divider.axis, side: ownerSide) - coordinate) > 0.1
@@ -419,10 +476,15 @@ final class SnapDividerManager {
             }
             if !ownerNeedsCorrection { return nil }
         }
-        let increasing = requestedCoordinate > divider.coordinate
-        let shrinkingSide: Side = increasing ? .high : .low
-        var shrinkingPanes = shrinkingSide == .low ? divider.low : divider.high
         var ownerResult = ownerFrame
+        if native, let ownerFrame, let ownerSide = session.ownerSide, let owner = session.owner {
+            ownerResult = frame(ownerFrame, axis: divider.axis, side: ownerSide, coordinate: coordinate,
+                                anchor: session.anchors[owner] ?? limit(ownerFrame, axis: divider.axis, side: ownerSide))
+        }
+        let increasing = movement > 0
+        let shrinkingSide: Side = increasing ? .high : .low
+        session.lastShrinkingSide = shrinkingSide
+        var shrinkingPanes = shrinkingSide == .low ? divider.low : divider.high
         for attempt in 0..<2 {
             let shrinkFrames = applyFrames(shrinkingPanes, side: shrinkingSide, coordinate: coordinate,
                                            session: session, nativeOwner: native ? session.owner : nil,
@@ -435,7 +497,11 @@ final class SnapDividerManager {
                                    coordinate: coordinate, anchor: anchor)
                 let actualSize = divider.axis == .vertical ? actual.width : actual.height
                 let targetSize = divider.axis == .vertical ? target.width : target.height
-                if actualSize > targetSize + 0.5 {
+                let previousSize = divider.axis == .vertical ? pane.frame.width : pane.frame.height
+                // ponytail: 20 pt absorbs common cell rounding; infer per-app steps if larger cells appear.
+                let roundingTolerance = SnapGeometry.edgeTolerance
+                if actualSize > targetSize + roundingTolerance ||
+                    (abs(actualSize - previousSize) <= 0.5 && previousSize - targetSize > roundingTolerance) {
                     pane.window.setFrame(farEdgeAnchored(actual, axis: divider.axis, side: shrinkingSide, anchor: anchor),
                                          primaryScreenHeight: session.primaryScreenHeight)
                     guard let readBack = pane.window.frame(primaryScreenHeight: session.primaryScreenHeight) else { return nil }
@@ -464,7 +530,7 @@ final class SnapDividerManager {
         }
 
         if native, let owner = session.owner, let ownerSide = session.ownerSide,
-           let current = ownerResult, abs(edge(current, axis: divider.axis, side: ownerSide) - coordinate) > 0.1 {
+           let current = ownerFrame, abs(edge(current, axis: divider.axis, side: ownerSide) - coordinate) > 0.1 {
             let target = frame(current, axis: divider.axis, side: ownerSide, coordinate: coordinate,
                                anchor: session.anchors[owner] ?? limit(current, axis: divider.axis, side: ownerSide))
             AXUIElementSetMessagingTimeout(owner.element, 0.1)
@@ -504,20 +570,22 @@ final class SnapDividerManager {
         }.min() ?? requested
         guard minimum <= maximum else { return divider.coordinate }
         var coordinate = min(max(requested, minimum), maximum)
-        if requested > divider.coordinate {
-            for pane in divider.high {
-                if let limit = session.clampedEdges[pane.window] { coordinate = min(coordinate, limit) }
+        for pane in divider.high {
+            if let limit = session.clampedEdges[pane.window], requested > limit {
+                coordinate = min(coordinate, limit)
             }
-        } else if requested < divider.coordinate {
-            for pane in divider.low {
-                if let limit = session.clampedEdges[pane.window] { coordinate = max(coordinate, limit) }
+        }
+        for pane in divider.low {
+            if let limit = session.clampedEdges[pane.window], requested < limit {
+                coordinate = max(coordinate, limit)
             }
         }
         return coordinate
     }
 
     private func applyFrames(_ panes: [Pane], side: Side, coordinate: CGFloat, session: ResizeSession,
-                             nativeOwner: AXWindow?, ownerFrame: CGRect?, readBack: Bool) -> [AXWindow: CGRect] {
+                             nativeOwner: AXWindow?, ownerFrame: CGRect?, readBack: Bool,
+                             forceWrite: Bool = false) -> [AXWindow: CGRect] {
         let groups = Dictionary(grouping: panes, by: { $0.window.processIdentifier ?? 0 })
         let work = DispatchGroup()
         let lock = NSLock()
@@ -534,7 +602,7 @@ final class SnapDividerManager {
                     let anchor = session.anchors[pane.window] ?? self.limit(pane.frame, axis: session.divider.axis, side: side)
                     let target = self.frame(pane.frame, axis: session.divider.axis, side: side,
                                             coordinate: coordinate, anchor: anchor)
-                    guard !SnapGeometry.isClose(pane.frame, target, tolerance: 0.1) else {
+                    guard forceWrite || !SnapGeometry.isClose(pane.frame, target, tolerance: 0.1) else {
                         appResult[pane.window] = pane.frame
                         continue
                     }

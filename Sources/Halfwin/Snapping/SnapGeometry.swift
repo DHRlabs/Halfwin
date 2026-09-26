@@ -66,7 +66,12 @@ enum SnapGeometry {
             abs(a.width - b.width) <= tolerance && abs(a.height - b.height) <= tolerance
     }
 
-    static func matchesSnapEdges(_ actual: CGRect, target: CGRect, screenFrame: CGRect) -> Bool {
+    static func matchesSnapSize(_ actual: CGRect, target: CGRect) -> Bool {
+        abs(actual.width - target.width) <= edgeTolerance && abs(actual.height - target.height) <= edgeTolerance
+    }
+
+    static func matchesSnapEdges(_ actual: CGRect, target: CGRect, screenFrame: CGRect,
+                                requireInnerEdges: Bool = false) -> Bool {
         let edges = [
             (target.minX, screenFrame.minX, actual.minX),
             (target.maxX, screenFrame.maxX, actual.maxX),
@@ -74,7 +79,15 @@ enum SnapGeometry {
             (target.maxY, screenFrame.maxY, actual.maxY),
         ].filter { abs($0.0 - $0.1) <= 1 }
         guard !edges.isEmpty else { return isClose(actual, target, tolerance: 8) }
-        return edges.allSatisfy { abs($0.0 - $0.2) <= edgeTolerance }
+        guard edges.allSatisfy({ abs($0.0 - $0.2) <= edgeTolerance }) else { return false }
+        guard requireInnerEdges else { return true }
+        let innerEdges = [
+            (target.minX, screenFrame.minX, actual.minX),
+            (target.maxX, screenFrame.maxX, actual.maxX),
+            (target.minY, screenFrame.minY, actual.minY),
+            (target.maxY, screenFrame.maxY, actual.maxY),
+        ].filter { abs($0.0 - $0.1) > 1 }
+        return innerEdges.allSatisfy { abs($0.0 - $0.2) <= edgeTolerance }
     }
 
     static func isHalf(_ action: SnapAction) -> Bool {

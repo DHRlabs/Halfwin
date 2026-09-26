@@ -462,11 +462,17 @@ final class SnapWindowRegistry {
                 let gapCuts = [last.upperBound] + cuts.filter {
                     $0 > last.upperBound && $0 < range.lowerBound
                 } + [range.lowerBound]
-                let lowSideVisibleAcrossGap = zip(gapCuts, gapCuts.dropFirst()).allSatisfy { lower, upper in
-                    lowSideVisible(seam, at: (lower + upper) / 2)
+                let intervals = zip(gapCuts, gapCuts.dropFirst())
+                let lowVisibleAcrossGap = intervals.allSatisfy { lower, upper in
+                    let along = (lower + upper) / 2
+                    return sideVisible(seam, at: along, side: .low)
+                }
+                let highVisibleAcrossGap = intervals.allSatisfy { lower, upper in
+                    sideVisible(seam, at: (lower + upper) / 2, side: .high)
                 }
                 if range.lowerBound <= last.upperBound + 1 ||
-                    (range.lowerBound - last.upperBound < SnapGeometry.edgeTolerance && lowSideVisibleAcrossGap) {
+                    (range.lowerBound - last.upperBound < SnapGeometry.edgeTolerance &&
+                     (lowVisibleAcrossGap || highVisibleAcrossGap)) {
                     merged[merged.count - 1] = last.lowerBound...max(last.upperBound, range.upperBound)
                     continue
                 }
@@ -480,10 +486,11 @@ final class SnapWindowRegistry {
         }
     }
 
-    private func lowSideVisible(_ seam: SnapSeam, at along: CGFloat) -> Bool {
-        seam.low.contains { pane in
-            seamTouches(pane, seam: seam, at: along, side: .low) &&
-                pane.windowID == frontmostWindowID(at: pointInside(pane, seam: seam, along: along, side: .low))
+    private func sideVisible(_ seam: SnapSeam, at along: CGFloat, side: SnapSeamSide) -> Bool {
+        let panes = side == .low ? seam.low : seam.high
+        return panes.contains { pane in
+            seamTouches(pane, seam: seam, at: along, side: side) &&
+                pane.windowID == frontmostWindowID(at: pointInside(pane, seam: seam, along: along, side: side))
         }
     }
 
