@@ -322,9 +322,11 @@ final class SnapManager {
         }
         switch settings.action(for: position) {
         case .leftTopBottomHalfCompound:
-            return SnapGeometry.resolveHalfCompound(side: .left, cursor: cursor, screenFrame: screen.frame)
+            return settings.sideEdgesSnapToTopBottomHalf
+                ? SnapGeometry.resolveHalfCompound(side: .left, cursor: cursor, screenFrame: screen.frame) : .leftHalf
         case .rightTopBottomHalfCompound:
-            return SnapGeometry.resolveHalfCompound(side: .right, cursor: cursor, screenFrame: screen.frame)
+            return settings.sideEdgesSnapToTopBottomHalf
+                ? SnapGeometry.resolveHalfCompound(side: .right, cursor: cursor, screenFrame: screen.frame) : .rightHalf
         case .bottomThirdsCompound:
             return SnapGeometry.resolveBottomThirdsCompound(cursor: cursor, screenFrame: screen.frame, previous: previous)
         case let plain:

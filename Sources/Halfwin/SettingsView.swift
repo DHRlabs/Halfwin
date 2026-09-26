@@ -17,6 +17,8 @@ struct SettingsView: View {
         Form {
             Section("Snapping") {
                 Toggle("Snap windows when dragged to an edge", isOn: $settings.dragSnappingEnabled)
+                Toggle("Top and bottom of the side edges snap to the top or bottom half",
+                       isOn: $settings.sideEdgesSnapToTopBottomHalf)
                 Picker("Drag edge map", selection: $settings.mapPreset) {
                     ForEach(SnapMapPreset.allCases) { preset in Text(preset.rawValue).tag(preset) }
                 }

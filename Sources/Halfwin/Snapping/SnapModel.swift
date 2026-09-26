@@ -159,12 +159,12 @@ final class SnapSettings: ObservableObject {
     private let myMapKey = "Halfwin.mySnapMap"
     private let mapPresetKey = "Halfwin.snapMapPreset"
     private let enabledKey = "Halfwin.dragSnappingEnabled"
+    private let sideEdgesSnapToTopBottomHalfKey = "Halfwin.sideEdgesSnapToTopBottomHalf"
     private let fillAvailableSpaceKey = "Halfwin.fillAvailableSpace"
     private let linkedResizeEnabledKey = "Halfwin.linkedResizeEnabled"
 
     /// Lance's landscape Rectangle map: top-left/top-right corners are the
-    /// outer thirds, top edge maximizes, left/right edges are halves that
-    /// become top/bottom half near their own corners, bottom corners are
+    /// outer thirds, top edge maximizes, left/right edges are halves, bottom corners are
     /// quarters, and the bottom edge is the thirds compound.
     static let lanceDefault: SnapMap = [
         .topLeft: .firstThird,
@@ -212,6 +212,10 @@ final class SnapSettings: ObservableObject {
         didSet { defaults.set(dragSnappingEnabled, forKey: enabledKey) }
     }
 
+    @Published var sideEdgesSnapToTopBottomHalf: Bool {
+        didSet { defaults.set(sideEdgesSnapToTopBottomHalf, forKey: sideEdgesSnapToTopBottomHalfKey) }
+    }
+
     @Published var fillAvailableSpace: Bool {
         didSet { defaults.set(fillAvailableSpace, forKey: fillAvailableSpaceKey) }
     }
@@ -228,6 +232,8 @@ final class SnapSettings: ObservableObject {
         mapPreset = savedPreset
         map = selectedMap
         dragSnappingEnabled = defaults.object(forKey: enabledKey) == nil ? true : defaults.bool(forKey: enabledKey)
+        sideEdgesSnapToTopBottomHalf = defaults.object(forKey: sideEdgesSnapToTopBottomHalfKey) == nil
+            ? false : defaults.bool(forKey: sideEdgesSnapToTopBottomHalfKey)
         if savedMyMap == nil, savedPreset == .myMap, let data = try? JSONEncoder().encode(selectedMap) {
             defaults.set(data, forKey: myMapKey)
         }
