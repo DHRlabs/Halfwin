@@ -590,16 +590,16 @@ final class KeyboardExtras {
                let application = press.application,
                isFrontmost(application),
                let sourceURLs {
-                DispatchQueue.global(qos: .utility).async { [weak self] in
+                replayKeyCombo(to: application, keyCode: 9, flags: [.maskCommand, .maskAlternate]) { [weak self] in
+                    self?.replayQueuedPastes()
+                }
+                DispatchQueue.global(qos: .utility).async {
                     let destination = CopyProgressWindow.finderDestination(in: application)
                     DispatchQueue.main.async {
                         if let destination {
                             onFinderMovePaste(destination, sourceURLs.map {
                                 destination.appendingPathComponent($0.lastPathComponent).standardizedFileURL
                             })
-                        }
-                        self?.replayKeyCombo(to: application, keyCode: 9, flags: [.maskCommand, .maskAlternate]) { [weak self] in
-                            self?.replayQueuedPastes()
                         }
                     }
                 }
