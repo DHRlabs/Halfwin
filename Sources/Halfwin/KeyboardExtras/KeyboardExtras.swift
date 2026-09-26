@@ -585,11 +585,13 @@ final class KeyboardExtras {
         cutState = nil
         if moveFiles {
             pastePress = nil
-            if let application = press.application,
+            if UserDefaults.standard.bool(forKey: "Halfwin.feature.copy-progress-window"),
+               let onFinderMovePaste,
+               let application = press.application,
                isFrontmost(application),
                let destination = CopyProgressWindow.finderDestination(in: application),
                let sourceURLs {
-                onFinderMovePaste?(destination, sourceURLs.map {
+                onFinderMovePaste(destination, sourceURLs.map {
                     destination.appendingPathComponent($0.lastPathComponent).standardizedFileURL
                 })
             }
