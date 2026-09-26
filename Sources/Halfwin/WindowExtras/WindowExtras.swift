@@ -368,12 +368,21 @@ final class WindowExtrasManager {
         }
         guard let target = targetFrame(action, for: window, current: frame, on: screen) else { return }
         if let hopFromScreen { frameMemory.moveRestoreFrame(window, from: hopFromScreen, to: target.screen) }
-        if rememberFrame {
-            frameMemory.set(window, current: frame, to: target.frame)
-        } else {
-            window.setFrame(target.frame)
+        var destination = target.frame
+        if SnapSettings.shared.fillAvailableSpace, SnapGeometry.isHalf(action) {
+            let frames = SnapAssistManager.rememberedSnapFrames(on: target.screen)
+            let neighbors = SnapAssistManager.fillNeighborFrames(for: action, on: target.screen,
+                                                                 excluding: window, from: frames)
+            destination = SnapGeometry.fillFrame(for: action, fixedFrame: target.frame,
+                                                  visibleFrame: target.screen.visibleFrame,
+                                                  snappedFrames: neighbors) ?? destination
         }
-        if let readBack = window.frame, SnapGeometry.isClose(readBack, target.frame) {
+        if rememberFrame {
+            frameMemory.set(window, current: frame, to: destination)
+        } else {
+            window.setFrame(destination)
+        }
+        if let readBack = window.frame, SnapGeometry.isClose(readBack, destination) {
             SnapEvents.didSnap(window: window, action: action, screen: target.screen)
         }
     }
