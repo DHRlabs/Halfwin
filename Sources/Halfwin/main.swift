@@ -5,6 +5,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let keepAwake = KeepAwake()
     private let mouseFeatures = MouseFeatures()
     private let keyboardExtras = KeyboardExtras()
+    private let copyProgressWindow = CopyProgressWindow()
+    private let copyProgressSwitch = FeatureSwitch(key: "copy-progress-window", title: "Copy progress window", defaultOn: true)
     private let snapSettings = SnapSettings.shared
     private let snapAssistSettings = SnapAssistSettings.shared
     private lazy var snapManager = SnapManager(settings: snapSettings, layoutMenu: layoutMenuManager)
@@ -116,11 +118,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             self?.dockPreviewsManager.setClickToMinimizeEnabled($0)
         }
         notificationCountSwitch.onChange = { [weak self] in self?.notificationCountManager.setEnabled($0) }
+        copyProgressSwitch.onChange = { [weak self] enabled in
+            if !enabled { self?.copyProgressWindow.stopWatching() }
+        }
         snapAssistSwitch.start()
         snapGroupsSwitch.start()
         dragToTopLayoutsSwitch.start()
         dockPreviewsSwitch.start()
         clickDockIconMinimizeSwitch.start()
+        copyProgressSwitch.start()
         autoTileSwitch.start()
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -128,6 +134,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
             guard let self else { return }
             self.hasPendingFinderCut = pending
             self.updateStatusTitle()
+        }
+        keyboardExtras.onFinderMovePaste = { [weak self] destination, itemURLs in
+            guard let self, self.copyProgressSwitch.isOn else { return }
+            self.copyProgressWindow.watch(destination: destination, itemURLs: itemURLs)
         }
         buildMenu()
         menu.delegate = self
@@ -158,6 +168,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         snapAssistManager.setEnabled(false)
         autoTileManager.stop()
         keyboardExtras.stop()
+        copyProgressWindow.stopWatching()
     }
 
     func menuWillOpen(_ menu: NSMenu) {
@@ -223,6 +234,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(snapGroupsSwitch.makeMenuItem())
         menu.addItem(dragToTopLayoutsSwitch.makeMenuItem())
         keyboardExtras.addMenuItems(to: menu)
+        menu.addItem(copyProgressSwitch.makeMenuItem())
         menu.addItem(.separator())
         let dockHeader = NSMenuItem(title: "Dock", action: nil, keyEquivalent: "")
         dockHeader.isEnabled = false
