@@ -339,6 +339,7 @@ final class LayoutMenuManager {
 
     fileprivate func handleKeyboard(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            swallowedKeyboardKeyCodes.removeAll()
             if let keyboardEventTap { CGEvent.tapEnable(tap: keyboardEventTap, enable: true) }
             return Unmanaged.passUnretained(event)
         }
@@ -359,9 +360,19 @@ final class LayoutMenuManager {
             }
             return nil
         }
-        guard panel.isVisible, !isDropBarVisible,
+        if panel.isVisible, keyboardOpened,
+           settings.keyboardShortcut.matches(keyCode: keyCode, flags: flags) {
+            swallowedKeyboardKeyCodes.insert(keyCode)
+            return nil
+        }
+        guard panel.isVisible, keyboardOpened, !isDropBarVisible,
               flags.intersection([.maskControl, .maskShift, .maskAlternate, .maskCommand]).isEmpty else {
             return Unmanaged.passUnretained(event)
+        }
+        if event.getIntegerValueField(.keyboardEventAutorepeat) != 0,
+           [Int64(36), 76, 18, 19, 20, 21, 22, 23, 25, 26, 28, 29].contains(keyCode) {
+            swallowedKeyboardKeyCodes.insert(keyCode)
+            return nil
         }
         guard handlePanelKey(keyCode) else { return Unmanaged.passUnretained(event) }
         swallowedKeyboardKeyCodes.insert(keyCode)
@@ -371,8 +382,12 @@ final class LayoutMenuManager {
     private func handlePanelKey(_ keyCode: Int64) -> Bool {
         switch keyCode {
         case 53:
-            cancelDwell()
-            hidePanel(suppressRearm: true)
+            if dropState.keyboardZoneIndex != nil {
+                dropState.keyboardZoneIndex = nil
+            } else {
+                cancelDwell()
+                hidePanel(suppressRearm: true)
+            }
         case 123, 124, 125, 126:
             moveKeyboardHighlight(keyCode)
         case 36, 76:
@@ -417,7 +432,11 @@ final class LayoutMenuManager {
                 }
                 return (index, primary + cross * 2)
             }.min { $0.1 < $1.1 }?.0
-            if let next { dropState.keyboardZoneIndex = next }
+            if let next {
+                dropState.keyboardZoneIndex = next
+            } else {
+                dropState.keyboardZoneIndex = nil
+            }
             return
         }
         let column = layoutIndex % LayoutMenuPanel.columns
@@ -464,8 +483,8 @@ final class LayoutMenuManager {
         }
         guard zones.indices.contains(zoneIndex) else { return }
         switch zones[zoneIndex].dropZone {
-        case .preset(let preset): pick(preset)
-        case .layout(let action): pickLayoutZone(action)
+        case .preset(let preset): DispatchQueue.main.async { [weak self] in self?.pick(preset) }
+        case .layout(let action): DispatchQueue.main.async { [weak self] in self?.pickLayoutZone(action) }
         }
     }
 
@@ -548,7 +567,7 @@ final class LayoutMenuManager {
         isDropBarVisible = false
         dropStartFrame = nil
         dropState.isDropMode = false
-        dropState.keyboardLayoutIndex = 0
+        dropState.keyboardLayoutIndex = selectedWindow == nil ? nil : 0
         dropState.keyboardZoneIndex = nil
         dropState.showCount += 1
         dropState.highlightedZone = nil
