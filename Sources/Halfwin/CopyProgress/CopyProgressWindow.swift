@@ -27,12 +27,12 @@ final class CopyProgressWindow: NSObject, NSWindowDelegate, @unchecked Sendable 
     private var watching = false
     private var destination: URL?
     private var itemCount = 0
-    private var expectedURLs = Set<URL>()
+    private var expectedPaths = Set<String>()
     private var subscribers: [Any] = []
-    private var progresses: [URL: Progress] = [:]
-    private var observations: [URL: [NSKeyValueObservation]] = [:]
-    private var values: [URL: Values] = [:]
-    private var activeURLs = Set<URL>()
+    private var progresses: [String: Progress] = [:]
+    private var observations: [String: [NSKeyValueObservation]] = [:]
+    private var values: [String: Values] = [:]
+    private var activePaths = Set<String>()
     private var noProgressTimer: Timer?
     private var sampleTimer: Timer?
     private var completionTimer: Timer?
@@ -78,28 +78,24 @@ final class CopyProgressWindow: NSObject, NSWindowDelegate, @unchecked Sendable 
 
     func watch(destination: URL, itemURLs: [URL]) {
         stopWatching()
-        let targets = Set(itemURLs.map(\.standardizedFileURL))
-        guard !targets.isEmpty else { return }
+        let paths = Set(itemURLs.map { $0.standardizedFileURL.path })
+        guard !paths.isEmpty else { return }
         watching = true
         let destination = destination.standardizedFileURL
         self.destination = destination
         itemCount = itemURLs.count
-        expectedURLs = targets
+        expectedPaths = paths
         noProgressTimer = Timer.scheduledTimer(withTimeInterval: 1.5, repeats: false) { [weak self] _ in
             guard let self, self.values.isEmpty else { return }
             self.stopWatching(closeWindow: false)
         }
 
-        for url in targets.union([destination]).sorted(by: { $0.absoluteString < $1.absoluteString }) {
-            let subscriber = Progress.addSubscriber(forFileURL: url) { [weak self] progress in
-                guard let fileURL = progress.fileURL?.standardizedFileURL else { return nil }
-                DispatchQueue.main.async { [weak self] in self?.didPublish(progress, at: fileURL) }
-                return { [weak self] in
-                    DispatchQueue.main.async { [weak self] in self?.didUnpublish(at: fileURL) }
-                }
-            }
-            subscribers.append(subscriber)
+        let subscriber = Progress.addSubscriber(forFileURL: destination) { [weak self] progress in
+            guard let path = progress.fileURL?.standardizedFileURL.path else { return nil }
+            self?.didPublish(progress, at: path)
+            return { [weak self] in self?.didUnpublish(at: path) }
         }
+        subscribers.append(subscriber)
     }
 
     func stopWatching() {
@@ -121,8 +117,8 @@ final class CopyProgressWindow: NSObject, NSWindowDelegate, @unchecked Sendable 
         observations.removeAll()
         progresses.removeAll()
         values.removeAll()
-        activeURLs.removeAll()
-        expectedURLs.removeAll()
+        activePaths.removeAll()
+        expectedPaths.removeAll()
         destination = nil
         itemCount = 0
         previousSampleTime = nil
@@ -136,59 +132,60 @@ final class CopyProgressWindow: NSObject, NSWindowDelegate, @unchecked Sendable 
         if closeWindow, let panel, panel.isVisible { panel.close() }
     }
 
-    private func didPublish(_ progress: Progress, at url: URL) {
-        guard watching, url == destination || expectedURLs.contains(url) else { return }
+    private func didPublish(_ progress: Progress, at path: String) {
+        guard watching, path == destination?.path || expectedPaths.contains(path) else { return }
         completionTimer?.invalidate()
         completionTimer = nil
         noProgressTimer?.invalidate()
         noProgressTimer = nil
-        guard !activeURLs.contains(url) else { return }
-        activeURLs.insert(url)
-        progresses[url] = progress
-        values[url] = valuesOf(progress)
-        observations[url] = [
+        guard !activePaths.contains(path) else { return }
+        activePaths.insert(path)
+        progresses[path] = progress
+        values[path] = valuesOf(progress)
+        observations[path] = [
             progress.observe(\.completedUnitCount, options: .new) { [weak self] _, _ in
-                DispatchQueue.main.async { [weak self] in self?.refresh(progress, at: url) }
+                DispatchQueue.main.async { [weak self] in self?.refresh(progress, at: path) }
             },
             progress.observe(\.totalUnitCount, options: .new) { [weak self] _, _ in
-                DispatchQueue.main.async { [weak self] in self?.refresh(progress, at: url) }
-            },
-            progress.observe(\.fractionCompleted, options: .new) { [weak self] _, _ in
-                DispatchQueue.main.async { [weak self] in self?.refresh(progress, at: url) }
+                DispatchQueue.main.async { [weak self] in self?.refresh(progress, at: path) }
             },
             progress.observe(\.userInfo, options: .new) { [weak self] _, _ in
-                DispatchQueue.main.async { [weak self] in self?.refresh(progress, at: url) }
+                DispatchQueue.main.async { [weak self] in self?.refresh(progress, at: path) }
             }
         ]
         if panel == nil { makePanel() }
         updateTitle()
-        panel?.center()
-        panel?.orderFrontRegardless()
-        let summary = summary()
-        previousSampleTime = ProcessInfo.processInfo.systemUptime
-        previousCompletedBytes = summary.completed
-        sampleTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            self?.sample()
+        if panel?.isVisible != true {
+            panel?.center()
+            panel?.orderFrontRegardless()
+        }
+        if sampleTimer == nil {
+            let summary = summary()
+            previousSampleTime = ProcessInfo.processInfo.systemUptime
+            previousCompletedBytes = summary.completed
+            sampleTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
+                self?.sample()
+            }
         }
         refreshWindow()
     }
 
-    private func refresh(_ progress: Progress, at url: URL) {
-        guard watching, activeURLs.contains(url) else { return }
-        values[url] = valuesOf(progress)
+    private func refresh(_ progress: Progress, at path: String) {
+        guard watching, activePaths.contains(path) else { return }
+        values[path] = valuesOf(progress)
         refreshWindow()
-        if !activeURLs.isEmpty,
-           activeURLs.allSatisfy({ values[$0]?.isFinished == true }),
-           expectedURLs.isSubset(of: values.keys) {
+        if !activePaths.isEmpty,
+           activePaths.allSatisfy({ values[$0]?.isFinished == true }),
+           expectedPaths.isSubset(of: values.keys) {
             scheduleCompletion()
         }
     }
 
-    private func didUnpublish(at url: URL) {
-        guard watching, activeURLs.remove(url) != nil else { return }
-        if let progress = progresses.removeValue(forKey: url) { values[url] = valuesOf(progress) }
-        observations.removeValue(forKey: url)
-        if activeURLs.isEmpty { scheduleCompletion() }
+    private func didUnpublish(at path: String) {
+        guard watching, activePaths.remove(path) != nil else { return }
+        if let progress = progresses.removeValue(forKey: path) { values[path] = valuesOf(progress) }
+        observations.removeValue(forKey: path)
+        if activePaths.isEmpty { scheduleCompletion() }
         refreshWindow()
     }
 
@@ -219,9 +216,10 @@ final class CopyProgressWindow: NSObject, NSWindowDelegate, @unchecked Sendable 
 
     private func summary() -> Summary {
         guard let destination else { return Summary() }
-        let itemValues = values.filter { $0.key != destination }
+        let destinationPath = destination.path
+        let itemValues = values.filter { $0.key != destinationPath }
         let selected: [Values]
-        if let folderValues = values[destination], folderValues.total > 0 {
+        if let folderValues = values[destinationPath], folderValues.total > 0 {
             selected = [folderValues]
         } else {
             selected = Array(itemValues.values)
@@ -380,10 +378,14 @@ final class CopyProgressWindow: NSObject, NSWindowDelegate, @unchecked Sendable 
     }
 
     private static func byteString(_ bytes: Int64) -> String {
+        byteFormatter.string(fromByteCount: max(0, bytes))
+    }
+
+    private static let byteFormatter: ByteCountFormatter = {
         let formatter = ByteCountFormatter()
         formatter.countStyle = .file
-        return formatter.string(fromByteCount: max(0, bytes))
-    }
+        return formatter
+    }()
 
     private static func durationString(_ seconds: Double) -> String {
         let count = max(0, Int(seconds.rounded(.up)))
