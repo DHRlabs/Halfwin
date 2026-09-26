@@ -289,8 +289,11 @@ final class WindowExtrasManager {
         for info in windows {
             guard ((info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1) > 0,
                   let bounds = info[kCGWindowBounds as String] as? NSDictionary,
-                  let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary), frame.contains(point),
-                  let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                  let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary),
+                  frame.contains(point) else { continue }
+            let ownerName = info[kCGWindowOwnerName as String] as? String
+            if ownerName == "Dock" || ownerName == "SystemUIServer" { return nil }
+            guard let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
                   let pid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
                   let application = NSRunningApplication(processIdentifier: pid),
                   application.activationPolicy == .regular else { continue }
