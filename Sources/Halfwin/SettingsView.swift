@@ -54,6 +54,7 @@ struct SettingsView: View {
                     }
                 }
             }
+            .onAppear { macTweaks.retryFinderAutomation() }
             Section("Layout menu") {
                 Toggle("Show a layout menu when hovering the top of a display", isOn: $layoutMenuSettings.enabled)
                 Stepper(value: $layoutMenuSettings.dwellDelay, in: 0.1...1.5, step: 0.05) {

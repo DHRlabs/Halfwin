@@ -27,6 +27,7 @@ enum DockPreference {
         var requested = false
         var scheduled = false
         var lastRestartAt: TimeInterval?
+        var requestedAt: TimeInterval?
     }
 
     private static let defaults = UserDefaults.standard
@@ -39,7 +40,8 @@ enum DockPreference {
         key: String,
         value: Any,
         restartPolicy: RestartPolicy,
-        savedPreviousKey: String
+        savedPreviousKey: String,
+        skipIfExternallyChanged: Bool = false
     ) {
         let cfKey = key as CFString
         let cfDomain = domain as CFString
@@ -54,9 +56,12 @@ enum DockPreference {
                 guard let captured = savePreviousValue(copyValue(cfKey, from: cfDomain), for: savedPreviousKey) else { return }
                 saved = captured
             }
+            let currentValue = copyValue(cfKey, from: cfDomain)
+            if skipIfExternallyChanged, let writtenValue = saved.writtenValue,
+               !valuesEqual(currentValue, data: writtenValue) { return }
             saved.writtenValue = targetData
             store(saved, for: savedPreviousKey)
-            guard !valuesEqual(copyValue(cfKey, from: cfDomain), value) else { return }
+            guard !valuesEqual(currentValue, value) else { return }
 
             setValue(value as CFPropertyList, for: cfKey, in: cfDomain)
             guard synchronize(cfDomain), valuesEqual(copyValue(cfKey, from: cfDomain), value) else { return }
@@ -217,6 +222,7 @@ enum DockPreference {
             return
         }
         var state = restartStates[policy, default: RestartState()]
+        if !state.requested { state.requestedAt = ProcessInfo.processInfo.systemUptime }
         state.requested = true
         guard !state.scheduled else {
             restartStates[policy] = state
@@ -231,6 +237,7 @@ enum DockPreference {
         guard var state = restartStates[policy], let bundleIdentifier = policy.bundleIdentifier else { return }
         guard state.requested else {
             state.scheduled = false
+            state.requestedAt = nil
             restartStates[policy] = state
             return
         }
@@ -238,6 +245,16 @@ enum DockPreference {
             let wait = 3 - (ProcessInfo.processInfo.systemUptime - lastRestartAt)
             if wait > 0 {
                 DispatchQueue.main.asyncAfter(deadline: .now() + wait) { restartIfNeeded(policy) }
+                return
+            }
+        }
+        // ponytail: foreground is a copy proxy; restart after 60s if Finder stays active.
+        if policy == .finder,
+           NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.finder",
+           let requestedAt = state.requestedAt {
+            let remaining = 60 - (ProcessInfo.processInfo.systemUptime - requestedAt)
+            if remaining > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + min(1, remaining)) { restartIfNeeded(policy) }
                 return
             }
         }
@@ -249,6 +266,7 @@ enum DockPreference {
         state.requested = false
         state.scheduled = false
         state.lastRestartAt = ProcessInfo.processInfo.systemUptime
+        state.requestedAt = nil
         restartStates[policy] = state
         kill(app.processIdentifier, SIGTERM)
     }
