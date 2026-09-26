@@ -36,6 +36,10 @@ struct SettingsView: View {
                 }
                 .disabled(settings.mapPreset == .windows)
             }
+            Section("Snapping behavior") {
+                Toggle("Fill available space when snapping", isOn: $settings.fillAvailableSpace)
+                Toggle("Resize adjacent snapped windows together", isOn: $settings.linkedResizeEnabled)
+            }
             Section("Snap Assist") {
                 Picker("Fill empty spots", selection: $snapAssistSettings.fillEmptySpots) {
                     ForEach(SnapAssistFillMode.allCases) { mode in Text(mode.title).tag(mode) }

@@ -159,6 +159,8 @@ final class SnapSettings: ObservableObject {
     private let myMapKey = "Halfwin.mySnapMap"
     private let mapPresetKey = "Halfwin.snapMapPreset"
     private let enabledKey = "Halfwin.dragSnappingEnabled"
+    private let fillAvailableSpaceKey = "Halfwin.fillAvailableSpace"
+    private let linkedResizeEnabledKey = "Halfwin.linkedResizeEnabled"
 
     /// Lance's landscape Rectangle map: top-left/top-right corners are the
     /// outer thirds, top edge maximizes, left/right edges are halves that
@@ -210,6 +212,14 @@ final class SnapSettings: ObservableObject {
         didSet { defaults.set(dragSnappingEnabled, forKey: enabledKey) }
     }
 
+    @Published var fillAvailableSpace: Bool {
+        didSet { defaults.set(fillAvailableSpace, forKey: fillAvailableSpaceKey) }
+    }
+
+    @Published var linkedResizeEnabled: Bool {
+        didSet { defaults.set(linkedResizeEnabled, forKey: linkedResizeEnabledKey) }
+    }
+
     private init() {
         let savedMap = defaults.data(forKey: mapKey).flatMap { try? JSONDecoder().decode(SnapMap.self, from: $0) }
         let savedPreset = defaults.string(forKey: mapPresetKey).flatMap(SnapMapPreset.init(rawValue:)) ?? .myMap
@@ -221,6 +231,8 @@ final class SnapSettings: ObservableObject {
         if savedMyMap == nil, savedPreset == .myMap, let data = try? JSONEncoder().encode(selectedMap) {
             defaults.set(data, forKey: myMapKey)
         }
+        fillAvailableSpace = defaults.object(forKey: fillAvailableSpaceKey) == nil ? true : defaults.bool(forKey: fillAvailableSpaceKey)
+        linkedResizeEnabled = defaults.object(forKey: linkedResizeEnabledKey) == nil ? true : defaults.bool(forKey: linkedResizeEnabledKey)
     }
 
     func action(for position: SnapPosition) -> SnapAction { map[position] ?? .none }

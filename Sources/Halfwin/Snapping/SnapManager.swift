@@ -16,6 +16,10 @@ final class SnapManager {
 
     private let settings: SnapSettings
     private let layoutMenu: LayoutMenuManager
+    private lazy var divider = SnapDividerManager { [weak self] window, frame in
+        guard let self, let info = self.snappedInfo[window] else { return }
+        self.snappedInfo[window] = (target: frame, preSnapSize: info.preSnapSize)
+    }
     private var monitor: Any?
     private lazy var footprint = FootprintWindow()
 
@@ -25,6 +29,7 @@ final class SnapManager {
     private var isWindowMoving = false
     private var cancelled = false
     private var currentZone: Zone?
+    private var currentPreviewFrame: CGRect?
     private var dragToTopLayoutsEnabled = false
     private var dropScreen: NSScreen?
     private var currentDropZone: LayoutDropZone?
@@ -52,6 +57,10 @@ final class SnapManager {
                 DispatchQueue.main.async { self?.refreshPermission() }
             }
             .store(in: &cancellables)
+        settings.$linkedResizeEnabled
+            .dropFirst()
+            .sink { [weak self] _ in DispatchQueue.main.async { self?.refreshPermission() } }
+            .store(in: &cancellables)
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
         ) { [weak self] _ in self?.refreshPermission() }
@@ -60,6 +69,7 @@ final class SnapManager {
     /// Starts (or stops) the monitor to match Accessibility permission and
     /// the Settings toggle. Safe to call repeatedly.
     func refreshPermission() {
+        divider.setEnabled(settings.linkedResizeEnabled && Permissions.accessibilityGranted)
         if settings.dragSnappingEnabled && Permissions.accessibilityGranted {
             MissionControlDrag.setDragSnappingEnabled(true)
         }
@@ -107,7 +117,7 @@ final class SnapManager {
         case .keyDown:
             guard event.keyCode == 53 else { return } // Escape
             cancelled = true
-            footprint.hide()
+            hidePreview()
             currentZone = nil
             clearDropBar()
         case .leftMouseDown:
@@ -167,20 +177,21 @@ final class SnapManager {
             if dropScreen != screen || !layoutMenu.isDropBarVisible {
                 dropScreen = screen
                 currentDropZone = nil
-                footprint.hide()
+                hidePreview()
                 layoutMenu.showDropBar(on: screen, for: window, startFrame: initialFrame ?? .zero)
             }
             currentZone = nil
             let zone = layoutMenu.dropZone(at: cursor)
-            guard zone != currentDropZone else { return }
-            currentDropZone = zone
-            layoutMenu.highlight(zone)
-            if let zone, let frame = layoutMenu.dropPreviewFrame(
+            if zone != currentDropZone {
+                currentDropZone = zone
+                layoutMenu.highlight(zone)
+            }
+            if let zone, let base = layoutMenu.dropPreviewFrame(
                 for: zone, currentWindowFrame: CGRect(origin: .zero, size: size)
-            ) {
-                footprint.show(in: frame)
+            ), let action = action(for: zone) {
+                showPreview(filledFrame(for: action, base: base, screen: screen, excluding: window))
             } else {
-                footprint.hide()
+                hidePreview()
             }
             return // The drop bar owns the top-center strip, including maximize.
         }
@@ -188,16 +199,17 @@ final class SnapManager {
         if dropScreen != nil {
             if layoutMenu.isDropBarNear(cursor) {
                 let zone = layoutMenu.dropZone(at: cursor)
-                guard zone != currentDropZone else { return }
-                currentDropZone = zone
                 currentZone = nil
-                layoutMenu.highlight(zone)
-                if let zone, let frame = layoutMenu.dropPreviewFrame(
+                if zone != currentDropZone {
+                    currentDropZone = zone
+                    layoutMenu.highlight(zone)
+                }
+                if let zone, let base = layoutMenu.dropPreviewFrame(
                     for: zone, currentWindowFrame: CGRect(origin: .zero, size: size)
-                ) {
-                    footprint.show(in: frame)
+                ), let action = action(for: zone), let screen = dropScreen {
+                    showPreview(filledFrame(for: action, base: base, screen: screen, excluding: window))
                 } else {
-                    footprint.hide()
+                    hidePreview()
                 }
                 return
             }
@@ -206,7 +218,7 @@ final class SnapManager {
 
         guard let screen = NSScreen.screens.first(where: { NSMouseInRect(cursor, $0.frame, false) }),
               let position = SnapGeometry.position(for: cursor, in: screen.frame) else {
-            footprint.hide()
+            hidePreview()
             currentZone = nil
             currentDropZone = nil
             return
@@ -214,21 +226,20 @@ final class SnapManager {
 
         let action = resolvedAction(for: position, cursor: cursor, screen: screen, previous: currentZone?.action)
         guard action != .none else {
-            footprint.hide()
+            hidePreview()
             currentZone = nil
             currentDropZone = nil
             return
         }
 
         let zone = Zone(screen: screen, position: position, action: action)
-        guard zone != currentZone else { return }
         currentZone = zone
 
         if let rect = SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
                                          currentWindowFrame: CGRect(origin: .zero, size: size), portrait: screen.frame.isPortrait) {
-            footprint.show(in: rect)
+            showPreview(filledFrame(for: action, base: rect, screen: screen, excluding: window))
         } else {
-            footprint.hide()
+            hidePreview()
         }
     }
 
@@ -261,19 +272,24 @@ final class SnapManager {
             if case .preset(.restore) = currentDropZone {
                 snappedInfo.removeValue(forKey: draggedWindow)
             } else if let target {
-                snappedInfo[draggedWindow] = (target: target, preSnapSize: size)
+                let actual = draggedWindow.frame ?? target
+                if !SnapGeometry.isClose(actual, target) {
+                    LayoutMenuManager.rememberMove(window: draggedWindow, target: actual, currentFrame: target)
+                }
+                snappedInfo[draggedWindow] = (target: actual, preSnapSize: size)
             }
             return
         }
         guard let zone = currentZone, let frame = draggedWindow.frame else { return }
         guard let target = SnapGeometry.frame(for: zone.action, visibleFrame: zone.screen.visibleFrame,
                                               currentWindowFrame: frame, portrait: zone.screen.frame.isPortrait) else { return }
-        draggedWindow.setFrame(target)
+        let filledTarget = filledFrame(for: zone.action, base: target, screen: zone.screen, excluding: draggedWindow)
+        draggedWindow.setFrame(filledTarget)
         // Only remember this as a real snap if the window actually landed
         // there — a failed AX write shouldn't let a later drag "restore" to
         // a size it was never snapped from.
-        if let readBack = draggedWindow.frame, SnapGeometry.isClose(readBack, target, tolerance: 2) {
-            snappedInfo[draggedWindow] = (target: target, preSnapSize: frame.size)
+        if let readBack = draggedWindow.frame, SnapGeometry.isClose(readBack, filledTarget, tolerance: 2) {
+            snappedInfo[draggedWindow] = (target: filledTarget, preSnapSize: frame.size)
             snapNotification = (draggedWindow, zone.action, zone.screen)
         }
     }
@@ -285,6 +301,7 @@ final class SnapManager {
         isWindowMoving = false
         cancelled = false
         currentZone = nil
+        currentPreviewFrame = nil
     }
 
     private func clearDropBar() {
@@ -307,6 +324,36 @@ final class SnapManager {
         case let plain:
             return plain
         }
+    }
+
+    private func filledFrame(for action: SnapAction, base: CGRect, screen: NSScreen, excluding window: AXWindow) -> CGRect {
+        guard settings.fillAvailableSpace else { return base }
+        let neighbors = SnapAssistManager.rememberedSnapFrames(on: screen)
+            .filter { $0.key != window }.map(\.value)
+        return SnapGeometry.fillFrame(for: action, fixedFrame: base, visibleFrame: screen.visibleFrame,
+                                      snappedFrames: neighbors) ?? base
+    }
+
+    private func action(for zone: LayoutDropZone) -> SnapAction? {
+        switch zone {
+        case .layout(let action): return action
+        case .preset(.leftHalf): return .leftHalf
+        case .preset(.rightHalf): return .rightHalf
+        case .preset(.center): return .center
+        case .preset(.maximize): return .maximize
+        case .preset(.restore): return nil
+        }
+    }
+
+    private func showPreview(_ frame: CGRect) {
+        guard frame != currentPreviewFrame else { return }
+        currentPreviewFrame = frame
+        footprint.show(in: frame)
+    }
+
+    private func hidePreview() {
+        currentPreviewFrame = nil
+        footprint.hide()
     }
 
     /// Adapted from Rectangle's `DragRestorePlacement.frame(from:size:cursor:)`
