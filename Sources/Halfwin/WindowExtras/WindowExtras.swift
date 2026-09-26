@@ -67,7 +67,8 @@ final class WindowExtrasManager {
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             DispatchQueue.main.async {
                 guard let self else { return }
-                if let hiddenAt = self.hiddenAt, ProcessInfo.processInfo.systemUptime - hiddenAt > 1 {
+                let desktopClick = app.bundleIdentifier == "com.apple.finder" && AXWindow.focusedWindow(of: app) == nil
+                if !desktopClick, let hiddenAt = self.hiddenAt, ProcessInfo.processInfo.systemUptime - hiddenAt > 1 {
                     self.hiddenApplications = nil
                     self.hiddenAt = nil
                     self.clearDesktopRestoreApplicationIfNeeded()
@@ -288,7 +289,10 @@ final class WindowExtrasManager {
             guard ((info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1) > 0,
                   let bounds = info[kCGWindowBounds as String] as? NSDictionary,
                   let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary), frame.contains(point),
-                  let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value else { continue }
+                  let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
+                  let pid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+                  let application = NSRunningApplication(processIdentifier: pid),
+                  application.activationPolicy == .regular else { continue }
             guard (info[kCGWindowLayer as String] as? Int) == 0 else { return nil }
             guard let match = pushedWindows.first(where: { $0.value.windowID == id }) else { return nil }
             guard SnapGeometry.isClose(frame.axFlipped, match.value.pushedFrame, tolerance: 8) else {
@@ -410,7 +414,8 @@ final class WindowExtrasManager {
         } else {
             window.setFrame(destination)
         }
-        if let readBack = window.frame, SnapGeometry.isClose(readBack, destination) {
+        if let readBack = window.frame,
+           SnapGeometry.matchesSnapEdges(readBack, target: destination, screenFrame: target.screen.visibleFrame) {
             SnapEvents.didSnap(window: window, action: action, screen: target.screen, frame: readBack)
         }
     }
@@ -425,8 +430,7 @@ final class WindowExtrasManager {
                 guard let target = SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
                                                       currentWindowFrame: frame,
                                                       portrait: screen.frame.height > screen.frame.width) else { continue }
-                if abs(frame.minX - target.minX) <= 2 && abs(frame.minY - target.minY) <= 2 &&
-                    abs(frame.width - target.width) <= 8 && abs(frame.height - target.height) <= 8 {
+                if SnapGeometry.matchesSnapEdges(frame, target: target, screenFrame: screen.visibleFrame) {
                     return (action, screen)
                 }
             }

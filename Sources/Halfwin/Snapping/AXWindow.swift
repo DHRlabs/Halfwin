@@ -13,6 +13,9 @@ extension CGPoint {
 
 extension CGRect {
     var axFlipped: CGRect { CGRect(x: minX, y: primaryScreenHeight - maxY, width: width, height: height) }
+    func axFlipped(primaryScreenHeight: CGFloat) -> CGRect {
+        CGRect(x: minX, y: primaryScreenHeight - maxY, width: width, height: height)
+    }
 }
 
 /// A window reached through the Accessibility API. Adapted from Rectangle's
@@ -40,13 +43,21 @@ struct AXWindow {
         Self.frame(of: element)
     }
 
+    func frame(primaryScreenHeight: CGFloat) -> CGRect? {
+        Self.frame(of: element, primaryScreenHeight: primaryScreenHeight)
+    }
+
     static func frame(of element: AXUIElement) -> CGRect? {
+        frame(of: element, primaryScreenHeight: primaryScreenHeight)
+    }
+
+    static func frame(of element: AXUIElement, primaryScreenHeight: CGFloat) -> CGRect? {
         guard let position: AXValue = objectAttribute(element, kAXPositionAttribute),
               let size: AXValue = objectAttribute(element, kAXSizeAttribute) else { return nil }
         var point = CGPoint.zero
         var dimensions = CGSize.zero
         guard AXValueGetValue(position, .cgPoint, &point), AXValueGetValue(size, .cgSize, &dimensions) else { return nil }
-        return CGRect(origin: point, size: dimensions).axFlipped
+        return CGRect(origin: point, size: dimensions).axFlipped(primaryScreenHeight: primaryScreenHeight)
     }
 
     static func frameWithError(of element: AXUIElement) -> (frame: CGRect?, error: AXError) {
@@ -75,7 +86,11 @@ struct AXWindow {
     /// Set size, then position, then size again: macOS clamps the size to
     /// whichever display the position lands on, so the final call wins.
     func setFrame(_ appKitFrame: CGRect) {
-        let target = appKitFrame.axFlipped
+        setFrame(appKitFrame, primaryScreenHeight: primaryScreenHeight)
+    }
+
+    func setFrame(_ appKitFrame: CGRect, primaryScreenHeight: CGFloat) {
+        let target = appKitFrame.axFlipped(primaryScreenHeight: primaryScreenHeight)
         setSizeAttribute(kAXSizeAttribute, target.size)
         setPointAttribute(kAXPositionAttribute, target.origin)
         setSizeAttribute(kAXSizeAttribute, target.size)

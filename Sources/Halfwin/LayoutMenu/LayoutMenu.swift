@@ -374,7 +374,12 @@ final class LayoutMenuManager {
             swallowedKeyboardKeyCodes.insert(keyCode)
             return nil
         }
-        guard handlePanelKey(keyCode) else { return Unmanaged.passUnretained(event) }
+        guard handlePanelKey(keyCode) else {
+            DispatchQueue.main.async { [weak self] in
+                if self?.keyboardOpened == true { self?.hidePanel() }
+            }
+            return Unmanaged.passUnretained(event)
+        }
         swallowedKeyboardKeyCodes.insert(keyCode)
         return nil
     }
@@ -751,7 +756,7 @@ final class LayoutMenuManager {
         window.setFrame(target)
         if let readBack = window.frame {
             Self.lastMoved[window] = (target: readBack, preMove: preMove)
-            if SnapGeometry.isClose(readBack, target) {
+            if SnapGeometry.matchesSnapEdges(readBack, target: target, screenFrame: screen.visibleFrame) {
                 SnapEvents.didSnap(window: window, action: action, screen: screen, origin: .layoutMenu, frame: readBack)
             }
             return readBack

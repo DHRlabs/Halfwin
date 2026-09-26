@@ -186,6 +186,9 @@ final class SnapAssistManager {
         }
         guard type == .keyDown, panel?.isVisible == true else { return Unmanaged.passUnretained(event) }
         guard event.flags.intersection([.maskControl, .maskShift, .maskAlternate, .maskCommand]).isEmpty else {
+            if event.getIntegerValueField(.keyboardEventAutorepeat) != 0 {
+                return Unmanaged.passUnretained(event)
+            }
             DispatchQueue.main.async { [weak self] in self?.hidePanel() }
             return Unmanaged.passUnretained(event)
         }
@@ -258,7 +261,8 @@ final class SnapAssistManager {
         if mainError != .success || frontmostError != .success {
             choice.application.activate(options: [])
         }
-        guard let readBack = choice.window.frame, SnapGeometry.isClose(readBack, target) else {
+        guard let readBack = choice.window.frame,
+              SnapGeometry.matchesSnapEdges(readBack, target: target, screenFrame: screen.visibleFrame) else {
             hidePanel()
             return
         }
@@ -286,7 +290,8 @@ final class SnapAssistManager {
                                                       currentWindowFrame: current,
                                                       portrait: screen.frame.height > screen.frame.width) else { continue }
                 choice.window.setFrame(target)
-                guard let readBack = choice.window.frame, SnapGeometry.isClose(readBack, target) else {
+                guard let readBack = choice.window.frame,
+                      SnapGeometry.matchesSnapEdges(readBack, target: target, screenFrame: screen.visibleFrame) else {
                     choice.window.setFrame(current)
                     continue
                 }

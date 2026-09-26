@@ -66,6 +66,17 @@ enum SnapGeometry {
             abs(a.width - b.width) <= tolerance && abs(a.height - b.height) <= tolerance
     }
 
+    static func matchesSnapEdges(_ actual: CGRect, target: CGRect, screenFrame: CGRect) -> Bool {
+        let edges = [
+            (target.minX, screenFrame.minX, actual.minX),
+            (target.maxX, screenFrame.maxX, actual.maxX),
+            (target.minY, screenFrame.minY, actual.minY),
+            (target.maxY, screenFrame.maxY, actual.maxY),
+        ].filter { abs($0.0 - $0.1) <= 1 }
+        guard !edges.isEmpty else { return isClose(actual, target, tolerance: 8) }
+        return edges.allSatisfy { abs($0.0 - $0.2) <= edgeTolerance }
+    }
+
     static func isHalf(_ action: SnapAction) -> Bool {
         [.leftHalf, .rightHalf, .topHalf, .bottomHalf].contains(action)
     }
