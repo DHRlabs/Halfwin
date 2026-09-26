@@ -160,6 +160,11 @@ final class MacTweaks: ObservableObject {
 }
 
 private final class FinderListViewMonitor {
+    private struct WindowNames {
+        let window: AXUIElement
+        var names: Set<String>
+    }
+
     private let onAutomationDenied: (Bool) -> Void
     private var enabled = false
     private var automationDenied = false
@@ -170,8 +175,9 @@ private final class FinderListViewMonitor {
     private var observerSource: CFRunLoopSource?
     private var observedProcessID: pid_t?
     private var updateScheduled = false
-    private var pendingWindowName: String?
+    private var pendingWindowNames: [String] = []
     private var lastWindowName: String?
+    private var knownWindowNames: [WindowNames] = []
 
     init(onAutomationDenied: @escaping (Bool) -> Void) {
         self.onAutomationDenied = onAutomationDenied
@@ -213,11 +219,15 @@ private final class FinderListViewMonitor {
         guard enabled, !automationDenied else { return }
         if notification == kAXWindowCreatedNotification as String {
             for window in observeWindows() {
-                if let name = standardFinderWindowName(window) { scheduleListViewCheck(for: name) }
+                if let name = standardFinderWindowName(window), remember(name, for: window) {
+                    scheduleListViewCheck(for: name)
+                }
             }
         } else if notification == kAXTitleChangedNotification as String {
             observeWindows()
-            if let name = standardFinderWindowName(element) { scheduleListViewCheck(for: name) }
+            if let name = standardFinderWindowName(element), remember(name, for: element) {
+                scheduleListViewCheck(for: name)
+            }
         }
     }
 
@@ -257,6 +267,9 @@ private final class FinderListViewMonitor {
             }
         }
         observeWindows()
+        for window in observedWindows {
+            if let name = standardFinderWindowName(window) { _ = remember(name, for: window) }
+        }
     }
 
     @discardableResult
@@ -276,7 +289,16 @@ private final class FinderListViewMonitor {
             )
         }
         observedWindows = windows
+        knownWindowNames.removeAll { known in !windows.contains(where: { CFEqual($0, known.window) }) }
         return newWindows
+    }
+
+    private func remember(_ name: String, for window: AXUIElement) -> Bool {
+        if let index = knownWindowNames.firstIndex(where: { CFEqual($0.window, window) }) {
+            return knownWindowNames[index].names.insert(name).inserted
+        }
+        knownWindowNames.append(WindowNames(window: window, names: [name]))
+        return true
     }
 
     private func standardFinderWindowName(_ window: AXUIElement) -> String? {
@@ -295,7 +317,7 @@ private final class FinderListViewMonitor {
         guard enabled, !automationDenied else { return }
         lastWindowName = windowName
         guard !updateScheduled else {
-            pendingWindowName = windowName
+            pendingWindowNames.append(windowName)
             return
         }
         updateScheduled = true
@@ -306,10 +328,10 @@ private final class FinderListViewMonitor {
                 self.updateScheduled = false
                 if denied, self.enabled, !self.automationDenied {
                     self.automationDenied = true
+                    self.pendingWindowNames.removeAll()
                     self.onAutomationDenied(true)
                 }
-                let pendingWindowName = self.pendingWindowName
-                self.pendingWindowName = nil
+                let pendingWindowName = self.pendingWindowNames.isEmpty ? nil : self.pendingWindowNames.removeFirst()
                 if self.enabled, !self.automationDenied, let pendingWindowName {
                     self.scheduleListViewCheck(for: pendingWindowName)
                 }
@@ -332,10 +354,8 @@ private final class FinderListViewMonitor {
             let source = """
             with timeout of 2 seconds
                 tell application id "com.apple.finder"
-                    try
-                        set finderWindow to first window whose name is "\(escapedWindowName)"
-                        if current view of finderWindow is not list view then set current view of finderWindow to list view
-                    end try
+                    set finderWindow to first window whose name is "\(escapedWindowName)"
+                    if current view of finderWindow is not list view then set current view of finderWindow to list view
                 end tell
             end timeout
             """
@@ -363,6 +383,8 @@ private final class FinderListViewMonitor {
         accessibilityObserver = nil
         observedApplication = nil
         observedWindows.removeAll()
+        knownWindowNames.removeAll()
+        pendingWindowNames.removeAll()
         observerSource = nil
         observedProcessID = nil
     }

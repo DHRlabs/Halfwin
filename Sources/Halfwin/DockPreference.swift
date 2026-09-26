@@ -248,7 +248,7 @@ enum DockPreference {
                 return
             }
         }
-        if policy == .finder, finderHasCopyOrMoveProgressWindow() {
+        if policy == .finder, finderHasCopyOrMoveProgressWindow() != false {
             DispatchQueue.main.asyncAfter(deadline: .now() + 1) { restartIfNeeded(policy) }
             return
         }
@@ -265,31 +265,39 @@ enum DockPreference {
     }
 
     // ponytail: localized titles need localized keywords if Finder exposes no progress subrole.
-    private static func finderHasCopyOrMoveProgressWindow() -> Bool {
+    private static func finderHasCopyOrMoveProgressWindow() -> Bool? {
         guard let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder")
-            .first(where: { !$0.isTerminated }) else { return false }
+            .first(where: { !$0.isTerminated }) else { return nil }
         let application = AXUIElementCreateApplication(finder.processIdentifier)
         AXUIElementSetMessagingTimeout(application, 0.1)
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &value) == .success,
-              let windows = value as? [AXUIElement] else { return false }
-        return windows.contains { window in
+              let windows = value as? [AXUIElement] else { return nil }
+        var couldNotReadWindow = false
+        for window in windows {
             AXUIElementSetMessagingTimeout(window, 0.1)
+            var readDescription = false
             for attribute in [kAXTitleAttribute, kAXSubroleAttribute] {
                 var value: CFTypeRef?
-                guard AXUIElementCopyAttributeValue(window, attribute as CFString, &value) == .success,
-                      let description = value as? String else { continue }
+                let result = AXUIElementCopyAttributeValue(window, attribute as CFString, &value)
+                guard result == .success, let description = value as? String else {
+                    if result != .noValue { couldNotReadWindow = true }
+                    continue
+                }
+                readDescription = true
                 if attribute == kAXSubroleAttribute {
                     if description.localizedCaseInsensitiveContains("progress") { return true }
                 } else {
-                    let words = description.lowercased().split { !$0.isLetter }
-                    if words.contains(where: { ["copy", "copying", "move", "moving"].contains(String($0)) }) {
+                    let title = description.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+                    if title == "copy" || title == "move" || title == "copying" || title == "moving" ||
+                       title.hasPrefix("copying ") || title.hasPrefix("moving ") {
                         return true
                     }
                 }
             }
-            return false
+            if !readDescription { couldNotReadWindow = true }
         }
+        return couldNotReadWindow ? nil : false
     }
 }
 
