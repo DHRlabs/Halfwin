@@ -20,6 +20,9 @@ struct SettingsView: View {
                 Picker("Drag edge map", selection: $settings.mapPreset) {
                     ForEach(SnapMapPreset.allCases) { preset in Text(preset.rawValue).tag(preset) }
                 }
+                Text("Portrait displays keep their built-in edge map.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                 ForEach(SnapPosition.allCases, id: \.self) { position in
                     Picker(position.displayName, selection: binding(for: position)) {
                         ForEach(SnapAction.allCases.filter { $0 != .lastThirdTop && $0 != .lastThirdBottom }, id: \.self) { action in
@@ -73,6 +76,9 @@ struct SettingsView: View {
                 Picker("Keyboard shortcut", selection: $layoutMenuSettings.keyboardShortcut) {
                     ForEach(LayoutMenuShortcut.allCases) { shortcut in Text(shortcut.title).tag(shortcut) }
                 }
+                Text("Shortcut letters use US keyboard positions (Z/L).")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                 Stepper(value: $layoutMenuSettings.dwellDelay, in: 0.1...1.5, step: 0.05) {
                     Text("Dwell delay: \(layoutMenuSettings.dwellDelay, specifier: "%.2f")s")
                 }

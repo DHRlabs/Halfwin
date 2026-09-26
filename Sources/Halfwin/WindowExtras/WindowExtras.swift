@@ -315,12 +315,14 @@ final class WindowExtrasManager {
         let action: SnapAction
         var rememberFrame = true
         var screen: NSScreen?
+        var hopFromScreen: NSScreen?
         switch keyCode {
         case 123:
             if let snapped, snapped.action == .leftHalf {
                 guard let adjacent = adjacentScreen(from: snapped.screen, direction: -1) else { return }
                 action = .rightHalf
                 screen = adjacent
+                hopFromScreen = snapped.screen
             } else {
                 action = .leftHalf
             }
@@ -330,6 +332,7 @@ final class WindowExtrasManager {
                 guard let adjacent = adjacentScreen(from: snapped.screen, direction: 1) else { return }
                 action = .leftHalf
                 screen = adjacent
+                hopFromScreen = snapped.screen
             } else {
                 action = .rightHalf
             }
@@ -364,6 +367,7 @@ final class WindowExtrasManager {
             return
         }
         guard let target = targetFrame(action, for: window, current: frame, on: screen) else { return }
+        if let hopFromScreen { frameMemory.moveRestoreFrame(window, from: hopFromScreen, to: target.screen) }
         if rememberFrame {
             frameMemory.set(window, current: frame, to: target.frame)
         } else {
@@ -384,7 +388,10 @@ final class WindowExtrasManager {
                 guard let target = SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
                                                       currentWindowFrame: frame,
                                                       portrait: screen.frame.height > screen.frame.width) else { continue }
-                if SnapGeometry.isClose(frame, target) { return (action, screen) }
+                if abs(frame.minX - target.minX) <= 2 && abs(frame.minY - target.minY) <= 2 &&
+                    abs(frame.width - target.width) <= 8 && abs(frame.height - target.height) <= 8 {
+                    return (action, screen)
+                }
             }
         }
         return nil
@@ -637,6 +644,19 @@ private final class WindowFrameMemory {
     func set(_ window: AXWindow, current: CGRect, to target: CGRect) {
         if originalFrames[window] == nil { originalFrames[window] = current }
         window.setFrame(target)
+    }
+
+    func moveRestoreFrame(_ window: AXWindow, from source: NSScreen, to destination: NSScreen) {
+        guard let original = originalFrames[window] else { return }
+        let sourceBounds = source.visibleFrame
+        let bounds = destination.visibleFrame
+        let width = min(original.width, bounds.width)
+        let height = min(original.height, bounds.height)
+        let x = bounds.minX + original.minX - sourceBounds.minX
+        let y = bounds.minY + original.minY - sourceBounds.minY
+        originalFrames[window] = CGRect(x: min(max(x, bounds.minX), bounds.maxX - width),
+                                        y: min(max(y, bounds.minY), bounds.maxY - height),
+                                        width: width, height: height)
     }
 
     func restore(_ window: AXWindow, current: CGRect) -> Bool {

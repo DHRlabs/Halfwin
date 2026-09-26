@@ -144,7 +144,6 @@ final class SnapAssistManager {
                 return event
             }
         }
-        startKeyboardTap()
     }
 
     private func stop() {
@@ -152,7 +151,6 @@ final class SnapAssistManager {
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
         globalMonitor = nil
         localMonitor = nil
-        stopKeyboardTap()
         hidePanel()
     }
 
@@ -185,6 +183,7 @@ final class SnapAssistManager {
 
     fileprivate func handleKeyboard(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            swallowedKeyboardKeyCodes.removeAll()
             if let keyboardEventTap { CGEvent.tapEnable(tap: keyboardEventTap, enable: true) }
             return Unmanaged.passUnretained(event)
         }
@@ -196,18 +195,22 @@ final class SnapAssistManager {
         if type == .keyUp {
             return swallowedKeyboardKeyCodes.remove(keyCode) == nil ? Unmanaged.passUnretained(event) : nil
         }
-        guard type == .keyDown, panel?.isVisible == true,
-              event.flags.intersection([.maskControl, .maskShift, .maskAlternate, .maskCommand]).isEmpty else {
+        guard type == .keyDown, panel?.isVisible == true else { return Unmanaged.passUnretained(event) }
+        guard event.flags.intersection([.maskControl, .maskShift, .maskAlternate, .maskCommand]).isEmpty else {
+            DispatchQueue.main.async { [weak self] in self?.hidePanel() }
             return Unmanaged.passUnretained(event)
         }
         switch keyCode {
         case 123, 124, 125, 126:
             panel?.moveSelection(keyCode)
         case 36, 76:
-            panel?.pickSelection()
+            if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+                DispatchQueue.main.async { [weak self] in self?.panel?.pickSelection() }
+            }
         case 53:
-            hidePanel()
+            DispatchQueue.main.async { [weak self] in self?.hidePanel() }
         default:
+            DispatchQueue.main.async { [weak self] in self?.hidePanel() }
             return Unmanaged.passUnretained(event)
         }
         swallowedKeyboardKeyCodes.insert(keyCode)
@@ -226,6 +229,7 @@ final class SnapAssistManager {
     }
 
     private func hidePanel() {
+        stopKeyboardTap()
         thumbnailTask?.cancel()
         thumbnailTask = nil
         panel?.hide()
@@ -379,6 +383,7 @@ final class SnapAssistManager {
         let panel = self.panel ?? SnapAssistPanel { [weak self] choice in self?.pick(choice) }
         self.panel = panel
         panel.show(frame: frame, choices: choices)
+        startKeyboardTap()
         thumbnailTask?.cancel()
         let thumbnailProvider = self.thumbnailProvider
         thumbnailTask = Task { @MainActor [weak self] in
@@ -645,6 +650,7 @@ private struct SnapAssistView: View {
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(choice.title)
+                    .id(index)
                 }
             }
             ZStack {
@@ -652,8 +658,13 @@ private struct SnapAssistView: View {
                 Color.black.opacity(0.16)
                 Group {
                     if availableCellHeight < 70 {
-                        ScrollView(.vertical) { grid }
-                            .scrollIndicators(.hidden)
+                        ScrollViewReader { proxy in
+                            ScrollView(.vertical) { grid }
+                                .scrollIndicators(.hidden)
+                                .onChange(of: selectedIndex) { _, index in
+                                    proxy.scrollTo(index, anchor: .center)
+                                }
+                        }
                     } else {
                         grid
                     }
