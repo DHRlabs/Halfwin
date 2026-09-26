@@ -458,16 +458,32 @@ final class SnapWindowRegistry {
         }
         var merged: [ClosedRange<CGFloat>] = []
         for range in visible.sorted(by: { $0.lowerBound < $1.lowerBound }) {
-            if let last = merged.last, range.lowerBound <= last.upperBound + 1 {
-                merged[merged.count - 1] = last.lowerBound...max(last.upperBound, range.upperBound)
-            } else {
-                merged.append(range)
+            if let last = merged.last {
+                let gapCuts = [last.upperBound] + cuts.filter {
+                    $0 > last.upperBound && $0 < range.lowerBound
+                } + [range.lowerBound]
+                let lowSideVisibleAcrossGap = zip(gapCuts, gapCuts.dropFirst()).allSatisfy { lower, upper in
+                    lowSideVisible(seam, at: (lower + upper) / 2)
+                }
+                if range.lowerBound <= last.upperBound + 1 ||
+                    (range.lowerBound - last.upperBound < SnapGeometry.edgeTolerance && lowSideVisibleAcrossGap) {
+                    merged[merged.count - 1] = last.lowerBound...max(last.upperBound, range.upperBound)
+                    continue
+                }
             }
+            merged.append(range)
         }
         return merged.map { range in
             var segment = seam
             segment.range = range
             return segment
+        }
+    }
+
+    private func lowSideVisible(_ seam: SnapSeam, at along: CGFloat) -> Bool {
+        seam.low.contains { pane in
+            seamTouches(pane, seam: seam, at: along, side: .low) &&
+                pane.windowID == frontmostWindowID(at: pointInside(pane, seam: seam, along: along, side: .low))
         }
     }
 
