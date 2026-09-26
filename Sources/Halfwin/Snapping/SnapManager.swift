@@ -132,7 +132,7 @@ final class SnapManager {
         let cursor = NSEvent.mouseLocation
         draggedWindow = AXWindow.windowUnderCursor(at: cursor)
         if let draggedWindow, SnapWindowRegistry.shared.hasRecord(for: draggedWindow) {
-            SnapWindowRegistry.shared.validate()
+            SnapWindowRegistry.shared.validateIfNeeded(interval: 0.1)
         }
         initialFrame = draggedWindow?.frame
     }

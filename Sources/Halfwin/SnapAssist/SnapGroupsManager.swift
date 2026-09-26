@@ -112,8 +112,11 @@ final class SnapGroupsManager {
                 continue
             }
             let valid = pair.filter { side, window in
-                guard let lane = registry.snappedLane(for: window), lane.display == display else { return false }
-                return self.side(for: lane.action) == side
+                guard let record = registry.record(for: window), self.side(for: record.action) == side,
+                      let screen = NSScreen.screens.first(where: {
+                          $0.frame.contains(CGPoint(x: record.frame.midX, y: record.frame.midY))
+                      }) else { return false }
+                return SnapDisplayID(screen) == display
             }
             if valid.isEmpty { members.removeValue(forKey: display) }
             else { members[display] = valid }
