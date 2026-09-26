@@ -30,6 +30,16 @@ enum DockPreference {
         var lastRestartAt: TimeInterval?
     }
 
+    private enum FinderTransferObservation: Equatable {
+        case progressObserved
+        case noProgressObserved
+        case unknown
+    }
+
+    private enum FinderAXReadFailure: Error {
+        case unavailable
+    }
+
     private static let defaults = UserDefaults.standard
     private static let globalDomain = UserDefaults.globalDomain as CFString
     private static var restartStates: [RestartPolicy: RestartState] = [:]
@@ -248,8 +258,27 @@ enum DockPreference {
                 return
             }
         }
-        if policy == .finder, finderHasCopyOrMoveProgressWindow() != false {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { restartIfNeeded(policy) }
+        if policy == .finder {
+            DispatchQueue.global(qos: .utility).async {
+                let observation = finderTransferObservation()
+                DispatchQueue.main.async {
+                    guard observation == .noProgressObserved else {
+                        DispatchQueue.main.asyncAfter(deadline: .now() + 1) { restartIfNeeded(policy) }
+                        return
+                    }
+                    restartApplicationIfNeeded(policy, bundleIdentifier: bundleIdentifier)
+                }
+            }
+            return
+        }
+        restartApplicationIfNeeded(policy, bundleIdentifier: bundleIdentifier)
+    }
+
+    private static func restartApplicationIfNeeded(_ policy: RestartPolicy, bundleIdentifier: String) {
+        guard var state = restartStates[policy] else { return }
+        guard state.requested else {
+            state.scheduled = false
+            restartStates[policy] = state
             return
         }
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
@@ -264,26 +293,96 @@ enum DockPreference {
         kill(app.processIdentifier, SIGTERM)
     }
 
-    private static func finderHasCopyOrMoveProgressWindow() -> Bool? {
+    private static func finderTransferObservation() -> FinderTransferObservation {
         guard let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder")
-            .first(where: { !$0.isTerminated }) else { return nil }
+            .first(where: { !$0.isTerminated }) else { return .unknown }
         let application = AXUIElementCreateApplication(finder.processIdentifier)
-        AXUIElementSetMessagingTimeout(application, 0.1)
-        var value: CFTypeRef?
-        guard AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &value) == .success,
-              let windows = value as? [AXUIElement] else { return nil }
-        var couldNotReadWindow = false
-        for window in windows {
-            AXUIElementSetMessagingTimeout(window, 0.1)
-            var value: CFTypeRef?
-            let result = AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &value)
-            guard result == .success, let subrole = value as? String else {
-                if result != .noValue { couldNotReadWindow = true }
-                continue
+        let deadline = ProcessInfo.processInfo.systemUptime + 1
+        let maximumNodes = 256
+        var visitedNodes = 0
+
+        func read(_ element: AXUIElement, _ attribute: CFString) throws -> CFTypeRef? {
+            guard ProcessInfo.processInfo.systemUptime < deadline,
+                  AXUIElementSetMessagingTimeout(element, 0.05) == .success else {
+                throw FinderAXReadFailure.unavailable
             }
-            if subrole != (kAXStandardWindowSubrole as String) { return true }
+            var value: CFTypeRef?
+            let result = AXUIElementCopyAttributeValue(element, attribute, &value)
+            guard ProcessInfo.processInfo.systemUptime < deadline else { throw FinderAXReadFailure.unavailable }
+            switch result {
+            case .success:
+                guard let value else { throw FinderAXReadFailure.unavailable }
+                return value
+            case .noValue, .attributeUnsupported:
+                return nil
+            default:
+                throw FinderAXReadFailure.unavailable
+            }
         }
-        return couldNotReadWindow ? nil : false
+
+        func requiredString(_ element: AXUIElement, _ attribute: CFString) throws -> String {
+            guard let value = try read(element, attribute), let string = value as? String else {
+                throw FinderAXReadFailure.unavailable
+            }
+            return string
+        }
+
+        func children(of element: AXUIElement) throws -> [AXUIElement] {
+            guard let value = try read(element, kAXChildrenAttribute as CFString) else { return [] }
+            guard let children = value as? [AXUIElement] else { throw FinderAXReadFailure.unavailable }
+            return children
+        }
+
+        func visitNode() throws {
+            visitedNodes += 1
+            guard visitedNodes <= maximumNodes,
+                  ProcessInfo.processInfo.systemUptime < deadline else {
+                throw FinderAXReadFailure.unavailable
+            }
+        }
+
+        do {
+            guard let windowsValue = try read(application, kAXWindowsAttribute as CFString),
+                  let windows = windowsValue as? [AXUIElement], windows.count <= maximumNodes else {
+                throw FinderAXReadFailure.unavailable
+            }
+            for window in windows {
+                try visitNode()
+                guard try requiredString(window, kAXRoleAttribute as CFString) == (kAXWindowRole as String) else {
+                    continue
+                }
+                if let buttonValue = try read(window, kAXFullScreenButtonAttribute as CFString) {
+                    guard CFGetTypeID(buttonValue) == AXUIElementGetTypeID() else {
+                        throw FinderAXReadFailure.unavailable
+                    }
+                    let button = unsafeBitCast(buttonValue, to: AXUIElement.self)
+                    if let enabledValue = try read(button, kAXEnabledAttribute as CFString) {
+                        guard CFGetTypeID(enabledValue) == CFBooleanGetTypeID(),
+                              let enabled = enabledValue as? Bool else {
+                            throw FinderAXReadFailure.unavailable
+                        }
+                        if enabled { continue }
+                    }
+                }
+
+                var pending = try children(of: window)
+                guard pending.count <= maximumNodes - visitedNodes else { throw FinderAXReadFailure.unavailable }
+                while let element = pending.popLast() {
+                    try visitNode()
+                    if try requiredString(element, kAXRoleAttribute as CFString) == (kAXProgressIndicatorRole as String) {
+                        return .progressObserved
+                    }
+                    let descendants = try children(of: element)
+                    guard descendants.count <= maximumNodes - visitedNodes - pending.count else {
+                        throw FinderAXReadFailure.unavailable
+                    }
+                    pending.append(contentsOf: descendants)
+                }
+            }
+            return .noProgressObserved
+        } catch {
+            return .unknown
+        }
     }
 }
 
