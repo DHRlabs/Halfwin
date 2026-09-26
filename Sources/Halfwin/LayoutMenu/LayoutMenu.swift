@@ -131,8 +131,18 @@ private final class LayoutMenuDropState: ObservableObject {
     @Published var isPortrait = false
     @Published var showCount = 0
     @Published var hoveredZone: LayoutDropZone?
-    @Published var windowIcons: [NSImage?] = []
+    @Published var preview = LayoutMenuPreview.empty
     @Published var scale: CGFloat = 1
+}
+
+private struct LayoutMenuPreview {
+    let targetIcon: NSImage?
+    let fillMode: SnapAssistFillMode
+    let rememberedWindows: [String: [SnapAction: AXWindow]]
+    let choices: [String: [SnapWindowChoice]]
+
+    static let empty = LayoutMenuPreview(targetIcon: nil, fillMode: .mostRecent,
+                                         rememberedWindows: [:], choices: [:])
 }
 
 /// Windows 11-style layout menu: hover the top-center of a display, pick a
@@ -150,18 +160,7 @@ final class LayoutMenuManager {
     private lazy var panel = LayoutMenuPanel(
         dropState: dropState,
         settings: settings,
-        previewIcons: { [weak self] in
-            guard let self, let screen = self.activeScreen else { return [] }
-            let target = self.targetWindow
-            let targetIcon: NSImage?
-            if let pid = target?.processIdentifier {
-                targetIcon = NSRunningApplication(processIdentifier: pid)?.icon
-            } else {
-                targetIcon = nil
-            }
-            let excluded = target.map { Set([$0]) } ?? []
-            return [targetIcon] + SnapWindowInventory.choices(on: screen, excluding: excluded).map { $0.application.icon }
-        },
+        previewIcons: { [weak self] in self?.makePreview() ?? .empty },
         onPick: { [weak self] preset in self?.pick(preset) },
         onPickZone: { [weak self] action in self?.pickLayoutZone(action) }
     )
@@ -177,7 +176,7 @@ final class LayoutMenuManager {
     /// Pre-move frame per window, the same shape as `SnapManager.snappedInfo`:
     /// remembers what to restore to, dropped once the window has moved away
     /// from where this menu last put it.
-    private var lastMoved: [AXWindow: (target: CGRect, preMove: CGRect)] = [:]
+    nonisolated(unsafe) private static var lastMoved: [AXWindow: (target: CGRect, preMove: CGRect)] = [:]
 
     /// True right after Escape or a pick dismisses the panel while the
     /// pointer is still inside the trigger strip: suppresses re-arming the
@@ -382,7 +381,7 @@ final class LayoutMenuManager {
         guard let action = action(for: zone),
               let target = targetFrame(for: zone, window: window, currentFrame: currentFrame,
                                        restoreFrame: startFrame, screen: screen) else { return nil }
-        let preMove = lastMoved[window].flatMap {
+        let preMove = Self.lastMoved[window].flatMap {
             SnapGeometry.isClose(startFrame, $0.target) ? $0.preMove : nil
         } ?? startFrame
         return apply(target, to: window, currentFrame: currentFrame, preMove: preMove,
@@ -392,7 +391,7 @@ final class LayoutMenuManager {
     private func targetFrame(for zone: LayoutDropZone, window: AXWindow, currentFrame: CGRect,
                              restoreFrame: CGRect, screen: NSScreen) -> CGRect? {
         if case .preset(.restore) = zone {
-            guard let info = lastMoved[window], SnapGeometry.isClose(restoreFrame, info.target) else { return nil }
+            guard let info = Self.lastMoved[window], SnapGeometry.isClose(restoreFrame, info.target) else { return nil }
             return info.preMove
         }
         guard let action = action(for: zone) else { return nil }
@@ -422,8 +421,8 @@ final class LayoutMenuManager {
     /// out) have nothing to restore to; drop them so the table doesn't grow
     /// forever. Mirrors `SnapManager.pruneUnreadableSnapInfo`.
     private func pruneUnreadableRestoreInfo() {
-        for window in lastMoved.keys where window.frame == nil {
-            lastMoved.removeValue(forKey: window)
+        for window in Self.lastMoved.keys where window.frame == nil {
+            Self.lastMoved.removeValue(forKey: window)
         }
     }
 
@@ -471,10 +470,10 @@ final class LayoutMenuManager {
     /// user has since moved or resized by hand.
     @discardableResult
     private func restore(window: AXWindow, currentFrame: CGRect) -> CGRect? {
-        guard let info = lastMoved[window], SnapGeometry.isClose(currentFrame, info.target) else { return nil }
+        guard let info = Self.lastMoved[window], SnapGeometry.isClose(currentFrame, info.target) else { return nil }
         window.setFrame(info.preMove)
         guard let readBack = window.frame, SnapGeometry.isClose(readBack, info.preMove) else { return nil }
-        lastMoved.removeValue(forKey: window)
+        Self.lastMoved.removeValue(forKey: window)
         return readBack
     }
 
@@ -491,20 +490,51 @@ final class LayoutMenuManager {
         let preMove: CGRect
         if let explicitPreMove {
             preMove = explicitPreMove
-        } else if let info = lastMoved[window], SnapGeometry.isClose(currentFrame, info.target) {
+        } else if let info = Self.lastMoved[window], SnapGeometry.isClose(currentFrame, info.target) {
             preMove = info.preMove
         } else {
             preMove = currentFrame
         }
         window.setFrame(target)
         if let readBack = window.frame {
-            lastMoved[window] = (target: readBack, preMove: preMove)
+            Self.lastMoved[window] = (target: readBack, preMove: preMove)
             if SnapGeometry.isClose(readBack, target) {
                 SnapEvents.didSnap(window: window, action: action, screen: screen, origin: .layoutMenu)
             }
             return readBack
         }
         return nil
+    }
+
+    static func rememberMove(window: AXWindow, target: CGRect, currentFrame: CGRect) {
+        let preMove = lastMoved[window].flatMap {
+            SnapGeometry.isClose(currentFrame, $0.target) ? $0.preMove : nil
+        } ?? currentFrame
+        lastMoved[window] = (target: target, preMove: preMove)
+    }
+
+    private func makePreview() -> LayoutMenuPreview {
+        guard let screen = activeScreen else { return .empty }
+        let targetIcon = targetWindow?.processIdentifier.flatMap { NSRunningApplication(processIdentifier: $0)?.icon }
+        let fillMode = SnapAssistSettings.shared.fillEmptySpots
+        var remembered: [String: [SnapAction: AXWindow]] = [:]
+        var choices: [String: [SnapWindowChoice]] = [:]
+
+        for layout in SnapMultiWindowLayout.allCases where layout != .halves {
+            let windows = SnapAssistManager.rememberedWindows(for: layout, on: screen)
+                .filter { $0.value != targetWindow }
+            remembered[layout.title] = windows
+
+            guard fillMode == .mostRecent else { continue }
+            let needed = layout.zones.map { selected in
+                layout.zones.filter { $0.action != selected.action && windows[$0.action] == nil }.count
+            }.max() ?? 0
+            guard needed > 0 else { continue }
+            let excluded = Set(windows.values).union(targetWindow.map { [$0] } ?? [])
+            choices[layout.title] = SnapWindowInventory.choices(on: screen, excluding: excluded, limit: needed)
+        }
+        return LayoutMenuPreview(targetIcon: targetIcon, fillMode: fillMode,
+                                 rememberedWindows: remembered, choices: choices)
     }
 
 }
@@ -524,12 +554,12 @@ private final class LayoutMenuPanel: NSPanel {
     )
     private let dropState: LayoutMenuDropState
     private let settings: LayoutMenuSettings
-    private let previewIcons: () -> [NSImage?]
+    private let previewIcons: () -> LayoutMenuPreview
     private var sizeCancellable: AnyCancellable?
     private var activeScreen: NSScreen?
 
     init(dropState: LayoutMenuDropState, settings: LayoutMenuSettings,
-         previewIcons: @escaping () -> [NSImage?], onPick: @escaping (LayoutPreset) -> Void,
+         previewIcons: @escaping () -> LayoutMenuPreview, onPick: @escaping (LayoutPreset) -> Void,
          onPickZone: @escaping (SnapAction) -> Void) {
         self.settings = settings
         self.previewIcons = previewIcons
@@ -562,10 +592,15 @@ private final class LayoutMenuPanel: NSPanel {
         activeScreen = screen
         dropState.isPortrait = screen.frame.height > screen.frame.width
         dropState.hoveredZone = nil
-        dropState.windowIcons = previewIcons()
+        dropState.preview = .empty
         resize(on: screen)
         self.ignoresMouseEvents = ignoringMouseEvents
         orderFrontRegardless()
+        let showCount = dropState.showCount
+        DispatchQueue.main.async { [weak self] in
+            guard let self, self.isVisible, self.dropState.showCount == showCount else { return }
+            self.dropState.preview = self.previewIcons()
+        }
     }
 
     func dropZone(at point: CGPoint) -> LayoutDropZone? {
@@ -676,7 +711,8 @@ private struct LayoutTileView: View {
                 .frame(width: size.width - 10 * scale, height: size.height - 10 * scale)
                 .offset(x: 5 * scale, y: 5 * scale)
             ForEach(zones.indices, id: \.self) { index in
-                zoneView(zones[index], index: index, activeIndex: activeIndex, size: size, scale: scale)
+                zoneView(zones[index], index: index, activeIndex: activeIndex,
+                         selectedZone: selectedZone, size: size, scale: scale)
             }
             RoundedRectangle(cornerRadius: 7 * scale)
                 .stroke(Color.secondary.opacity(0.55), lineWidth: max(0.7, scale))
@@ -689,19 +725,14 @@ private struct LayoutTileView: View {
         .accessibilityLabel(tile.title)
     }
 
-    private func zoneView(_ zone: LayoutMenuZone, index: Int, activeIndex: Int?, size: CGSize, scale: CGFloat) -> some View {
+    private func zoneView(_ zone: LayoutMenuZone, index: Int, activeIndex: Int?,
+                          selectedZone: LayoutDropZone?, size: CGSize, scale: CGFloat) -> some View {
         let rect = LayoutMenuPanel.zoneFrame(zone, tileSize: size, scale: scale)
         let radius = 6 * scale
         let fill = activeIndex.map { selectedIndex in
             index == selectedIndex ? Color.accentColor : Color.accentColor.opacity(0.28)
         } ?? Color.secondary.opacity(0.2)
-        let iconIndex = activeIndex.map { selectedIndex in
-            index == selectedIndex ? 0 : (index < selectedIndex ? index + 1 : index)
-        }
-        let icon = iconIndex.flatMap { index -> NSImage? in
-            guard dropState.windowIcons.indices.contains(index) else { return nil }
-            return dropState.windowIcons[index]
-        }
+        let icon = previewIcon(for: zone, selectedZone: selectedZone)
         let label = zonesLabel(zone)
 
         return RoundedRectangle(cornerRadius: radius)
@@ -712,11 +743,11 @@ private struct LayoutTileView: View {
                     Image(nsImage: icon)
                         .resizable()
                         .aspectRatio(contentMode: .fit)
-                        .frame(width: 28 * scale, height: 28 * scale)
+                        .frame(width: max(0, min(28 * scale, rect.width - 4 * scale)),
+                               height: max(0, min(28 * scale, rect.height - 4 * scale)))
                         .allowsHitTesting(false)
                 }
             }
-            .offset(x: rect.minX, y: rect.minY)
             .contentShape(RoundedRectangle(cornerRadius: radius))
             .onHover { hovering in
                 guard !dropState.isDropMode else { return }
@@ -736,6 +767,29 @@ private struct LayoutTileView: View {
             .accessibilityElement(children: .ignore)
             .accessibilityLabel(label)
             .accessibilityAddTraits(.isButton)
+            .offset(x: rect.minX, y: rect.minY)
+    }
+
+    private func previewIcon(for zone: LayoutMenuZone, selectedZone: LayoutDropZone?) -> NSImage? {
+        guard let targetIcon = dropState.preview.targetIcon, let selectedZone else { return nil }
+        if case .preset = zone.dropZone { return selectedZone == zone.dropZone ? targetIcon : nil }
+        guard case .layout(let layout) = tile,
+              case .layout(let selectedAction) = selectedZone,
+              case .layout(let action) = zone.dropZone else { return nil }
+        if action == selectedAction { return targetIcon }
+        guard dropState.preview.fillMode == .mostRecent else { return nil }
+
+        let remembered = dropState.preview.rememberedWindows[layout.title] ?? [:]
+        if let window = remembered[action], let pid = window.processIdentifier {
+            return NSRunningApplication(processIdentifier: pid)?.icon
+        }
+        let occupied = Set(remembered.keys).union([selectedAction])
+        var choices = (dropState.preview.choices[layout.title] ?? []).makeIterator()
+        for candidateZone in layout.zones where !occupied.contains(candidateZone.action) {
+            guard let choice = choices.next() else { break }
+            if candidateZone.action == action { return choice.application.icon }
+        }
+        return nil
     }
 
     private func zonesLabel(_ zone: LayoutMenuZone) -> String {

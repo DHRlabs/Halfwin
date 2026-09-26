@@ -2,13 +2,14 @@ import Combine
 import Foundation
 
 enum SnapAssistFillMode: String, CaseIterable, Identifiable {
-    case mostRecent, letMePick
+    case mostRecent, letMePick, leaveEmpty
 
     var id: String { rawValue }
     var title: String {
         switch self {
         case .mostRecent: return "With my most recent windows"
         case .letMePick: return "Let me pick"
+        case .leaveEmpty: return "Leave them empty"
         }
     }
 }
