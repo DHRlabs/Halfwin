@@ -8,6 +8,7 @@ struct SettingsView: View {
     @ObservedObject var dockPreviewSettings: DockPreviewSettings
     @ObservedObject var autoTileSettings: AutoTileSettings
     @ObservedObject var notificationCount: NotificationCountManager
+    @ObservedObject var macTweaks: MacTweaks
     @State private var alwaysFloatAppIDsText: String?
     @FocusState private var alwaysFloatAppIDsFocused: Bool
 
@@ -31,6 +32,36 @@ struct SettingsView: View {
                     ForEach(SnapAssistFillMode.allCases) { mode in Text(mode.title).tag(mode) }
                 }
             }
+            Section("Mac tweaks") {
+                ForEach(MacTweakGroup.allCases) { group in
+                    GroupBox(group.rawValue) {
+                        VStack(alignment: .leading, spacing: 8) {
+                            ForEach(MacTweak.all.filter { $0.group == group }) { tweak in
+                                Toggle(tweak.title, isOn: Binding(
+                                    get: { macTweaks.isEnabled(tweak.id) },
+                                    set: { macTweaks.setEnabled($0, for: tweak.id) }
+                                ))
+                            }
+                            if group == .animations {
+                                Text("Apps pick up these changes when they reopen.")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            } else if group == .finder, macTweaks.finderAutomationDenied,
+                                      macTweaks.isEnabled(.listView) {
+                                Text("Automation access was denied; existing Finder folders may keep their saved views.")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            } else if group == .desktop {
+                                Button("Reduce Motion…", action: macTweaks.openReduceMotionSettings)
+                                Text("macOS only lets you change Reduce Motion in System Settings.")
+                                    .font(.footnote)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                    }
+                }
+            }
+            .onAppear { macTweaks.retryFinderAutomation() }
             Section("Layout menu") {
                 Toggle("Show a layout menu when hovering the top of a display", isOn: $layoutMenuSettings.enabled)
                 Stepper(value: $layoutMenuSettings.dwellDelay, in: 0.1...1.5, step: 0.05) {
@@ -141,7 +172,7 @@ final class SettingsWindowController: NSWindowController {
     convenience init(settings: SnapSettings, snapAssistSettings: SnapAssistSettings,
                      layoutMenuSettings: LayoutMenuSettings,
                      dockPreviewSettings: DockPreviewSettings, autoTileSettings: AutoTileSettings,
-                     notificationCount: NotificationCountManager) {
+                     notificationCount: NotificationCountManager, macTweaks: MacTweaks) {
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 420, height: 740),
             styleMask: [.titled, .closable],
@@ -156,7 +187,8 @@ final class SettingsWindowController: NSWindowController {
                 layoutMenuSettings: layoutMenuSettings,
                 dockPreviewSettings: dockPreviewSettings,
                 autoTileSettings: autoTileSettings,
-                notificationCount: notificationCount
+                notificationCount: notificationCount,
+                macTweaks: macTweaks
             )
         )
         window.center()
