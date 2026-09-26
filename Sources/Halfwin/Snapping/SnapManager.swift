@@ -30,6 +30,8 @@ final class SnapManager {
     private var cancelled = false
     private var currentZone: Zone?
     private var currentPreviewFrame: CGRect?
+    private var dragNeighborFrames: [AXWindow: CGRect] = [:]
+    private var dragNeighborScreen: NSScreen?
     private var dragToTopLayoutsEnabled = false
     private var dropScreen: NSScreen?
     private var currentDropZone: LayoutDropZone?
@@ -163,8 +165,11 @@ final class SnapManager {
             // from the frame Halfwin snapped it to — otherwise the entry is
             // stale and stays dropped from pruneUnreadableSnapInfo/here.
             if let info = snappedInfo.removeValue(forKey: draggedWindow), SnapGeometry.isClose(initialFrame, info.target, tolerance: 1) {
+                SnapAssistManager.forgetRememberedSnap(window: draggedWindow)
                 restoreSize(info.preSnapSize, current: frame, window: draggedWindow)
                 lockedSize = info.preSnapSize
+            } else {
+                SnapAssistManager.forgetRememberedSnap(window: draggedWindow)
             }
         }
 
@@ -188,8 +193,8 @@ final class SnapManager {
             }
             if let zone, let base = layoutMenu.dropPreviewFrame(
                 for: zone, currentWindowFrame: CGRect(origin: .zero, size: size)
-            ), let action = action(for: zone) {
-                showPreview(filledFrame(for: action, base: base, screen: screen, excluding: window))
+            ) {
+                showPreview(base)
             } else {
                 hidePreview()
             }
@@ -206,8 +211,8 @@ final class SnapManager {
                 }
                 if let zone, let base = layoutMenu.dropPreviewFrame(
                     for: zone, currentWindowFrame: CGRect(origin: .zero, size: size)
-                ), let action = action(for: zone), let screen = dropScreen {
-                    showPreview(filledFrame(for: action, base: base, screen: screen, excluding: window))
+                ) {
+                    showPreview(base)
                 } else {
                     hidePreview()
                 }
@@ -233,6 +238,9 @@ final class SnapManager {
         }
 
         let zone = Zone(screen: screen, position: position, action: action)
+        if zone != currentZone, SnapGeometry.isHalf(action) {
+            refreshFillNeighbors(on: screen)
+        }
         currentZone = zone
 
         if let rect = SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
@@ -302,6 +310,8 @@ final class SnapManager {
         cancelled = false
         currentZone = nil
         currentPreviewFrame = nil
+        dragNeighborFrames.removeAll()
+        dragNeighborScreen = nil
     }
 
     private func clearDropBar() {
@@ -327,22 +337,18 @@ final class SnapManager {
     }
 
     private func filledFrame(for action: SnapAction, base: CGRect, screen: NSScreen, excluding window: AXWindow) -> CGRect {
-        guard settings.fillAvailableSpace else { return base }
-        let neighbors = SnapAssistManager.rememberedSnapFrames(on: screen)
-            .filter { $0.key != window }.map(\.value)
+        guard settings.fillAvailableSpace, SnapGeometry.isHalf(action) else { return base }
+        if dragNeighborScreen != screen { refreshFillNeighbors(on: screen) }
+        let neighbors = SnapAssistManager.fillNeighborFrames(for: action, on: screen, excluding: window,
+                                                             from: dragNeighborFrames)
         return SnapGeometry.fillFrame(for: action, fixedFrame: base, visibleFrame: screen.visibleFrame,
                                       snappedFrames: neighbors) ?? base
     }
 
-    private func action(for zone: LayoutDropZone) -> SnapAction? {
-        switch zone {
-        case .layout(let action): return action
-        case .preset(.leftHalf): return .leftHalf
-        case .preset(.rightHalf): return .rightHalf
-        case .preset(.center): return .center
-        case .preset(.maximize): return .maximize
-        case .preset(.restore): return nil
-        }
+    private func refreshFillNeighbors(on screen: NSScreen) {
+        dragNeighborScreen = screen
+        dragNeighborFrames = settings.fillAvailableSpace
+            ? SnapAssistManager.rememberedSnapFrames(on: screen) : [:]
     }
 
     private func showPreview(_ frame: CGRect) {
