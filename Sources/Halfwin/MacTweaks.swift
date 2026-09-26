@@ -114,17 +114,23 @@ final class MacTweaks: ObservableObject {
     }
 
     func start() {
-        for tweak in MacTweak.all where isEnabled(tweak.id) { apply(tweak.id, enabled: true) }
+        for tweak in MacTweak.all where isEnabled(tweak.id) {
+            apply(tweak.id, enabled: true, skipIfExternallyChanged: true)
+        }
         finderListViewMonitor.setEnabled(isEnabled(.listView))
     }
 
     func openReduceMotionSettings() {
-        if let url = URL(string: "x-apple.systempreferences:com.apple.Accessibility-Settings.extension") {
+        if let url = URL(string: "x-apple.systempreferences:com.apple.Accessibility-Settings.extension?AXDisplay") {
             NSWorkspace.shared.open(url)
         }
     }
 
-    private func apply(_ id: MacTweakID, enabled: Bool) {
+    func retryFinderAutomation() {
+        finderListViewMonitor.retryAutomation()
+    }
+
+    private func apply(_ id: MacTweakID, enabled: Bool, skipIfExternallyChanged: Bool = false) {
         guard let tweak = MacTweak.all.first(where: { $0.id == id }) else { return }
         for preference in tweak.preferences {
             DockPreference.setFeature(
@@ -133,7 +139,8 @@ final class MacTweaks: ObservableObject {
                 key: preference.key,
                 value: preference.value,
                 restartPolicy: preference.restartPolicy,
-                savedPreviousKey: "Halfwin.macTweaks.\(id.rawValue).\(preference.key).PreviousValue"
+                savedPreviousKey: "Halfwin.macTweaks.\(id.rawValue).\(preference.key).PreviousValue",
+                skipIfExternallyChanged: skipIfExternallyChanged
             )
         }
     }
@@ -168,7 +175,7 @@ private final class FinderListViewMonitor {
             ) { [weak self] notification in
                 guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
                       app.bundleIdentifier == "com.apple.finder" else { return }
-                self?.observeFinder()
+                self?.finderActivated()
             }
             if NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.finder" {
                 observeFinder()
@@ -182,14 +189,31 @@ private final class FinderListViewMonitor {
         }
     }
 
+    func retryAutomation() {
+        guard enabled, automationDenied else { return }
+        automationDenied = false
+        onAutomationDenied(false)
+        scheduleListViewCheck()
+    }
+
     func accessibilityChanged(_ element: AXUIElement, notification: String) {
         guard enabled, !automationDenied else { return }
+        observeWindows()
         if notification == kAXWindowCreatedNotification as String {
-            observeWindows()
             scheduleListViewCheck()
         } else if notification == kAXTitleChangedNotification as String {
             scheduleListViewCheck()
         }
+    }
+
+    private func finderActivated() {
+        let shouldRetry = automationDenied
+        if shouldRetry {
+            automationDenied = false
+            onAutomationDenied(false)
+        }
+        observeFinder()
+        if shouldRetry { scheduleListViewCheck() }
     }
 
     private func observeFinder() {
@@ -218,7 +242,6 @@ private final class FinderListViewMonitor {
             }
         }
         observeWindows()
-        scheduleListViewCheck()
     }
 
     private func observeWindows() {
@@ -226,44 +249,60 @@ private final class FinderListViewMonitor {
         var value: CFTypeRef?
         guard AXUIElementCopyAttributeValue(observedApplication, kAXWindowsAttribute as CFString, &value) == .success,
               let windows = value as? [AXUIElement] else { return }
+        for window in observedWindows where !windows.contains(where: { CFEqual($0, window) }) {
+            AXObserverRemoveNotification(accessibilityObserver, window, kAXTitleChangedNotification as CFString)
+        }
         for window in windows where !observedWindows.contains(where: { CFEqual($0, window) }) {
             _ = AXObserverAddNotification(
                 accessibilityObserver, window, kAXTitleChangedNotification as CFString,
                 Unmanaged.passUnretained(self).toOpaque()
             )
-            observedWindows.append(window)
         }
+        observedWindows = windows
     }
 
     private func scheduleListViewCheck() {
         guard enabled, !automationDenied, !updateScheduled else { return }
         updateScheduled = true
-        DispatchQueue.main.async { [weak self] in
+        finderScriptQueue.async { [weak self] in
             guard let self else { return }
-            self.updateScheduled = false
-            self.setFinderWindowsToListView()
+            let denied = self.setFinderWindowToListView()
+            DispatchQueue.main.async {
+                self.updateScheduled = false
+                guard denied, !self.automationDenied else { return }
+                self.automationDenied = true
+                self.onAutomationDenied(true)
+            }
         }
     }
 
-    private func setFinderWindowsToListView() {
-        guard enabled, !automationDenied else { return }
-        let source = """
-        tell application id "com.apple.finder"
-            repeat with finderWindow in windows
-                try
-                    if current view of finderWindow is not list view then set current view of finderWindow to list view
-                end try
-            end repeat
-        end tell
-        """
-        var error: NSDictionary?
-        guard NSAppleScript(source: source)?.executeAndReturnError(&error) != nil else {
-            if (error?[NSAppleScript.errorNumber] as? NSNumber)?.intValue == -1743 {
-                automationDenied = true
-                onAutomationDenied(true)
-            }
-            return
+    private let finderScriptQueue = DispatchQueue(label: "Halfwin.finder-list-view", qos: .utility)
+    private var finderScript: NSAppleScript?
+    private var finderScriptCompiled = false
+
+    private func setFinderWindowToListView() -> Bool {
+        if !finderScriptCompiled {
+            finderScriptCompiled = true
+            let source = """
+            with timeout of 2 seconds
+                tell application id "com.apple.finder"
+                    if (count of windows) > 0 then
+                        try
+                            if current view of window 1 is not list view then set current view of window 1 to list view
+                        end try
+                    end if
+                end tell
+            end timeout
+            """
+            let script = NSAppleScript(source: source)
+            var compileError: NSDictionary?
+            guard script?.compileAndReturnError(&compileError) == true else { return false }
+            finderScript = script
         }
+        guard let finderScript else { return false }
+        var error: NSDictionary?
+        _ = finderScript.executeAndReturnError(&error)
+        return (error?[NSAppleScript.errorNumber] as? NSNumber)?.intValue == -1743
     }
 
     private func removeAccessibilityObserver() {
