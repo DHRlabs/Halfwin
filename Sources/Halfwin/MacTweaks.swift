@@ -93,7 +93,8 @@ final class MacTweaks: ObservableObject {
 
     private let defaults = UserDefaults.standard
     private lazy var finderListViewMonitor = FinderListViewMonitor { [weak self] denied in
-        self?.finderAutomationDenied = denied
+        guard let self, self.finderAutomationDenied != denied else { return }
+        self.finderAutomationDenied = denied
     }
 
     private init() {
@@ -211,7 +212,6 @@ private final class FinderListViewMonitor {
     func retryAutomation() {
         guard enabled, automationDenied else { return }
         automationDenied = false
-        onAutomationDenied(false)
         if let lastWindowName { scheduleListViewCheck(for: lastWindowName) }
     }
 
@@ -233,10 +233,7 @@ private final class FinderListViewMonitor {
 
     private func finderActivated() {
         let shouldRetry = automationDenied
-        if shouldRetry {
-            automationDenied = false
-            onAutomationDenied(false)
-        }
+        if shouldRetry { automationDenied = false }
         observeFinder()
         if shouldRetry, let lastWindowName { scheduleListViewCheck(for: lastWindowName) }
     }
@@ -289,7 +286,12 @@ private final class FinderListViewMonitor {
             )
         }
         observedWindows = windows
-        knownWindowNames.removeAll { known in !windows.contains(where: { CFEqual($0, known.window) }) }
+        knownWindowNames.removeAll { known in
+            guard !windows.contains(where: { CFEqual($0, known.window) }) else { return false }
+            AXUIElementSetMessagingTimeout(known.window, 0.1)
+            var value: CFTypeRef?
+            return AXUIElementCopyAttributeValue(known.window, kAXRoleAttribute as CFString, &value) == .invalidUIElement
+        }
         return newWindows
     }
 
@@ -330,6 +332,8 @@ private final class FinderListViewMonitor {
                     self.automationDenied = true
                     self.pendingWindowNames.removeAll()
                     self.onAutomationDenied(true)
+                } else if !denied {
+                    self.onAutomationDenied(false)
                 }
                 let pendingWindowName = self.pendingWindowNames.isEmpty ? nil : self.pendingWindowNames.removeFirst()
                 if self.enabled, !self.automationDenied, let pendingWindowName {

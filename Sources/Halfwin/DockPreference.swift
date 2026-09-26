@@ -264,7 +264,6 @@ enum DockPreference {
         kill(app.processIdentifier, SIGTERM)
     }
 
-    // ponytail: localized titles need localized keywords if Finder exposes no progress subrole.
     private static func finderHasCopyOrMoveProgressWindow() -> Bool? {
         guard let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder")
             .first(where: { !$0.isTerminated }) else { return nil }
@@ -276,26 +275,13 @@ enum DockPreference {
         var couldNotReadWindow = false
         for window in windows {
             AXUIElementSetMessagingTimeout(window, 0.1)
-            var readDescription = false
-            for attribute in [kAXTitleAttribute, kAXSubroleAttribute] {
-                var value: CFTypeRef?
-                let result = AXUIElementCopyAttributeValue(window, attribute as CFString, &value)
-                guard result == .success, let description = value as? String else {
-                    if result != .noValue { couldNotReadWindow = true }
-                    continue
-                }
-                readDescription = true
-                if attribute == kAXSubroleAttribute {
-                    if description.localizedCaseInsensitiveContains("progress") { return true }
-                } else {
-                    let title = description.trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
-                    if title == "copy" || title == "move" || title == "copying" || title == "moving" ||
-                       title.hasPrefix("copying ") || title.hasPrefix("moving ") {
-                        return true
-                    }
-                }
+            var value: CFTypeRef?
+            let result = AXUIElementCopyAttributeValue(window, kAXSubroleAttribute as CFString, &value)
+            guard result == .success, let subrole = value as? String else {
+                if result != .noValue { couldNotReadWindow = true }
+                continue
             }
-            if !readDescription { couldNotReadWindow = true }
+            if subrole != (kAXStandardWindowSubrole as String) { return true }
         }
         return couldNotReadWindow ? nil : false
     }
