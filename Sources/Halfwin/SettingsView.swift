@@ -9,6 +9,7 @@ struct SettingsView: View {
     @ObservedObject var autoTileSettings: AutoTileSettings
     @ObservedObject var notificationCount: NotificationCountManager
     @ObservedObject var macTweaks: MacTweaks
+    @AppStorage(ShowDesktopStyle.defaultsKey) private var showDesktopStyle: ShowDesktopStyle = .pushWindowsAside
     @State private var alwaysFloatAppIDsText: String?
     @FocusState private var alwaysFloatAppIDsFocused: Bool
 
@@ -142,6 +143,11 @@ struct SettingsView: View {
                         }
                         .toggleStyle(.checkbox)
                     }
+                }
+            }
+            Section("Show desktop") {
+                Picker("Show desktop style", selection: $showDesktopStyle) {
+                    ForEach(ShowDesktopStyle.allCases) { style in Text(style.title).tag(style) }
                 }
             }
         }
