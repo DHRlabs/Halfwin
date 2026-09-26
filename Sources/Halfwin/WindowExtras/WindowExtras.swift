@@ -313,12 +313,7 @@ final class WindowExtrasManager {
         frameMemory.pruneUnreadableFrames()
         let registry = SnapWindowRegistry.shared
         registry.validate()
-        let snapped: (action: SnapAction, screen: NSScreen)?
-        if registry.hasRecord(for: window) {
-            snapped = registry.snappedLane(for: window).map { ($0.action, $0.screen) }
-        } else {
-            snapped = snappedAction(for: frame)
-        }
+        let snapped = registry.snappedLane(for: window).map { ($0.action, $0.screen) } ?? snappedAction(for: frame)
         let action: SnapAction
         var rememberFrame = true
         var screen: NSScreen?

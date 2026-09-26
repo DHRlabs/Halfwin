@@ -14,14 +14,14 @@ struct SnapDisplayID: Hashable {
     }
 }
 
-enum SnapRecordState { case active, hidden, minimized, offSpace, stale, superseded }
+enum SnapRecordState { case active, hidden, minimized, offSpace, stale }
 
 struct SnappedWindowRecord {
     let window: AXWindow
     var action: SnapAction
     var frame: CGRect
     var state: SnapRecordState
-    let windowID: CGWindowID?
+    var windowID: CGWindowID?
 }
 
 struct SnapLane {
@@ -52,6 +52,7 @@ struct SnapSeam {
 /// divider movement updates the cached records directly without a window-list scan.
 final class SnapWindowRegistry {
     static let shared = SnapWindowRegistry()
+    static let didValidate = Notification.Name("SnapWindowRegistryDidValidate")
 
     private struct VisibleWindow {
         let id: CGWindowID
@@ -159,8 +160,8 @@ final class SnapWindowRegistry {
     }
 
     func validate() {
-        lastValidationTime = ProcessInfo.processInfo.systemUptime
         guard let windows = readVisibleWindows() else { return }
+        lastValidationTime = ProcessInfo.processInfo.systemUptime
         visibleWindows = windows
 
         for window in Array(records.keys) {
@@ -172,12 +173,6 @@ final class SnapWindowRegistry {
             }
             guard let application = NSRunningApplication(processIdentifier: pid) else {
                 removeRecord(for: window)
-                continue
-            }
-            if record.state == .superseded {
-                if AXWindow.frameWithError(of: window.element).error == .invalidUIElement {
-                    removeRecord(for: window)
-                }
                 continue
             }
             if application.isHidden {
@@ -198,7 +193,13 @@ final class SnapWindowRegistry {
                 continue
             }
             guard read.error == .success, let frame = read.frame,
-                  let screen = screen(for: frame), let windowID = record.windowID else {
+                  let screen = screen(for: frame) else {
+                record.state = .stale
+                records[window] = record
+                continue
+            }
+            if record.windowID == nil { record.windowID = matchWindowID(window, frame: frame) }
+            guard let windowID = record.windowID else {
                 record.state = .stale
                 records[window] = record
                 continue
@@ -216,7 +217,9 @@ final class SnapWindowRegistry {
             record.state = .active
             records[window] = record
         }
+        rebuildZoneOwners()
         rebuildSeams()
+        NotificationCenter.default.post(name: Self.didValidate, object: self)
     }
 
     func commitSnap(window: AXWindow, action: SnapAction, screen: NSScreen, frame: CGRect? = nil) {
@@ -234,21 +237,19 @@ final class SnapWindowRegistry {
         }
         let windowID = matchWindowID(window, frame: frame)
 
-        for other in Array(records.keys) where other != window {
-            guard let record = records[other], record.action == action,
-                  displayID(for: record.frame) == display else { continue }
-            switch record.state {
-            case .active:
-                _ = other.setMinimized(true)
-                removeRecord(for: other)
-            case .minimized, .hidden:
-                removeRecord(for: other)
-            case .offSpace, .stale:
-                var replaced = record
-                replaced.state = .superseded
-                records[other] = replaced
-            case .superseded:
-                break
+        if SnapMultiWindowLayout.containing(action) != nil {
+            for other in Array(records.keys) where other != window {
+                guard let record = records[other], record.action == action,
+                      displayID(for: record.frame) == display else { continue }
+                switch record.state {
+                case .active:
+                    _ = other.setMinimized(true)
+                    removeRecord(for: other)
+                case .minimized, .hidden:
+                    removeRecord(for: other)
+                case .offSpace, .stale:
+                    break
+                }
             }
         }
         for ownerDisplay in Array(zoneOwners.keys) {
@@ -295,6 +296,15 @@ final class SnapWindowRegistry {
         records.removeValue(forKey: window)
         for display in Array(zoneOwners.keys) {
             zoneOwners[display] = zoneOwners[display]?.filter { $0.value != window }
+        }
+    }
+
+    private func rebuildZoneOwners() {
+        zoneOwners = [:]
+        for record in records.values where record.state == .active {
+            guard let display = displayID(for: record.frame),
+                  let layout = SnapMultiWindowLayout.containing(record.action), currentLayouts[display] == layout else { continue }
+            zoneOwners[display, default: [:]][record.action] = record.window
         }
     }
 

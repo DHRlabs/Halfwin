@@ -22,10 +22,7 @@ final class SnapDividerManager {
     private var lastWriteTime: TimeInterval = 0
     private var draggedSnapWindow: AXWindow?
     private var movedSnapWindow = false
-    private var spaceObserver: NSObjectProtocol?
-    private var screenObserver: NSObjectProtocol?
-    private var activationObserver: NSObjectProtocol?
-    private var terminationObserver: NSObjectProtocol?
+    private var registryObserver: NSObjectProtocol?
     private lazy var panel = SnapDividerPanel(
         mouseDown: { [weak self] in self?.beginDividerDrag() },
         mouseDragged: { [weak self] in self?.dragDivider() },
@@ -33,25 +30,13 @@ final class SnapDividerManager {
     )
 
     init() {
-        spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.invalidateAndRebuild() }
-        screenObserver = NotificationCenter.default.addObserver(
-            forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.invalidateAndRebuild() }
-        activationObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
-        ) { [weak self] _ in self?.invalidateAndRebuild() }
-        terminationObserver = NSWorkspace.shared.notificationCenter.addObserver(
-            forName: NSWorkspace.didTerminateApplicationNotification, object: nil, queue: .main
+        registryObserver = NotificationCenter.default.addObserver(
+            forName: SnapWindowRegistry.didValidate, object: SnapWindowRegistry.shared, queue: .main
         ) { [weak self] _ in self?.invalidateAndRebuild() }
     }
 
     deinit {
-        if let spaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(spaceObserver) }
-        if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
-        if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
-        if let terminationObserver { NSWorkspace.shared.notificationCenter.removeObserver(terminationObserver) }
+        if let registryObserver { NotificationCenter.default.removeObserver(registryObserver) }
     }
 
     func setEnabled(_ enabled: Bool) {
@@ -83,10 +68,13 @@ final class SnapDividerManager {
         switch event.type {
         case .mouseMoved:
             guard resizeSession == nil else { return }
-            refreshCacheIfNeeded(at: point)
             updateHover(at: point)
         case .leftMouseDown:
-            if panel.isVisible, panel.frame.contains(point) { return }
+            refreshCacheIfNeeded(at: point, interval: 0.1)
+            if panel.isVisible, panel.frame.contains(point) {
+                if divider(at: point) != nil { return }
+                hideDivider()
+            }
             resizeSession = nil
             dividerDrag = false
             refreshCacheIfNeeded(at: point, force: nearCachedSeam(point))
@@ -117,11 +105,11 @@ final class SnapDividerManager {
         }
     }
 
-    private func refreshCacheIfNeeded(at point: CGPoint, force: Bool = false) {
+    private func refreshCacheIfNeeded(at point: CGPoint, force: Bool = false, interval: TimeInterval = 1) {
         if force {
             SnapWindowRegistry.shared.validate()
         } else if nearCachedSeam(point) {
-            SnapWindowRegistry.shared.validateIfNeeded(interval: 1)
+            SnapWindowRegistry.shared.validateIfNeeded(interval: interval)
         }
     }
 
@@ -131,6 +119,7 @@ final class SnapDividerManager {
     }
 
     private func updateHover(at point: CGPoint) {
+        refreshCacheIfNeeded(at: point, interval: 0.1)
         guard let divider = divider(at: point) else {
             hideDivider()
             return
@@ -223,7 +212,7 @@ final class SnapDividerManager {
     }
 
     private func beginDividerDrag() {
-        SnapWindowRegistry.shared.validate()
+        SnapWindowRegistry.shared.validateIfNeeded(interval: 0.1)
         guard let divider = divider(at: NSEvent.mouseLocation) else {
             hideDivider()
             return
@@ -307,9 +296,13 @@ final class SnapDividerManager {
         let shrinkingSide: Side = increasing ? .high : .low
         let shrinkingPanes = shrinkingSide == .low ? divider.low : divider.high
         let shrinkFrames = shrinkingSide == .low ? lowFrames : highFrames
-        let shrinkEdges = zip(shrinkingPanes, shrinkFrames).compactMap { pane, _ in
-            write(pane, axis: divider.axis, side: shrinkingSide, coordinate: coordinate)
-        }.map { edge($0, axis: divider.axis, side: shrinkingSide) }
+        let nativeOwner = dividerDrag ? nil : session.owner
+        let shrinkEdges = zip(shrinkingPanes, shrinkFrames).compactMap { pane, current in
+            let actual = pane.window == nativeOwner
+                ? pane.window.frame ?? current
+                : write(pane, axis: divider.axis, side: shrinkingSide, coordinate: coordinate)
+            return actual.map { edge($0, axis: divider.axis, side: shrinkingSide) }
+        }
         guard shrinkEdges.count == shrinkingPanes.count else {
             resizeSession = nil
             return
@@ -342,7 +335,7 @@ final class SnapDividerManager {
         for pane in divider.low {
             guard let frame = pane.window.frame,
                   abs(edge(frame, axis: divider.axis, side: .low) - coordinate) <= 2 else {
-                resizeSession = nil
+                restore(divider)
                 return
             }
             lowRead.append(frame)
@@ -350,7 +343,7 @@ final class SnapDividerManager {
         for pane in divider.high {
             guard let frame = pane.window.frame,
                   abs(edge(frame, axis: divider.axis, side: .high) - coordinate) <= 2 else {
-                resizeSession = nil
+                restore(divider)
                 return
             }
             highRead.append(frame)
@@ -375,20 +368,33 @@ final class SnapDividerManager {
 
     private func write(_ pane: Pane, axis: Axis, side: Side, coordinate: CGFloat) -> CGRect? {
         guard let current = pane.window.frame else { return nil }
+        if abs(edge(current, axis: axis, side: side) - coordinate) <= 0.1 { return current }
         let target = frame(current, axis: axis, side: side, coordinate: coordinate)
         pane.window.setFrame(target)
         guard var actual = pane.window.frame else { return nil }
-        if side == .high &&
-            ((axis == .vertical && actual.width > target.width + 2) ||
-             (axis == .horizontal && actual.height > target.height + 2)) {
+        if (axis == .vertical && side == .high && actual.width > target.width + 2) ||
+            (axis == .horizontal && side == .low && actual.height > target.height + 2) {
             var anchored = actual
             if axis == .vertical { anchored.origin.x = current.maxX - actual.width }
-            else { anchored.origin.y = current.maxY - actual.height }
+            else { anchored.origin.y = current.minY }
             pane.window.setFrame(anchored)
             guard let readBack = pane.window.frame else { return nil }
             actual = readBack
         }
         return actual
+    }
+
+    private func restore(_ divider: Divider) {
+        for pane in divider.low {
+            if let frame = write(pane, axis: divider.axis, side: .low, coordinate: divider.coordinate) {
+                SnapWindowRegistry.shared.recordFrameWrite(window: pane.window, frame: frame)
+            }
+        }
+        for pane in divider.high {
+            if let frame = write(pane, axis: divider.axis, side: .high, coordinate: divider.coordinate) {
+                SnapWindowRegistry.shared.recordFrameWrite(window: pane.window, frame: frame)
+            }
+        }
     }
 
     private func limit(_ frame: CGRect, axis: Axis, side: Side) -> CGFloat {
@@ -449,11 +455,14 @@ private final class SnapDividerPanel: NSPanel {
 
     func show(frame: CGRect, vertical: Bool) {
         dividerView.vertical = vertical
-        if self.frame != frame { setFrame(frame, display: true) }
-        orderFrontRegardless()
+        let changed = self.frame != frame
+        if changed { setFrame(frame, display: true) }
+        if !isVisible || changed { orderFrontRegardless() }
     }
 
-    func hide() { orderOut(nil) }
+    func hide() {
+        if isVisible { orderOut(nil) }
+    }
 }
 
 private final class SnapDividerView: NSView {
