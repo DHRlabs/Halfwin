@@ -2,6 +2,48 @@ import AppKit
 import SwiftUI
 import Combine
 
+enum LayoutMenuShortcut: String, CaseIterable, Identifiable {
+    case controlOptionZ
+    case controlOptionL
+    case controlShiftZ
+    case controlOptionCommandZ
+    case off
+
+    var id: Self { self }
+
+    var title: String {
+        switch self {
+        case .controlOptionZ: return "Control-Option-Z"
+        case .controlOptionL: return "Control-Option-L"
+        case .controlShiftZ: return "Control-Shift-Z"
+        case .controlOptionCommandZ: return "Control-Option-Command-Z"
+        case .off: return "Off"
+        }
+    }
+
+    private var keyCode: Int64? {
+        switch self {
+        case .controlOptionZ, .controlShiftZ, .controlOptionCommandZ: return 6
+        case .controlOptionL: return 37
+        case .off: return nil
+        }
+    }
+
+    private var modifiers: CGEventFlags {
+        switch self {
+        case .controlOptionZ, .controlOptionL: return [.maskControl, .maskAlternate]
+        case .controlShiftZ: return [.maskControl, .maskShift]
+        case .controlOptionCommandZ: return [.maskControl, .maskAlternate, .maskCommand]
+        case .off: return []
+        }
+    }
+
+    func matches(keyCode: Int64, flags: CGEventFlags) -> Bool {
+        let mask: CGEventFlags = [.maskControl, .maskShift, .maskAlternate, .maskCommand]
+        return self.keyCode == keyCode && flags.intersection(mask) == modifiers
+    }
+}
+
 /// Persists the layout-menu settings. Same shape as `SnapSettings`:
 /// UserDefaults-backed and changeable in Settings.
 final class LayoutMenuSettings: ObservableObject {
@@ -12,6 +54,7 @@ final class LayoutMenuSettings: ObservableObject {
     private let dwellKey = "Halfwin.layoutMenuDwellDelay"
     private let hotZoneWidthKey = "Halfwin.layoutMenuHotZoneWidth"
     private let sizePercentKey = "Halfwin.layoutMenuSizePercent"
+    private let keyboardShortcutKey = "Halfwin.layoutMenuKeyboardShortcut"
 
     static let defaultDwellDelay: Double = 0.35
     static let defaultHotZoneWidth: CGFloat = 400
@@ -41,6 +84,10 @@ final class LayoutMenuSettings: ObservableObject {
         }
     }
 
+    @Published var keyboardShortcut: LayoutMenuShortcut {
+        didSet { defaults.set(keyboardShortcut.rawValue, forKey: keyboardShortcutKey) }
+    }
+
     @Published var commandCenterSideFraction = SnapGeometry.commandCenterSideFraction {
         didSet { SnapGeometry.commandCenterSideFraction = commandCenterSideFraction }
     }
@@ -52,6 +99,7 @@ final class LayoutMenuSettings: ObservableObject {
         let savedHotZoneWidth = CGFloat(defaults.object(forKey: hotZoneWidthKey) as? Double ?? Double(Self.defaultHotZoneWidth))
         hotZoneWidth = Self.clampedHotZoneWidth(savedHotZoneWidth)
         sizePercent = Self.clampedSizePercent(defaults.object(forKey: sizePercentKey) as? Double ?? Self.defaultSizePercent)
+        keyboardShortcut = defaults.string(forKey: keyboardShortcutKey).flatMap(LayoutMenuShortcut.init(rawValue:)) ?? .controlOptionZ
     }
 
     private static func clampedHotZoneWidth(_ value: CGFloat) -> CGFloat {
@@ -131,6 +179,8 @@ private final class LayoutMenuDropState: ObservableObject {
     @Published var isPortrait = false
     @Published var showCount = 0
     @Published var hoveredZone: LayoutDropZone?
+    @Published var keyboardLayoutIndex: Int?
+    @Published var keyboardZoneIndex: Int?
     @Published var preview = LayoutMenuPreview.empty
     @Published var scale: CGFloat = 1
 }
@@ -150,11 +200,18 @@ private struct LayoutMenuPreview {
 /// confirm which system APIs exist (trigger zone, non-activating panel);
 /// this implementation and its geometry are Halfwin's own.
 final class LayoutMenuManager {
+    private static let keyboardEventMask: CGEventMask = [CGEventType.keyDown, .keyUp].reduce(CGEventMask(0)) {
+        $0 | (CGEventMask(1) << $1.rawValue)
+    }
+
     private let settings: LayoutMenuSettings
     private var globalMonitor: Any?
     private var localMonitor: Any?
     private var dwellTimer: Timer?
     private var permissionTimer: Timer?
+    private var keyboardEventTap: CFMachPort?
+    private var keyboardRunLoopSource: CFRunLoopSource?
+    private var swallowedKeyboardKeyCodes = Set<Int64>()
     private var cancellables = Set<AnyCancellable>()
     private let dropState = LayoutMenuDropState()
     private lazy var panel = LayoutMenuPanel(
@@ -170,6 +227,7 @@ final class LayoutMenuManager {
     /// The screen and window the panel is currently showing for.
     private var activeScreen: NSScreen?
     private var targetWindow: AXWindow?
+    private var keyboardOpened = false
     private(set) var isDropBarVisible = false
     private var dropStartFrame: CGRect?
 
@@ -191,6 +249,9 @@ final class LayoutMenuManager {
     init(settings: LayoutMenuSettings) {
         self.settings = settings
         settings.$enabled
+            .sink { [weak self] _ in DispatchQueue.main.async { self?.refreshPermission() } }
+            .store(in: &cancellables)
+        settings.$keyboardShortcut
             .sink { [weak self] _ in DispatchQueue.main.async { self?.refreshPermission() } }
             .store(in: &cancellables)
         NSWorkspace.shared.notificationCenter.addObserver(
@@ -215,7 +276,7 @@ final class LayoutMenuManager {
                 self?.refreshPermission()
             }
         }
-        if Permissions.accessibilityGranted && settings.enabled {
+        if Permissions.accessibilityGranted && (settings.enabled || settings.keyboardShortcut != .off) {
             start()
         } else {
             stop()
@@ -223,17 +284,20 @@ final class LayoutMenuManager {
     }
 
     private func start() {
-        guard globalMonitor == nil else { return }
-        // .leftMouseDown only goes on the global mask: a local .leftMouseDown
-        // fires (and would hide the panel) before AppKit delivers the
-        // matching mouse-up as a SwiftUI tap on the panel's own tiles.
-        globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDown, .keyDown]) {
-            [weak self] in self?.handle($0)
+        if globalMonitor == nil {
+            // .leftMouseDown only goes on the global mask: a local .leftMouseDown
+            // fires before AppKit delivers the matching mouse-up as a tile tap.
+            globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.mouseMoved, .leftMouseDown]) {
+                [weak self] in self?.handle($0)
+            }
         }
-        localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved, .keyDown]) { [weak self] event in
-            self?.handle(event)
-            return event
+        if localMonitor == nil {
+            localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.mouseMoved]) { [weak self] event in
+                self?.handle(event)
+                return event
+            }
         }
+        startKeyboardTap()
     }
 
     private func stop() {
@@ -241,16 +305,172 @@ final class LayoutMenuManager {
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
         globalMonitor = nil
         localMonitor = nil
+        stopKeyboardTap()
         cancelDwell()
         hidePanel()
     }
 
-    private func handle(_ event: NSEvent) {
-        switch event.type {
-        case .keyDown:
-            guard event.keyCode == 53 else { return } // Escape
+    private func startKeyboardTap() {
+        if let keyboardEventTap {
+            if !CGEvent.tapIsEnabled(tap: keyboardEventTap) { CGEvent.tapEnable(tap: keyboardEventTap, enable: true) }
+            return
+        }
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
+            eventsOfInterest: Self.keyboardEventMask, callback: layoutMenuKeyboardEventTapCallback,
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ), let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else { return }
+        keyboardEventTap = tap
+        keyboardRunLoopSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+    }
+
+    private func stopKeyboardTap() {
+        if let keyboardEventTap {
+            CGEvent.tapEnable(tap: keyboardEventTap, enable: false)
+            CFMachPortInvalidate(keyboardEventTap)
+        }
+        if let keyboardRunLoopSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), keyboardRunLoopSource, .commonModes) }
+        keyboardEventTap = nil
+        keyboardRunLoopSource = nil
+        swallowedKeyboardKeyCodes.removeAll()
+    }
+
+    fileprivate func handleKeyboard(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let keyboardEventTap { CGEvent.tapEnable(tap: keyboardEventTap, enable: true) }
+            return Unmanaged.passUnretained(event)
+        }
+        guard Permissions.accessibilityGranted else {
+            refreshPermission()
+            return Unmanaged.passUnretained(event)
+        }
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        if type == .keyUp {
+            return swallowedKeyboardKeyCodes.remove(keyCode) == nil ? Unmanaged.passUnretained(event) : nil
+        }
+        guard type == .keyDown else { return Unmanaged.passUnretained(event) }
+        let flags = event.flags
+        if !panel.isVisible, settings.keyboardShortcut.matches(keyCode: keyCode, flags: flags) {
+            swallowedKeyboardKeyCodes.insert(keyCode)
+            if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
+                DispatchQueue.main.async { [weak self] in self?.showPanelForShortcut() }
+            }
+            return nil
+        }
+        guard panel.isVisible, !isDropBarVisible,
+              flags.intersection([.maskControl, .maskShift, .maskAlternate, .maskCommand]).isEmpty else {
+            return Unmanaged.passUnretained(event)
+        }
+        guard handlePanelKey(keyCode) else { return Unmanaged.passUnretained(event) }
+        swallowedKeyboardKeyCodes.insert(keyCode)
+        return nil
+    }
+
+    private func handlePanelKey(_ keyCode: Int64) -> Bool {
+        switch keyCode {
+        case 53:
             cancelDwell()
             hidePanel(suppressRearm: true)
+        case 123, 124, 125, 126:
+            moveKeyboardHighlight(keyCode)
+        case 36, 76:
+            selectKeyboardHighlight()
+        case 18, 19, 20, 21, 22, 23, 25, 26, 28, 29:
+            selectKeyboardNumber(keyCode)
+        default:
+            return false
+        }
+        return true
+    }
+
+    private func showPanelForShortcut() {
+        guard let window = AXWindow.focusedWindow(), let frame = window.frame else { return }
+        let center = CGPoint(x: frame.midX, y: frame.midY)
+        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(center) }) ?? NSScreen.main else { return }
+        showPanel(on: screen, targetWindow: window)
+    }
+
+    private func moveKeyboardHighlight(_ keyCode: Int64) {
+        guard let layoutIndex = dropState.keyboardLayoutIndex else { return }
+        if let zoneIndex = dropState.keyboardZoneIndex {
+            guard LayoutMenuTiles.all.indices.contains(layoutIndex) else { return }
+            let tile = LayoutMenuTiles.all[layoutIndex]
+            let zones = tile.zones(portrait: dropState.isPortrait)
+            guard zones.indices.contains(zoneIndex) else { return }
+            let current = zones[zoneIndex].rect
+            let center = CGPoint(x: current.midX, y: 1 - current.midY)
+            let next = zones.indices.filter { $0 != zoneIndex }.compactMap { index -> (Int, CGFloat)? in
+                let rect = zones[index].rect
+                let point = CGPoint(x: rect.midX, y: 1 - rect.midY)
+                let dx = point.x - center.x
+                let dy = point.y - center.y
+                let primary: CGFloat
+                let cross: CGFloat
+                switch keyCode {
+                case 123 where dx < 0: primary = -dx; cross = abs(dy)
+                case 124 where dx > 0: primary = dx; cross = abs(dy)
+                case 126 where dy < 0: primary = -dy; cross = abs(dx)
+                case 125 where dy > 0: primary = dy; cross = abs(dx)
+                default: return nil
+                }
+                return (index, primary + cross * 2)
+            }.min { $0.1 < $1.1 }?.0
+            if let next { dropState.keyboardZoneIndex = next }
+            return
+        }
+        let column = layoutIndex % LayoutMenuPanel.columns
+        let row = layoutIndex / LayoutMenuPanel.columns
+        let next: Int
+        switch keyCode {
+        case 123: next = column > 0 ? layoutIndex - 1 : layoutIndex
+        case 124: next = column < LayoutMenuPanel.columns - 1 && layoutIndex + 1 < LayoutMenuTiles.all.count ? layoutIndex + 1 : layoutIndex
+        case 126: next = row > 0 ? layoutIndex - LayoutMenuPanel.columns : layoutIndex
+        default: next = layoutIndex + LayoutMenuPanel.columns < LayoutMenuTiles.all.count ? layoutIndex + LayoutMenuPanel.columns : layoutIndex
+        }
+        dropState.keyboardLayoutIndex = next
+    }
+
+    private func selectKeyboardNumber(_ keyCode: Int64) {
+        let digits: [Int64: Int] = [18: 1, 19: 2, 20: 3, 21: 4, 23: 5, 22: 6, 26: 7, 28: 8, 25: 9, 29: 0]
+        let digit = digits[keyCode] ?? 0
+        guard digit > 0 else { return }
+        if let layoutIndex = dropState.keyboardLayoutIndex, dropState.keyboardZoneIndex != nil {
+            guard LayoutMenuTiles.all.indices.contains(layoutIndex) else { return }
+            let tile = LayoutMenuTiles.all[layoutIndex]
+            guard tile.zones(portrait: dropState.isPortrait).indices.contains(digit - 1) else { return }
+            dropState.keyboardZoneIndex = digit - 1
+            selectKeyboardHighlight()
+        } else if LayoutMenuTiles.all.indices.contains(digit - 1) {
+            dropState.keyboardLayoutIndex = digit - 1
+            dropState.keyboardZoneIndex = 0
+        }
+    }
+
+    private func selectKeyboardHighlight(apply: Bool = false) {
+        guard let layoutIndex = dropState.keyboardLayoutIndex,
+              LayoutMenuTiles.all.indices.contains(layoutIndex) else { return }
+        let tile = LayoutMenuTiles.all[layoutIndex]
+        let zones = tile.zones(portrait: dropState.isPortrait)
+        guard let zoneIndex = dropState.keyboardZoneIndex else {
+            if zones.count == 1 {
+                dropState.keyboardZoneIndex = 0
+                selectKeyboardHighlight()
+            } else {
+                dropState.keyboardZoneIndex = 0
+            }
+            return
+        }
+        guard zones.indices.contains(zoneIndex) else { return }
+        switch zones[zoneIndex].dropZone {
+        case .preset(let preset): pick(preset)
+        case .layout(let action): pickLayoutZone(action)
+        }
+    }
+
+    private func handle(_ event: NSEvent) {
+        switch event.type {
         case .leftMouseDown:
             // Drag snapping owns the top edge during drags.
             cancelDwell()
@@ -263,10 +483,12 @@ final class LayoutMenuManager {
     }
 
     private func handleMouseMoved() {
+        guard settings.enabled else { cancelDwell(); return }
         if isDropBarVisible { return } // The drag monitor owns drop-bar tracking.
         let cursor = NSEvent.mouseLocation
 
         if panel.isVisible {
+            if keyboardOpened { return }
             if isNearPanelOrTrigger(cursor) { return }
             hidePanel()
             return
@@ -316,15 +538,18 @@ final class LayoutMenuManager {
         return cursor.y >= panel.frame.minY && cursor.y <= frame.maxY
     }
 
-    private func showPanel(on screen: NSScreen) {
+    private func showPanel(on screen: NSScreen, targetWindow selectedWindow: AXWindow? = nil) {
         cancelDwell()
         guard Permissions.accessibilityGranted else { return }
         pruneUnreadableRestoreInfo()
-        targetWindow = AXWindow.focusedWindow()
+        targetWindow = selectedWindow ?? AXWindow.focusedWindow()
+        keyboardOpened = selectedWindow != nil
         activeScreen = screen
         isDropBarVisible = false
         dropStartFrame = nil
         dropState.isDropMode = false
+        dropState.keyboardLayoutIndex = 0
+        dropState.keyboardZoneIndex = nil
         dropState.showCount += 1
         dropState.highlightedZone = nil
         panel.show(on: screen)
@@ -335,10 +560,13 @@ final class LayoutMenuManager {
         guard Permissions.accessibilityGranted else { return }
         pruneUnreadableRestoreInfo()
         targetWindow = window
+        keyboardOpened = false
         activeScreen = screen
         isDropBarVisible = true
         dropStartFrame = startFrame
         dropState.isDropMode = true
+        dropState.keyboardLayoutIndex = nil
+        dropState.keyboardZoneIndex = nil
         dropState.showCount += 1
         dropState.highlightedZone = nil
         panel.show(on: screen, ignoringMouseEvents: true)
@@ -411,9 +639,12 @@ final class LayoutMenuManager {
         dropStartFrame = nil
         dropState.isDropMode = false
         dropState.highlightedZone = nil
+        dropState.keyboardLayoutIndex = nil
+        dropState.keyboardZoneIndex = nil
         panel.hide()
         activeScreen = nil
         targetWindow = nil
+        keyboardOpened = false
         suppressRearmUntilLeave = suppressRearm
     }
 
@@ -680,8 +911,9 @@ private struct LayoutMenuView: View {
         let columns = Array(repeating: GridItem(.fixed(tileSize.width), spacing: LayoutMenuPanel.tileSpacing * scale),
                             count: LayoutMenuPanel.columns)
         LazyVGrid(columns: columns, spacing: LayoutMenuPanel.tileSpacing * scale) {
-            ForEach(LayoutMenuTiles.all) { tile in
-                LayoutTileView(tile: tile, dropState: dropState, onPick: onPick, onPickZone: onPickZone)
+            ForEach(LayoutMenuTiles.all.indices, id: \.self) { index in
+                LayoutTileView(tile: LayoutMenuTiles.all[index], tileIndex: index,
+                               dropState: dropState, onPick: onPick, onPickZone: onPickZone)
             }
         }
         .padding(LayoutMenuPanel.padding * scale)
@@ -694,6 +926,7 @@ private struct LayoutMenuView: View {
 /// A screen thumbnail whose hit areas use the same rounded zone frames as the panel.
 private struct LayoutTileView: View {
     let tile: LayoutMenuTile
+    let tileIndex: Int
     @ObservedObject var dropState: LayoutMenuDropState
     let onPick: (LayoutPreset) -> Void
     let onPickZone: (SnapAction) -> Void
@@ -702,7 +935,10 @@ private struct LayoutTileView: View {
         let scale = dropState.scale
         let size = CGSize(width: LayoutMenuPanel.tileWidth * scale, height: LayoutMenuPanel.tileHeight * scale)
         let zones = tile.zones(portrait: dropState.isPortrait)
-        let selectedZone = dropState.isDropMode ? dropState.highlightedZone : dropState.hoveredZone
+        let keyboardZone = dropState.keyboardLayoutIndex == tileIndex
+            ? dropState.keyboardZoneIndex.flatMap { zones.indices.contains($0) ? zones[$0].dropZone : nil }
+            : nil
+        let selectedZone = dropState.isDropMode ? dropState.highlightedZone : (keyboardZone ?? dropState.hoveredZone)
         let activeIndex = zones.firstIndex { $0.dropZone == selectedZone }
 
         ZStack(alignment: .topLeading) {
@@ -718,8 +954,20 @@ private struct LayoutTileView: View {
                 .stroke(Color.secondary.opacity(0.55), lineWidth: max(0.7, scale))
                 .frame(width: size.width - 10 * scale, height: size.height - 10 * scale)
                 .offset(x: 5 * scale, y: 5 * scale)
+            Text("\(tileIndex + 1)")
+                .font(.system(size: 10 * scale, weight: .bold, design: .rounded))
+                .foregroundStyle(.white)
+                .padding(3 * scale)
+                .background(.black.opacity(0.7), in: Circle())
+                .offset(x: 7 * scale, y: 7 * scale)
         }
         .frame(width: size.width, height: size.height, alignment: .topLeading)
+        .overlay {
+            RoundedRectangle(cornerRadius: 9 * scale)
+                .stroke(dropState.keyboardLayoutIndex == tileIndex ? Color.accentColor : .clear,
+                        lineWidth: max(2, 2 * scale))
+                .allowsHitTesting(false)
+        }
         .help(tile.title)
         .accessibilityElement(children: .contain)
         .accessibilityLabel(tile.title)
@@ -746,6 +994,16 @@ private struct LayoutTileView: View {
                         .frame(width: max(0, min(28 * scale, rect.width - 4 * scale)),
                                height: max(0, min(28 * scale, rect.height - 4 * scale)))
                         .allowsHitTesting(false)
+                }
+            }
+            .overlay(alignment: .topLeading) {
+                if dropState.keyboardLayoutIndex == tileIndex {
+                    Text("\(index + 1)")
+                        .font(.system(size: 9 * scale, weight: .bold, design: .rounded))
+                        .foregroundStyle(.white)
+                        .padding(2 * scale)
+                        .background(.black.opacity(0.65), in: Circle())
+                        .padding(2 * scale)
                 }
             }
             .contentShape(RoundedRectangle(cornerRadius: radius))
@@ -795,4 +1053,12 @@ private struct LayoutTileView: View {
     private func zonesLabel(_ zone: LayoutMenuZone) -> String {
         tile.zones(portrait: dropState.isPortrait).count == 1 ? tile.title : "\(tile.title), \(zone.name)"
     }
+}
+
+private func layoutMenuKeyboardEventTapCallback(
+    proxy: CGEventTapProxy, type: CGEventType, event: CGEvent, userInfo: UnsafeMutableRawPointer?
+) -> Unmanaged<CGEvent>? {
+    guard let userInfo else { return Unmanaged.passUnretained(event) }
+    let manager = Unmanaged<LayoutMenuManager>.fromOpaque(userInfo).takeUnretainedValue()
+    return manager.handleKeyboard(type: type, event: event)
 }

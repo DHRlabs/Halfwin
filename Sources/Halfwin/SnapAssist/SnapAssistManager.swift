@@ -3,6 +3,10 @@ import ApplicationServices
 import SwiftUI
 
 final class SnapAssistManager {
+    private static let keyboardEventMask: CGEventMask = [CGEventType.keyDown, .keyUp].reduce(CGEventMask(0)) {
+        $0 | (CGEventMask(1) << $1.rawValue)
+    }
+
     private struct Display: Hashable {
         let number: UInt32
         let frame: CGRect
@@ -26,6 +30,9 @@ final class SnapAssistManager {
     private var globalMonitor: Any?
     private var localMonitor: Any?
     private var permissionTimer: Timer?
+    private var keyboardEventTap: CFMachPort?
+    private var keyboardRunLoopSource: CFRunLoopSource?
+    private var swallowedKeyboardKeyCodes = Set<Int64>()
     private var activeScreen: NSScreen?
     private var activeWindow: AXWindow?
     private var activeLayout: SnapMultiWindowLayout?
@@ -127,16 +134,17 @@ final class SnapAssistManager {
 
     private func start() {
         if globalMonitor == nil {
-            globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .keyDown]) { [weak self] in
+            globalMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] in
                 self?.handle($0)
             }
         }
         if localMonitor == nil {
-            localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown, .keyDown]) { [weak self] event in
+            localMonitor = NSEvent.addLocalMonitorForEvents(matching: [.leftMouseDown]) { [weak self] event in
                 self?.handle(event)
                 return event
             }
         }
+        startKeyboardTap()
     }
 
     private func stop() {
@@ -144,7 +152,66 @@ final class SnapAssistManager {
         if let localMonitor { NSEvent.removeMonitor(localMonitor) }
         globalMonitor = nil
         localMonitor = nil
+        stopKeyboardTap()
         hidePanel()
+    }
+
+    private func startKeyboardTap() {
+        if let keyboardEventTap {
+            if !CGEvent.tapIsEnabled(tap: keyboardEventTap) { CGEvent.tapEnable(tap: keyboardEventTap, enable: true) }
+            return
+        }
+        guard let tap = CGEvent.tapCreate(
+            tap: .cgSessionEventTap, place: .headInsertEventTap, options: .defaultTap,
+            eventsOfInterest: Self.keyboardEventMask, callback: snapAssistKeyboardEventTapCallback,
+            userInfo: Unmanaged.passUnretained(self).toOpaque()
+        ), let source = CFMachPortCreateRunLoopSource(kCFAllocatorDefault, tap, 0) else { return }
+        keyboardEventTap = tap
+        keyboardRunLoopSource = source
+        CFRunLoopAddSource(CFRunLoopGetMain(), source, .commonModes)
+        CGEvent.tapEnable(tap: tap, enable: true)
+    }
+
+    private func stopKeyboardTap() {
+        if let keyboardEventTap {
+            CGEvent.tapEnable(tap: keyboardEventTap, enable: false)
+            CFMachPortInvalidate(keyboardEventTap)
+        }
+        if let keyboardRunLoopSource { CFRunLoopRemoveSource(CFRunLoopGetMain(), keyboardRunLoopSource, .commonModes) }
+        keyboardEventTap = nil
+        keyboardRunLoopSource = nil
+        swallowedKeyboardKeyCodes.removeAll()
+    }
+
+    fileprivate func handleKeyboard(type: CGEventType, event: CGEvent) -> Unmanaged<CGEvent>? {
+        if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
+            if let keyboardEventTap { CGEvent.tapEnable(tap: keyboardEventTap, enable: true) }
+            return Unmanaged.passUnretained(event)
+        }
+        guard Permissions.accessibilityGranted else {
+            refreshPermission()
+            return Unmanaged.passUnretained(event)
+        }
+        let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+        if type == .keyUp {
+            return swallowedKeyboardKeyCodes.remove(keyCode) == nil ? Unmanaged.passUnretained(event) : nil
+        }
+        guard type == .keyDown, panel?.isVisible == true,
+              event.flags.intersection([.maskControl, .maskShift, .maskAlternate, .maskCommand]).isEmpty else {
+            return Unmanaged.passUnretained(event)
+        }
+        switch keyCode {
+        case 123, 124, 125, 126:
+            panel?.moveSelection(keyCode)
+        case 36, 76:
+            panel?.pickSelection()
+        case 53:
+            hidePanel()
+        default:
+            return Unmanaged.passUnretained(event)
+        }
+        swallowedKeyboardKeyCodes.insert(keyCode)
+        return nil
     }
 
     private func handle(_ event: NSEvent) {
@@ -153,10 +220,7 @@ final class SnapAssistManager {
             return
         }
         guard let panel, panel.isVisible else { return }
-        if event.type == .keyDown, event.keyCode == 53 {
-            // Escape also reaches the frontmost app; this monitor only hides the panel.
-            hidePanel()
-        } else if event.type == .leftMouseDown, !panel.frame.contains(NSEvent.mouseLocation) {
+        if event.type == .leftMouseDown, !panel.frame.contains(NSEvent.mouseLocation) {
             hidePanel()
         }
     }
@@ -463,6 +527,7 @@ private final class SnapAssistPanel: NSPanel {
     private let onPick: (SnapWindowChoice) -> Void
     private var choices: [SnapWindowChoice] = []
     private var images: [CGWindowID: CGImage] = [:]
+    private var selectedIndex = 0
     private var assistView: AcceptingFirstMouseHostingView<SnapAssistView>?
 
     init(onPick: @escaping (SnapWindowChoice) -> Void) {
@@ -483,8 +548,11 @@ private final class SnapAssistPanel: NSPanel {
 
     func show(frame: CGRect, choices: [SnapWindowChoice]) {
         self.choices = choices
+        selectedIndex = 0
         images = [:]
-        let assistView = AcceptingFirstMouseHostingView(rootView: SnapAssistView(choices: choices, images: images, onPick: onPick))
+        let assistView = AcceptingFirstMouseHostingView(
+            rootView: SnapAssistView(choices: choices, images: images, selectedIndex: selectedIndex, onPick: onPick)
+        )
         self.assistView = assistView
         contentView = assistView
         setFrame(frame, display: true)
@@ -493,7 +561,33 @@ private final class SnapAssistPanel: NSPanel {
 
     func setImages(_ images: [CGWindowID: CGImage]) {
         self.images = images
-        assistView?.rootView = SnapAssistView(choices: choices, images: images, onPick: onPick)
+        updateView()
+    }
+
+    func moveSelection(_ keyCode: Int64) {
+        guard !choices.isEmpty else { return }
+        let columns = min(choices.count, max(1, Int(ceil(sqrt(Double(choices.count) * Double(max(frame.width - 20, 1) / max(frame.height - 20, 1)))))))
+        let column = selectedIndex % columns
+        let next: Int
+        switch keyCode {
+        case 123: next = column > 0 ? selectedIndex - 1 : selectedIndex
+        case 124: next = column < columns - 1 && selectedIndex + 1 < choices.count ? selectedIndex + 1 : selectedIndex
+        case 126: next = selectedIndex >= columns ? selectedIndex - columns : selectedIndex
+        default: next = selectedIndex + columns < choices.count ? selectedIndex + columns : selectedIndex
+        }
+        selectedIndex = next
+        updateView()
+    }
+
+    func pickSelection() {
+        guard choices.indices.contains(selectedIndex) else { return }
+        onPick(choices[selectedIndex])
+    }
+
+    private func updateView() {
+        assistView?.rootView = SnapAssistView(
+            choices: choices, images: images, selectedIndex: selectedIndex, onPick: onPick
+        )
     }
 
     func hide() { orderOut(nil) }
@@ -506,6 +600,7 @@ private final class AcceptingFirstMouseHostingView<Content: View>: NSHostingView
 private struct SnapAssistView: View {
     let choices: [SnapWindowChoice]
     let images: [CGWindowID: CGImage]
+    let selectedIndex: Int
     let onPick: (SnapWindowChoice) -> Void
 
     var body: some View {
@@ -520,7 +615,7 @@ private struct SnapAssistView: View {
             let cellHeight = max(70, availableCellHeight)
             let imageHeight = max(24, cellHeight - 58)
             let grid = LazyVGrid(columns: Array(repeating: GridItem(.flexible(), spacing: 8), count: columns), spacing: 8) {
-                ForEach(choices) { choice in
+                ForEach(Array(choices.enumerated()), id: \.element.id) { index, choice in
                     Button { onPick(choice) } label: {
                         VStack(spacing: 6) {
                             Group {
@@ -543,7 +638,10 @@ private struct SnapAssistView: View {
                         }
                         .padding(7).frame(maxWidth: .infinity).frame(height: cellHeight)
                         .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 9))
-                        .overlay(RoundedRectangle(cornerRadius: 9).stroke(Color.white.opacity(0.12)))
+                        .overlay(RoundedRectangle(cornerRadius: 9).stroke(
+                            index == selectedIndex ? Color.accentColor : Color.white.opacity(0.12),
+                            lineWidth: index == selectedIndex ? 2 : 1
+                        ))
                     }
                     .buttonStyle(.plain)
                     .accessibilityLabel(choice.title)
@@ -574,4 +672,12 @@ private struct SnapAssistView: View {
             Image(systemName: "app.fill").resizable().scaledToFit()
         }
     }
+}
+
+private func snapAssistKeyboardEventTapCallback(
+    proxy: CGEventTapProxy, type: CGEventType, event: CGEvent, userInfo: UnsafeMutableRawPointer?
+) -> Unmanaged<CGEvent>? {
+    guard let userInfo else { return Unmanaged.passUnretained(event) }
+    let manager = Unmanaged<SnapAssistManager>.fromOpaque(userInfo).takeUnretainedValue()
+    return manager.handleKeyboard(type: type, event: event)
 }

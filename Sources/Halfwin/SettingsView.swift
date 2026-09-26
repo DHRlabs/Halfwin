@@ -17,16 +17,21 @@ struct SettingsView: View {
         Form {
             Section("Snapping") {
                 Toggle("Snap windows when dragged to an edge", isOn: $settings.dragSnappingEnabled)
+                Picker("Drag edge map", selection: $settings.mapPreset) {
+                    ForEach(SnapMapPreset.allCases) { preset in Text(preset.rawValue).tag(preset) }
+                }
                 ForEach(SnapPosition.allCases, id: \.self) { position in
                     Picker(position.displayName, selection: binding(for: position)) {
                         ForEach(SnapAction.allCases.filter { $0 != .lastThirdTop && $0 != .lastThirdBottom }, id: \.self) { action in
                             Text(action.displayName).tag(action)
                         }
                     }
+                    .disabled(settings.mapPreset == .windows)
                 }
                 Button("Restore Lance's Defaults") {
                     settings.restoreLanceDefaults()
                 }
+                .disabled(settings.mapPreset == .windows)
             }
             Section("Snap Assist") {
                 Picker("Fill empty spots", selection: $snapAssistSettings.fillEmptySpots) {
@@ -65,6 +70,9 @@ struct SettingsView: View {
             .onAppear { macTweaks.retryFinderAutomation() }
             Section("Layout menu") {
                 Toggle("Show a layout menu when hovering the top of a display", isOn: $layoutMenuSettings.enabled)
+                Picker("Keyboard shortcut", selection: $layoutMenuSettings.keyboardShortcut) {
+                    ForEach(LayoutMenuShortcut.allCases) { shortcut in Text(shortcut.title).tag(shortcut) }
+                }
                 Stepper(value: $layoutMenuSettings.dwellDelay, in: 0.1...1.5, step: 0.05) {
                     Text("Dwell delay: \(layoutMenuSettings.dwellDelay, specifier: "%.2f")s")
                 }

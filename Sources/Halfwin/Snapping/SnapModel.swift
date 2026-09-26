@@ -69,6 +69,13 @@ enum SnapAction: String, CaseIterable, Codable {
 
 typealias SnapMap = [SnapPosition: SnapAction]
 
+enum SnapMapPreset: String, CaseIterable, Identifiable {
+    case myMap = "My map"
+    case windows = "Windows"
+
+    var id: Self { self }
+}
+
 struct SnapLayoutZone {
     let action: SnapAction
     let rect: CGRect
@@ -149,6 +156,8 @@ final class SnapSettings: ObservableObject {
 
     private let defaults = UserDefaults.standard
     private let mapKey = "Halfwin.snapMap"
+    private let myMapKey = "Halfwin.mySnapMap"
+    private let mapPresetKey = "Halfwin.snapMapPreset"
     private let enabledKey = "Halfwin.dragSnappingEnabled"
 
     /// Lance's landscape Rectangle map: top-left/top-right corners are the
@@ -166,10 +175,34 @@ final class SnapSettings: ObservableObject {
         .bottomRight: .bottomRightQuarter,
     ]
 
+    static let windowsDefault: SnapMap = [
+        .topLeft: .topLeftQuarter,
+        .top: .maximize,
+        .topRight: .topRightQuarter,
+        .left: .leftHalf,
+        .right: .rightHalf,
+        .bottomLeft: .bottomLeftQuarter,
+        .bottom: .none,
+        .bottomRight: .bottomRightQuarter,
+    ]
+
     @Published var map: SnapMap {
         didSet {
             guard let data = try? JSONEncoder().encode(map) else { return }
             defaults.set(data, forKey: mapKey)
+            if mapPreset == .myMap { defaults.set(data, forKey: myMapKey) }
+        }
+    }
+
+    @Published var mapPreset: SnapMapPreset {
+        didSet {
+            defaults.set(mapPreset.rawValue, forKey: mapPresetKey)
+            if oldValue == .myMap, let data = try? JSONEncoder().encode(map) {
+                defaults.set(data, forKey: myMapKey)
+            }
+            let data = defaults.data(forKey: myMapKey)
+            map = mapPreset == .windows ? Self.windowsDefault :
+                (data.flatMap { try? JSONDecoder().decode(SnapMap.self, from: $0) } ?? Self.lanceDefault)
         }
     }
 
@@ -178,12 +211,16 @@ final class SnapSettings: ObservableObject {
     }
 
     private init() {
-        if let data = defaults.data(forKey: mapKey), let saved = try? JSONDecoder().decode(SnapMap.self, from: data) {
-            map = saved
-        } else {
-            map = Self.lanceDefault
-        }
+        let savedMap = defaults.data(forKey: mapKey).flatMap { try? JSONDecoder().decode(SnapMap.self, from: $0) }
+        let savedPreset = defaults.string(forKey: mapPresetKey).flatMap(SnapMapPreset.init(rawValue:)) ?? .myMap
+        let savedMyMap = defaults.data(forKey: myMapKey).flatMap { try? JSONDecoder().decode(SnapMap.self, from: $0) }
+        let selectedMap = savedPreset == .windows ? Self.windowsDefault : (savedMyMap ?? savedMap ?? Self.lanceDefault)
+        mapPreset = savedPreset
+        map = selectedMap
         dragSnappingEnabled = defaults.object(forKey: enabledKey) == nil ? true : defaults.bool(forKey: enabledKey)
+        if savedMyMap == nil, savedPreset == .myMap, let data = try? JSONEncoder().encode(selectedMap) {
+            defaults.set(data, forKey: myMapKey)
+        }
     }
 
     func action(for position: SnapPosition) -> SnapAction { map[position] ?? .none }

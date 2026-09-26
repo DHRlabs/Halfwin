@@ -311,28 +311,96 @@ final class WindowExtrasManager {
     private func applyCommandArrow(_ keyCode: Int64) {
         guard let window = AXWindow.focusedWindow(), let frame = window.frame else { return }
         frameMemory.pruneUnreadableFrames()
+        let snapped = snappedAction(for: frame)
         let action: SnapAction
-        let rememberFrame: Bool
+        var rememberFrame = true
+        var screen: NSScreen?
         switch keyCode {
-        case 123: action = .leftHalf; rememberFrame = true
-        case 124: action = .rightHalf; rememberFrame = true
-        case 126: action = .maximize; rememberFrame = true
+        case 123:
+            if let snapped, snapped.action == .leftHalf {
+                guard let adjacent = adjacentScreen(from: snapped.screen, direction: -1) else { return }
+                action = .rightHalf
+                screen = adjacent
+            } else {
+                action = .leftHalf
+            }
+            rememberFrame = true
+        case 124:
+            if let snapped, snapped.action == .rightHalf {
+                guard let adjacent = adjacentScreen(from: snapped.screen, direction: 1) else { return }
+                action = .leftHalf
+                screen = adjacent
+            } else {
+                action = .rightHalf
+            }
+            rememberFrame = true
+        case 126:
+            switch snapped?.action {
+            case .leftHalf: action = .topLeftQuarter
+            case .rightHalf: action = .topRightQuarter
+            case .bottomLeftQuarter: action = .leftHalf
+            case .bottomRightQuarter: action = .rightHalf
+            default: action = .maximize
+            }
+            screen = snapped?.screen
+            rememberFrame = true
         case 125:
-            if frameMemory.restore(window, current: frame) { return }
-            action = .center
-            rememberFrame = false
+            switch snapped?.action {
+            case .leftHalf: action = .bottomLeftQuarter
+            case .rightHalf: action = .bottomRightQuarter
+            case .topLeftQuarter: action = .leftHalf
+            case .topRightQuarter: action = .rightHalf
+            case .bottomLeftQuarter, .bottomRightQuarter, .maximize:
+                if frameMemory.restore(window, current: frame) { return }
+                action = .center
+                rememberFrame = false
+            default:
+                if frameMemory.restore(window, current: frame) { return }
+                action = .center
+                rememberFrame = false
+            }
+            screen = snapped?.screen
         default:
             return
         }
-        guard let target = targetFrame(action, for: window, current: frame) else { return }
+        guard let target = targetFrame(action, for: window, current: frame, on: screen) else { return }
         if rememberFrame {
             frameMemory.set(window, current: frame, to: target.frame)
         } else {
             window.setFrame(target.frame)
         }
-        if action == .leftHalf || action == .rightHalf,
-           let readBack = window.frame, SnapGeometry.isClose(readBack, target.frame) {
+        if let readBack = window.frame, SnapGeometry.isClose(readBack, target.frame) {
             SnapEvents.didSnap(window: window, action: action, screen: target.screen)
+        }
+    }
+
+    private func snappedAction(for frame: CGRect) -> (action: SnapAction, screen: NSScreen)? {
+        let actions: [SnapAction] = [
+            .maximize, .leftHalf, .rightHalf, .topLeftQuarter, .topRightQuarter,
+            .bottomLeftQuarter, .bottomRightQuarter,
+        ]
+        for screen in NSScreen.screens {
+            for action in actions {
+                guard let target = SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
+                                                      currentWindowFrame: frame,
+                                                      portrait: screen.frame.height > screen.frame.width) else { continue }
+                if SnapGeometry.isClose(frame, target) { return (action, screen) }
+            }
+        }
+        return nil
+    }
+
+    private func adjacentScreen(from screen: NSScreen, direction: CGFloat) -> NSScreen? {
+        NSScreen.screens.filter { candidate in
+            guard candidate !== screen else { return false }
+            let edgeDistance = direction < 0 ? abs(candidate.frame.maxX - screen.frame.minX) :
+                abs(candidate.frame.minX - screen.frame.maxX)
+            let verticalOverlap = min(candidate.frame.maxY, screen.frame.maxY) - max(candidate.frame.minY, screen.frame.minY)
+            return edgeDistance <= 1 && verticalOverlap > 0
+        }.max { lhs, rhs in
+            let lhsOverlap = min(lhs.frame.maxY, screen.frame.maxY) - max(lhs.frame.minY, screen.frame.minY)
+            let rhsOverlap = min(rhs.frame.maxY, screen.frame.maxY) - max(rhs.frame.minY, screen.frame.minY)
+            return lhsOverlap < rhsOverlap
         }
     }
 
@@ -543,9 +611,10 @@ final class WindowExtrasManager {
         return true
     }
 
-    private func targetFrame(_ action: SnapAction, for window: AXWindow, current: CGRect) -> (frame: CGRect, screen: NSScreen)? {
+    private func targetFrame(_ action: SnapAction, for window: AXWindow, current: CGRect,
+                             on requestedScreen: NSScreen? = nil) -> (frame: CGRect, screen: NSScreen)? {
         let center = CGPoint(x: current.midX, y: current.midY)
-        guard let screen = NSScreen.screens.first(where: { $0.frame.contains(center) }) ?? NSScreen.main else { return nil }
+        guard let screen = requestedScreen ?? NSScreen.screens.first(where: { $0.frame.contains(center) }) ?? NSScreen.main else { return nil }
         guard let frame = SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
                                              currentWindowFrame: current, portrait: screen.frame.height > screen.frame.width) else { return nil }
         return (frame, screen)
