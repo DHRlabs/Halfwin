@@ -1,4 +1,5 @@
 import AppKit
+import ApplicationServices
 import CoreFoundation
 import Darwin
 
@@ -27,13 +28,13 @@ enum DockPreference {
         var requested = false
         var scheduled = false
         var lastRestartAt: TimeInterval?
-        var requestedAt: TimeInterval?
     }
 
     private static let defaults = UserDefaults.standard
     private static let globalDomain = UserDefaults.globalDomain as CFString
     private static var restartStates: [RestartPolicy: RestartState] = [:]
 
+    @discardableResult
     static func setFeature(
         _ enabled: Bool,
         domain: String,
@@ -42,29 +43,29 @@ enum DockPreference {
         restartPolicy: RestartPolicy,
         savedPreviousKey: String,
         skipIfExternallyChanged: Bool = false
-    ) {
+    ) -> Bool {
         let cfKey = key as CFString
         let cfDomain = domain as CFString
         guard !isForced(cfKey, in: cfDomain),
-              let targetData = propertyListData(value) else { return }
+              let targetData = propertyListData(value) else { return false }
 
         if enabled {
             var saved: SavedValue
             if let existing = loadSavedValue(for: savedPreviousKey) {
                 saved = existing
             } else {
-                guard let captured = savePreviousValue(copyValue(cfKey, from: cfDomain), for: savedPreviousKey) else { return }
+                guard let captured = savePreviousValue(copyValue(cfKey, from: cfDomain), for: savedPreviousKey) else { return false }
                 saved = captured
             }
             let currentValue = copyValue(cfKey, from: cfDomain)
             if skipIfExternallyChanged, let writtenValue = saved.writtenValue,
-               !valuesEqual(currentValue, data: writtenValue) { return }
+               !valuesEqual(currentValue, data: writtenValue) { return true }
             saved.writtenValue = targetData
             store(saved, for: savedPreviousKey)
-            guard !valuesEqual(currentValue, value) else { return }
+            guard !valuesEqual(currentValue, value) else { return false }
 
             setValue(value as CFPropertyList, for: cfKey, in: cfDomain)
-            guard synchronize(cfDomain), valuesEqual(copyValue(cfKey, from: cfDomain), value) else { return }
+            guard synchronize(cfDomain), valuesEqual(copyValue(cfKey, from: cfDomain), value) else { return false }
             requestRestart(restartPolicy)
         } else {
             restoreValue(
@@ -75,6 +76,7 @@ enum DockPreference {
                 savedPreviousKey: savedPreviousKey
             )
         }
+        return false
     }
 
     private static func savePreviousValue(_ value: Any?, for key: String) -> SavedValue? {
@@ -222,7 +224,6 @@ enum DockPreference {
             return
         }
         var state = restartStates[policy, default: RestartState()]
-        if !state.requested { state.requestedAt = ProcessInfo.processInfo.systemUptime }
         state.requested = true
         guard !state.scheduled else {
             restartStates[policy] = state
@@ -237,7 +238,6 @@ enum DockPreference {
         guard var state = restartStates[policy], let bundleIdentifier = policy.bundleIdentifier else { return }
         guard state.requested else {
             state.scheduled = false
-            state.requestedAt = nil
             restartStates[policy] = state
             return
         }
@@ -248,15 +248,9 @@ enum DockPreference {
                 return
             }
         }
-        // ponytail: foreground is a copy proxy; restart after 60s if Finder stays active.
-        if policy == .finder,
-           NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.finder",
-           let requestedAt = state.requestedAt {
-            let remaining = 60 - (ProcessInfo.processInfo.systemUptime - requestedAt)
-            if remaining > 0 {
-                DispatchQueue.main.asyncAfter(deadline: .now() + min(1, remaining)) { restartIfNeeded(policy) }
-                return
-            }
+        if policy == .finder, finderHasCopyOrMoveProgressWindow() {
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { restartIfNeeded(policy) }
+            return
         }
         guard let app = NSRunningApplication.runningApplications(withBundleIdentifier: bundleIdentifier)
             .first(where: { !$0.isTerminated }) else {
@@ -266,9 +260,36 @@ enum DockPreference {
         state.requested = false
         state.scheduled = false
         state.lastRestartAt = ProcessInfo.processInfo.systemUptime
-        state.requestedAt = nil
         restartStates[policy] = state
         kill(app.processIdentifier, SIGTERM)
+    }
+
+    // ponytail: localized titles need localized keywords if Finder exposes no progress subrole.
+    private static func finderHasCopyOrMoveProgressWindow() -> Bool {
+        guard let finder = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.finder")
+            .first(where: { !$0.isTerminated }) else { return false }
+        let application = AXUIElementCreateApplication(finder.processIdentifier)
+        AXUIElementSetMessagingTimeout(application, 0.1)
+        var value: CFTypeRef?
+        guard AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &value) == .success,
+              let windows = value as? [AXUIElement] else { return false }
+        return windows.contains { window in
+            AXUIElementSetMessagingTimeout(window, 0.1)
+            for attribute in [kAXTitleAttribute, kAXSubroleAttribute] {
+                var value: CFTypeRef?
+                guard AXUIElementCopyAttributeValue(window, attribute as CFString, &value) == .success,
+                      let description = value as? String else { continue }
+                if attribute == kAXSubroleAttribute {
+                    if description.localizedCaseInsensitiveContains("progress") { return true }
+                } else {
+                    let words = description.lowercased().split { !$0.isLetter }
+                    if words.contains(where: { ["copy", "copying", "move", "moving"].contains(String($0)) }) {
+                        return true
+                    }
+                }
+            }
+            return false
+        }
     }
 }
 

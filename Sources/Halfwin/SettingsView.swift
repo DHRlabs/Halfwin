@@ -46,10 +46,17 @@ struct SettingsView: View {
                     GroupBox(group.rawValue) {
                         VStack(alignment: .leading, spacing: 8) {
                             ForEach(MacTweak.all.filter { $0.group == group }) { tweak in
-                                Toggle(tweak.title, isOn: Binding(
-                                    get: { macTweaks.isEnabled(tweak.id) },
-                                    set: { macTweaks.setEnabled($0, for: tweak.id) }
-                                ))
+                                VStack(alignment: .leading, spacing: 2) {
+                                    Toggle(tweak.title, isOn: Binding(
+                                        get: { macTweaks.isEnabled(tweak.id) },
+                                        set: { macTweaks.setEnabled($0, for: tweak.id) }
+                                    ))
+                                    if macTweaks.wasChangedOutsideHalfwin(tweak.id) {
+                                        Text("Changed outside Halfwin")
+                                            .font(.footnote)
+                                            .foregroundStyle(.secondary)
+                                    }
+                                }
                             }
                             if group == .animations {
                                 Text("Apps pick up these changes when they reopen.")
