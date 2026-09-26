@@ -16,10 +16,7 @@ final class SnapManager {
 
     private let settings: SnapSettings
     private let layoutMenu: LayoutMenuManager
-    private lazy var divider = SnapDividerManager { [weak self] window, frame in
-        guard let self, let info = self.snappedInfo[window] else { return }
-        self.snappedInfo[window] = (target: frame, preSnapSize: info.preSnapSize)
-    }
+    private lazy var divider = SnapDividerManager()
     private var monitor: Any?
     private lazy var footprint = FootprintWindow()
 
@@ -30,7 +27,7 @@ final class SnapManager {
     private var cancelled = false
     private var currentZone: Zone?
     private var currentPreviewFrame: CGRect?
-    private var dragNeighborFrames: [AXWindow: CGRect] = [:]
+    private var dragNeighborFrames: [CGRect] = []
     private var dragNeighborScreen: NSScreen?
     private var dragToTopLayoutsEnabled = false
     private var dropScreen: NSScreen?
@@ -38,12 +35,8 @@ final class SnapManager {
     private var cancellables = Set<AnyCancellable>()
     private var permissionTimer: Timer?
 
-    /// Pre-snap target and size for windows Halfwin has snapped, so a later
-    /// drag can restore them (Rectangle's `unsnapRestore`) but only when that
-    /// drag starts from the same snapped frame — otherwise the entry is
-    /// stale (the window moved another way since) and is dropped. Keyed by
-    /// the AX element, not a window id — this port never needs a CGWindowID.
-    private var snappedInfo: [AXWindow: (target: CGRect, preSnapSize: CGSize)] = [:]
+    /// Restore size only; the registry owns the current snapped frame.
+    private var preSnapSizes: [AXWindow: CGSize] = [:]
 
     init(settings: SnapSettings, layoutMenu: LayoutMenuManager) {
         self.settings = settings
@@ -135,18 +128,20 @@ final class SnapManager {
 
     private func beginDrag() {
         resetDrag()
-        pruneUnreadableSnapInfo()
+        pruneUnreadableRestoreSizes()
         let cursor = NSEvent.mouseLocation
         draggedWindow = AXWindow.windowUnderCursor(at: cursor)
+        if let draggedWindow, SnapWindowRegistry.shared.hasRecord(for: draggedWindow) {
+            SnapWindowRegistry.shared.validate()
+        }
         initialFrame = draggedWindow?.frame
     }
 
-    /// Windows Halfwin can no longer read (closed, or the AX call timed out)
-    /// have nothing to restore to; drop them so the table doesn't grow
-    /// forever.
-    private func pruneUnreadableSnapInfo() {
-        for window in snappedInfo.keys where window.frame == nil {
-            snappedInfo.removeValue(forKey: window)
+    /// Destroyed AX elements cannot be restored; keep transient failures for
+    /// a later drag instead of dropping their saved size.
+    private func pruneUnreadableRestoreSizes() {
+        for window in Array(preSnapSizes.keys) where AXWindow.frameWithError(of: window.element).error == .invalidUIElement {
+            preSnapSizes.removeValue(forKey: window)
         }
     }
 
@@ -160,16 +155,17 @@ final class SnapManager {
             guard frame.size == initialFrame.size, frame.origin != initialFrame.origin else { return }
             isWindowMoving = true
             lockedSize = frame.size
-            // A move confirmed: this is the one AX frame read this drag needs
-            // (besides the drop). Restore only if this drag actually started
-            // from the frame Halfwin snapped it to — otherwise the entry is
-            // stale and stays dropped from pruneUnreadableSnapInfo/here.
-            if let info = snappedInfo.removeValue(forKey: draggedWindow), SnapGeometry.isClose(initialFrame, info.target, tolerance: 1) {
-                SnapAssistManager.forgetRememberedSnap(window: draggedWindow)
-                restoreSize(info.preSnapSize, current: frame, window: draggedWindow)
-                lockedSize = info.preSnapSize
+            // A confirmed move uses the registry's latest frame, including a
+            // manual edge resize, as the restore guard.
+            let registry = SnapWindowRegistry.shared
+            if let size = preSnapSizes.removeValue(forKey: draggedWindow),
+               let record = registry.record(for: draggedWindow), record.state == .active,
+               SnapGeometry.isClose(initialFrame, record.frame, tolerance: 1) {
+                registry.unsnap(draggedWindow)
+                restoreSize(size, current: frame, window: draggedWindow)
+                lockedSize = size
             } else {
-                SnapAssistManager.forgetRememberedSnap(window: draggedWindow)
+                registry.unsnap(draggedWindow)
             }
         }
 
@@ -239,7 +235,7 @@ final class SnapManager {
 
         let zone = Zone(screen: screen, position: position, action: action)
         if zone != currentZone, SnapGeometry.isHalf(action) {
-            refreshFillNeighbors(on: screen)
+            refreshFillNeighbors(on: screen, excluding: window)
         }
         currentZone = zone
 
@@ -263,13 +259,14 @@ final class SnapManager {
     }
 
     private func endDrag() {
-        var snapNotification: (window: AXWindow, action: SnapAction, screen: NSScreen)?
+        var snapNotification: (window: AXWindow, action: SnapAction, screen: NSScreen, frame: CGRect)?
         defer {
             footprint.hide()
             resetDrag()
             if let notification = snapNotification {
                 DispatchQueue.main.async {
-                    SnapEvents.didSnap(window: notification.window, action: notification.action, screen: notification.screen)
+                    SnapEvents.didSnap(window: notification.window, action: notification.action,
+                                       screen: notification.screen, frame: notification.frame)
                 }
             }
         }
@@ -278,13 +275,10 @@ final class SnapManager {
         if let currentDropZone {
             let target = layoutMenu.applyDrop(currentDropZone)
             if case .preset(.restore) = currentDropZone {
-                snappedInfo.removeValue(forKey: draggedWindow)
-            } else if let target {
-                let actual = draggedWindow.frame ?? target
-                if !SnapGeometry.isClose(actual, target) {
-                    LayoutMenuManager.rememberMove(window: draggedWindow, target: actual, currentFrame: target)
-                }
-                snappedInfo[draggedWindow] = (target: actual, preSnapSize: size)
+                preSnapSizes.removeValue(forKey: draggedWindow)
+                SnapWindowRegistry.shared.unsnap(draggedWindow)
+            } else if target != nil {
+                preSnapSizes[draggedWindow] = size
             }
             return
         }
@@ -297,8 +291,8 @@ final class SnapManager {
         // there — a failed AX write shouldn't let a later drag "restore" to
         // a size it was never snapped from.
         if let readBack = draggedWindow.frame, SnapGeometry.isClose(readBack, filledTarget, tolerance: 2) {
-            snappedInfo[draggedWindow] = (target: filledTarget, preSnapSize: frame.size)
-            snapNotification = (draggedWindow, zone.action, zone.screen)
+            preSnapSizes[draggedWindow] = frame.size
+            snapNotification = (draggedWindow, zone.action, zone.screen, readBack)
         }
     }
 
@@ -338,17 +332,16 @@ final class SnapManager {
 
     private func filledFrame(for action: SnapAction, base: CGRect, screen: NSScreen, excluding window: AXWindow) -> CGRect {
         guard settings.fillAvailableSpace, SnapGeometry.isHalf(action) else { return base }
-        if dragNeighborScreen != screen { refreshFillNeighbors(on: screen) }
-        let neighbors = SnapAssistManager.fillNeighborFrames(for: action, on: screen, excluding: window,
-                                                             from: dragNeighborFrames)
+        if dragNeighborScreen != screen { refreshFillNeighbors(on: screen, excluding: window) }
         return SnapGeometry.fillFrame(for: action, fixedFrame: base, visibleFrame: screen.visibleFrame,
-                                      snappedFrames: neighbors) ?? base
+                                      snappedFrames: dragNeighborFrames) ?? base
     }
 
-    private func refreshFillNeighbors(on screen: NSScreen) {
+    private func refreshFillNeighbors(on screen: NSScreen, excluding window: AXWindow) {
         dragNeighborScreen = screen
+        SnapWindowRegistry.shared.validate()
         dragNeighborFrames = settings.fillAvailableSpace
-            ? SnapAssistManager.rememberedSnapFrames(on: screen) : [:]
+            ? SnapWindowRegistry.shared.fillNeighborFrames(on: screen, excluding: window) : []
     }
 
     private func showPreview(_ frame: CGRect) {

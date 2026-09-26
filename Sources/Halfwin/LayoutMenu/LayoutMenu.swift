@@ -231,7 +231,7 @@ final class LayoutMenuManager {
     private(set) var isDropBarVisible = false
     private var dropStartFrame: CGRect?
 
-    /// Pre-move frame per window, the same shape as `SnapManager.snappedInfo`:
+    /// The last target and the original frame, keyed by window:
     /// remembers what to restore to, dropped once the window has moved away
     /// from where this menu last put it.
     nonisolated(unsafe) private static var lastMoved: [AXWindow: (target: CGRect, preMove: CGRect)] = [:]
@@ -560,6 +560,7 @@ final class LayoutMenuManager {
     private func showPanel(on screen: NSScreen, targetWindow selectedWindow: AXWindow? = nil) {
         cancelDwell()
         guard Permissions.accessibilityGranted else { return }
+        SnapWindowRegistry.shared.validate()
         pruneUnreadableRestoreInfo()
         targetWindow = selectedWindow ?? AXWindow.focusedWindow()
         keyboardOpened = selectedWindow != nil
@@ -577,6 +578,7 @@ final class LayoutMenuManager {
     func showDropBar(on screen: NSScreen, for window: AXWindow, startFrame: CGRect) {
         cancelDwell()
         guard Permissions.accessibilityGranted else { return }
+        SnapWindowRegistry.shared.validate()
         pruneUnreadableRestoreInfo()
         targetWindow = window
         keyboardOpened = false
@@ -724,6 +726,7 @@ final class LayoutMenuManager {
         window.setFrame(info.preMove)
         guard let readBack = window.frame, SnapGeometry.isClose(readBack, info.preMove) else { return nil }
         Self.lastMoved.removeValue(forKey: window)
+        SnapWindowRegistry.shared.unsnap(window)
         return readBack
     }
 
@@ -732,7 +735,7 @@ final class LayoutMenuManager {
     /// writes can settle a point or two off, or be clamped by the app's own
     /// min size) so a later restore-eligibility check compares against
     /// reality. Carries the original pre-move frame forward across repeated
-    /// picks, the same way `SnapManager.snappedInfo` does.
+    /// picks.
     @discardableResult
     private func apply(_ target: CGRect, to window: AXWindow, currentFrame: CGRect,
                        preMove explicitPreMove: CGRect? = nil,
@@ -749,7 +752,7 @@ final class LayoutMenuManager {
         if let readBack = window.frame {
             Self.lastMoved[window] = (target: readBack, preMove: preMove)
             if SnapGeometry.isClose(readBack, target) {
-                SnapEvents.didSnap(window: window, action: action, screen: screen, origin: .layoutMenu)
+                SnapEvents.didSnap(window: window, action: action, screen: screen, origin: .layoutMenu, frame: readBack)
             }
             return readBack
         }
@@ -771,7 +774,7 @@ final class LayoutMenuManager {
         var choices: [String: [SnapWindowChoice]] = [:]
 
         for layout in SnapMultiWindowLayout.allCases where layout != .halves {
-            let windows = SnapAssistManager.rememberedWindows(for: layout, on: screen)
+            let windows = SnapWindowRegistry.shared.zoneOccupants(for: layout, on: screen)
                 .filter { $0.value != targetWindow }
             remembered[layout.title] = windows
 

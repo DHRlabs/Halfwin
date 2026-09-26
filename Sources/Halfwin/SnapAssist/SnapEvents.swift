@@ -8,7 +8,9 @@ enum SnapOrigin {
 enum SnapEvents {
     nonisolated(unsafe) static var handler: ((AXWindow, SnapAction, NSScreen, SnapOrigin) -> Void)?
 
-    static func didSnap(window: AXWindow, action: SnapAction, screen: NSScreen, origin: SnapOrigin = .other) {
+    static func didSnap(window: AXWindow, action: SnapAction, screen: NSScreen,
+                        origin: SnapOrigin = .other, frame: CGRect? = nil) {
+        SnapWindowRegistry.shared.commitSnap(window: window, action: action, screen: screen, frame: frame)
         handler?(window, action, screen, origin)
     }
 }

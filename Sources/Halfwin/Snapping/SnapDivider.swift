@@ -1,25 +1,12 @@
 import AppKit
 
 /// Shows a handle at visible shared snap edges and links divider and native
-/// edge resizing. The cached frame and z-order snapshot is refreshed on snap
-/// changes, display/Space changes, and once a second while near a seam.
+/// edge resizing. Snap frames and visibility live in SnapWindowRegistry.
 final class SnapDividerManager {
-    private enum Axis: Equatable { case vertical, horizontal }
-    private enum Side: Equatable { case low, high }
-
-    private struct Pane {
-        let window: AXWindow
-        let windowID: CGWindowID
-        var frame: CGRect
-    }
-
-    private struct Divider {
-        let axis: Axis
-        var coordinate: CGFloat
-        var range: ClosedRange<CGFloat>
-        var low: [Pane]
-        var high: [Pane]
-    }
+    private typealias Axis = SnapSeamAxis
+    private typealias Side = SnapSeamSide
+    private typealias Pane = SnapPane
+    private typealias Divider = SnapSeam
 
     private struct ResizeSession {
         var divider: Divider
@@ -32,14 +19,9 @@ final class SnapDividerManager {
     private var validationTimer: Timer?
     private var resizeSession: ResizeSession?
     private var dividerDrag = false
-    private var snapshot: SnapAssistSnapshot?
-    private var dividers: [Divider] = []
-    private var cacheGeneration = -1
-    private var lastCacheScan: TimeInterval = 0
     private var lastWriteTime: TimeInterval = 0
-    private var potentialSnapWindowDrag = false
+    private var draggedSnapWindow: AXWindow?
     private var movedSnapWindow = false
-    private let onFrameChanged: (AXWindow, CGRect) -> Void
     private var spaceObserver: NSObjectProtocol?
     private var screenObserver: NSObjectProtocol?
     private var activationObserver: NSObjectProtocol?
@@ -50,8 +32,7 @@ final class SnapDividerManager {
         mouseUp: { [weak self] in self?.endDividerDrag() }
     )
 
-    init(onFrameChanged: @escaping (AXWindow, CGRect) -> Void) {
-        self.onFrameChanged = onFrameChanged
+    init() {
         spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.activeSpaceDidChangeNotification, object: nil, queue: .main
         ) { [weak self] _ in self?.invalidateAndRebuild() }
@@ -77,10 +58,11 @@ final class SnapDividerManager {
         guard self.enabled != enabled else { return }
         self.enabled = enabled
         if enabled {
+            SnapWindowRegistry.shared.registerHelperWindow(panel.windowNumber)
             monitor = NSEvent.addGlobalMonitorForEvents(
                 matching: [.mouseMoved, .leftMouseDown, .leftMouseDragged, .leftMouseUp]
             ) { [weak self] in self?.handle($0) }
-            rebuildCache()
+            SnapWindowRegistry.shared.validate()
             updateHover(at: NSEvent.mouseLocation)
         } else {
             if let monitor { NSEvent.removeMonitor(monitor) }
@@ -89,10 +71,7 @@ final class SnapDividerManager {
             validationTimer = nil
             resizeSession = nil
             dividerDrag = false
-            dividers.removeAll()
-            snapshot = nil
-            cacheGeneration = -1
-            potentialSnapWindowDrag = false
+            draggedSnapWindow = nil
             movedSnapWindow = false
             panel.hide()
         }
@@ -111,7 +90,7 @@ final class SnapDividerManager {
             resizeSession = nil
             dividerDrag = false
             refreshCacheIfNeeded(at: point, force: nearCachedSeam(point))
-            potentialSnapWindowDrag = snapshot?.panes.contains { $0.frame.contains(point) } == true
+            draggedSnapWindow = SnapWindowRegistry.shared.snappedWindow(at: point)
             movedSnapWindow = false
             guard let divider = divider(at: point), let owner = paneUnderCursor(point, in: divider) else {
                 hideDivider()
@@ -121,17 +100,15 @@ final class SnapDividerManager {
                                           ownerSide: divider.low.contains { $0.window == owner.window } ? .low : .high)
             hideDivider()
         case .leftMouseDragged:
-            if potentialSnapWindowDrag { movedSnapWindow = true }
+            if draggedSnapWindow != nil { movedSnapWindow = true }
             continueNativeResize()
         case .leftMouseUp:
             if let session = resizeSession, session.owner != nil {
                 continueNativeResize(force: true)
                 resizeSession = nil
             }
-            if movedSnapWindow {
-                rebuildCache()
-            }
-            potentialSnapWindowDrag = false
+            if movedSnapWindow { SnapWindowRegistry.shared.validate() }
+            draggedSnapWindow = nil
             movedSnapWindow = false
             refreshCacheIfNeeded(at: point)
             updateHover(at: point)
@@ -141,24 +118,16 @@ final class SnapDividerManager {
     }
 
     private func refreshCacheIfNeeded(at point: CGPoint, force: Bool = false) {
-        let generationChanged = cacheGeneration != SnapAssistManager.currentSnapFrameGeneration
-        let expiredNearSeam = nearCachedSeam(point) &&
-            ProcessInfo.processInfo.systemUptime - lastCacheScan >= 1
-        if force || generationChanged || expiredNearSeam { rebuildCache() }
+        if force {
+            SnapWindowRegistry.shared.validate()
+        } else if nearCachedSeam(point) {
+            SnapWindowRegistry.shared.validateIfNeeded(interval: 1)
+        }
     }
 
     private func invalidateAndRebuild() {
         guard enabled else { return }
-        rebuildCache()
         updateHover(at: NSEvent.mouseLocation)
-    }
-
-    private func rebuildCache() {
-        let snapshot = SnapAssistManager.rememberedSnapSnapshot()
-        self.snapshot = snapshot
-        cacheGeneration = snapshot.generation
-        lastCacheScan = ProcessInfo.processInfo.systemUptime
-        dividers = makeDividers(from: snapshot)
     }
 
     private func updateHover(at point: CGPoint) {
@@ -183,176 +152,63 @@ final class SnapDividerManager {
         validationTimer = nil
     }
 
+    private func allSeams() -> [Divider] {
+        NSScreen.screens.flatMap { SnapWindowRegistry.shared.seams(on: SnapDisplayID($0)) }
+    }
+
     private func nearCachedSeam(_ point: CGPoint) -> Bool {
-        dividers.contains { divider in
-            switch divider.axis {
-            case .vertical:
-                return abs(point.x - divider.coordinate) <= 6 && divider.range.contains(point.y)
-            case .horizontal:
-                return abs(point.y - divider.coordinate) <= 6 && divider.range.contains(point.x)
+        allSeams().contains { seam in
+            switch seam.axis {
+            case .vertical: return abs(point.x - seam.coordinate) <= 6 && seam.range.contains(point.y)
+            case .horizontal: return abs(point.y - seam.coordinate) <= 6 && seam.range.contains(point.x)
             }
         }
     }
 
     private func divider(at point: CGPoint) -> Divider? {
-        guard let snapshot else { return nil }
-        return dividers
-            .filter { divider in
-                let along: CGFloat
-                let lowPoint: CGPoint
-                let highPoint: CGPoint
-                switch divider.axis {
-                case .vertical:
-                    along = point.y
-                    lowPoint = CGPoint(x: divider.coordinate - 4, y: along)
-                    highPoint = CGPoint(x: divider.coordinate + 4, y: along)
-                    guard abs(point.x - divider.coordinate) <= 6, divider.range.contains(along) else { return false }
-                case .horizontal:
-                    along = point.x
-                    lowPoint = CGPoint(x: along, y: divider.coordinate - 4)
-                    highPoint = CGPoint(x: along, y: divider.coordinate + 4)
-                    guard abs(point.y - divider.coordinate) <= 6, divider.range.contains(along) else { return false }
-                }
-                return divider.low.contains { $0.windowID == frontmostID(at: lowPoint, in: snapshot) } &&
-                    divider.high.contains { $0.windowID == frontmostID(at: highPoint, in: snapshot) }
+        let registry = SnapWindowRegistry.shared
+        return allSeams().filter { seam in
+            let along: CGFloat
+            let lowPoint: CGPoint
+            let highPoint: CGPoint
+            switch seam.axis {
+            case .vertical:
+                along = point.y
+                lowPoint = CGPoint(x: seam.coordinate - 4, y: along)
+                highPoint = CGPoint(x: seam.coordinate + 4, y: along)
+                guard abs(point.x - seam.coordinate) <= 6, seam.range.contains(along) else { return false }
+            case .horizontal:
+                along = point.x
+                lowPoint = CGPoint(x: along, y: seam.coordinate - 4)
+                highPoint = CGPoint(x: along, y: seam.coordinate + 4)
+                guard abs(point.y - seam.coordinate) <= 6, seam.range.contains(along) else { return false }
             }
-            .min { distance($0, point) < distance($1, point) }
+            return seam.low.contains { $0.windowID == registry.frontmostWindowID(at: lowPoint) } &&
+                seam.high.contains { $0.windowID == registry.frontmostWindowID(at: highPoint) }
+        }.min { distance($0, point) < distance($1, point) }
     }
 
-    private func paneUnderCursor(_ point: CGPoint, in divider: Divider) -> Pane? {
-        guard let snapshot else { return nil }
+    private func paneUnderCursor(_ point: CGPoint, in seam: Divider) -> Pane? {
         let side: Side
         let towardLow: CGPoint
         let towardHigh: CGPoint
-        switch divider.axis {
+        switch seam.axis {
         case .vertical:
-            side = point.x < divider.coordinate ? .low : .high
-            towardLow = CGPoint(x: divider.coordinate - 4, y: point.y)
-            towardHigh = CGPoint(x: divider.coordinate + 4, y: point.y)
+            side = point.x < seam.coordinate ? .low : .high
+            towardLow = CGPoint(x: seam.coordinate - 4, y: point.y)
+            towardHigh = CGPoint(x: seam.coordinate + 4, y: point.y)
         case .horizontal:
-            side = point.y < divider.coordinate ? .low : .high
-            towardLow = CGPoint(x: point.x, y: divider.coordinate - 4)
-            towardHigh = CGPoint(x: point.x, y: divider.coordinate + 4)
+            side = point.y < seam.coordinate ? .low : .high
+            towardLow = CGPoint(x: point.x, y: seam.coordinate - 4)
+            towardHigh = CGPoint(x: point.x, y: seam.coordinate + 4)
         }
         let target = side == .low ? towardLow : towardHigh
-        let id = frontmostID(at: target, in: snapshot)
-        return (side == .low ? divider.low : divider.high).first { $0.windowID == id }
+        let id = SnapWindowRegistry.shared.frontmostWindowID(at: target)
+        return (side == .low ? seam.low : seam.high).first { $0.windowID == id }
     }
 
-    private func makeDividers(from snapshot: SnapAssistSnapshot) -> [Divider] {
-        var groups: [Divider] = []
-        for screen in NSScreen.screens {
-            let panes = snapshot.panes.filter { $0.screen == screen }
-                .map { Pane(window: $0.window, windowID: $0.windowID, frame: $0.frame) }
-            guard panes.count > 1 else { continue }
-            for first in panes.indices {
-                for second in panes.indices where second > first {
-                    let a = panes[first]
-                    let b = panes[second]
-                    let minY = max(a.frame.minY, b.frame.minY)
-                    let maxY = min(a.frame.maxY, b.frame.maxY)
-                    if maxY - minY > 20 {
-                        let overlapY = minY...maxY
-                        if abs(a.frame.maxX - b.frame.minX) <= 2 {
-                            add(axis: .vertical, coordinate: (a.frame.maxX + b.frame.minX) / 2,
-                                range: overlapY, low: a, high: b, to: &groups)
-                        } else if abs(b.frame.maxX - a.frame.minX) <= 2 {
-                            add(axis: .vertical, coordinate: (b.frame.maxX + a.frame.minX) / 2,
-                                range: overlapY, low: b, high: a, to: &groups)
-                        }
-                    }
-                    let minX = max(a.frame.minX, b.frame.minX)
-                    let maxX = min(a.frame.maxX, b.frame.maxX)
-                    if maxX - minX > 20 {
-                        let overlapX = minX...maxX
-                        if abs(a.frame.maxY - b.frame.minY) <= 2 {
-                            add(axis: .horizontal, coordinate: (a.frame.maxY + b.frame.minY) / 2,
-                                range: overlapX, low: a, high: b, to: &groups)
-                        } else if abs(b.frame.maxY - a.frame.minY) <= 2 {
-                            add(axis: .horizontal, coordinate: (b.frame.maxY + a.frame.minY) / 2,
-                                range: overlapX, low: b, high: a, to: &groups)
-                        }
-                    }
-                }
-            }
-        }
-        return groups.flatMap { visibleSegments(of: $0, in: snapshot) }
-    }
-
-    private func add(axis: Axis, coordinate: CGFloat, range: ClosedRange<CGFloat>, low: Pane, high: Pane,
-                     to groups: inout [Divider]) {
-        if let index = groups.firstIndex(where: { $0.axis == axis && abs($0.coordinate - coordinate) <= 2 }) {
-            var group = groups[index]
-            group.coordinate = (group.coordinate + coordinate) / 2
-            group.range = min(group.range.lowerBound, range.lowerBound)...max(group.range.upperBound, range.upperBound)
-            if !group.low.contains(where: { $0.window == low.window }) { group.low.append(low) }
-            if !group.high.contains(where: { $0.window == high.window }) { group.high.append(high) }
-            groups[index] = group
-        } else {
-            groups.append(Divider(axis: axis, coordinate: coordinate, range: range, low: [low], high: [high]))
-        }
-    }
-
-    private func visibleSegments(of divider: Divider, in snapshot: SnapAssistSnapshot) -> [Divider] {
-        let endpoints: [CGFloat]
-        switch divider.axis {
-        case .vertical:
-            endpoints = snapshot.windows.flatMap { [$0.frame.minY, $0.frame.maxY] } +
-                divider.low.flatMap { [$0.frame.minY, $0.frame.maxY] } +
-                divider.high.flatMap { [$0.frame.minY, $0.frame.maxY] }
-        case .horizontal:
-            endpoints = snapshot.windows.flatMap { [$0.frame.minX, $0.frame.maxX] } +
-                divider.low.flatMap { [$0.frame.minX, $0.frame.maxX] } +
-                divider.high.flatMap { [$0.frame.minX, $0.frame.maxX] }
-        }
-        let cuts = Set([divider.range.lowerBound, divider.range.upperBound] +
-            endpoints.filter { $0 > divider.range.lowerBound && $0 < divider.range.upperBound }).sorted()
-        var visible: [ClosedRange<CGFloat>] = []
-        for index in 1..<cuts.count {
-            let lower = cuts[index - 1]
-            let upper = cuts[index]
-            guard upper - lower > 1 else { continue }
-            let along = (lower + upper) / 2
-            let lowPoint: CGPoint
-            let highPoint: CGPoint
-            switch divider.axis {
-            case .vertical:
-                lowPoint = CGPoint(x: divider.coordinate - 4, y: along)
-                highPoint = CGPoint(x: divider.coordinate + 4, y: along)
-            case .horizontal:
-                lowPoint = CGPoint(x: along, y: divider.coordinate - 4)
-                highPoint = CGPoint(x: along, y: divider.coordinate + 4)
-            }
-            if divider.low.contains(where: { $0.windowID == frontmostID(at: lowPoint, in: snapshot) }) &&
-                divider.high.contains(where: { $0.windowID == frontmostID(at: highPoint, in: snapshot) }) {
-                visible.append(lower...upper)
-            }
-        }
-        return merge(visible).map {
-            var result = divider
-            result.range = $0
-            return result
-        }
-    }
-
-    private func merge(_ ranges: [ClosedRange<CGFloat>]) -> [ClosedRange<CGFloat>] {
-        var result: [ClosedRange<CGFloat>] = []
-        for range in ranges.sorted(by: { $0.lowerBound < $1.lowerBound }) {
-            if let last = result.last, range.lowerBound <= last.upperBound + 1 {
-                result[result.count - 1] = last.lowerBound...max(last.upperBound, range.upperBound)
-            } else {
-                result.append(range)
-            }
-        }
-        return result
-    }
-
-    private func frontmostID(at point: CGPoint, in snapshot: SnapAssistSnapshot) -> CGWindowID? {
-        snapshot.windows.first { $0.frame.contains(point) }?.id
-    }
-
-    private func distance(_ divider: Divider, _ point: CGPoint) -> CGFloat {
-        abs((divider.axis == .vertical ? point.x : point.y) - divider.coordinate)
+    private func distance(_ seam: Divider, _ point: CGPoint) -> CGFloat {
+        abs((seam.axis == .vertical ? point.x : point.y) - seam.coordinate)
     }
 
     private func panelFrame(for divider: Divider) -> CGRect {
@@ -367,7 +223,7 @@ final class SnapDividerManager {
     }
 
     private func beginDividerDrag() {
-        rebuildCache()
+        SnapWindowRegistry.shared.validate()
         guard let divider = divider(at: NSEvent.mouseLocation) else {
             hideDivider()
             return
@@ -391,7 +247,7 @@ final class SnapDividerManager {
         dragDivider(force: true)
         dividerDrag = false
         resizeSession = nil
-        refreshCacheIfNeeded(at: NSEvent.mouseLocation, force: true)
+        SnapWindowRegistry.shared.validate()
         updateHover(at: NSEvent.mouseLocation)
     }
 
@@ -410,7 +266,6 @@ final class SnapDividerManager {
         }
         if SnapGeometry.isClose(oldFrame, ownerFrame, tolerance: 0) { return }
         guard validEdgeResize(from: oldFrame, to: ownerFrame, axis: session.divider.axis, side: ownerSide) else {
-            resizeSession = nil
             return
         }
         resize(session: session, to: edge(ownerFrame, axis: session.divider.axis, side: ownerSide), force: force)
@@ -419,11 +274,13 @@ final class SnapDividerManager {
     private func validEdgeResize(from old: CGRect, to new: CGRect, axis: Axis, side: Side) -> Bool {
         switch axis {
         case .vertical:
-            guard abs(old.minY - new.minY) <= 2, abs(old.height - new.height) <= 2 else { return false }
-            return side == .low ? abs(old.minX - new.minX) <= 2 : abs(old.maxX - new.maxX) <= 2
+            guard abs(old.width - new.width) > 0.1,
+                  abs(old.minY - new.minY) <= 2, abs(old.height - new.height) <= 2 else { return false }
+            return side == .low ? abs(old.minX - new.minX) <= 1 : abs(old.maxX - new.maxX) <= 1
         case .horizontal:
-            guard abs(old.minX - new.minX) <= 2, abs(old.width - new.width) <= 2 else { return false }
-            return side == .low ? abs(old.minY - new.minY) <= 2 : abs(old.maxY - new.maxY) <= 2
+            guard abs(old.height - new.height) > 0.1,
+                  abs(old.minX - new.minX) <= 2, abs(old.width - new.width) <= 2 else { return false }
+            return side == .low ? abs(old.minY - new.minY) <= 1 : abs(old.maxY - new.maxY) <= 1
         }
     }
 
@@ -502,11 +359,8 @@ final class SnapDividerManager {
         for index in divider.high.indices { divider.high[index].frame = highRead[index] }
         divider.coordinate = coordinate
         for (pane, frame) in zip(divider.low + divider.high, lowRead + highRead) {
-            SnapAssistManager.updateRememberedSnapFrame(window: pane.window, frame: frame)
-            onFrameChanged(pane.window, frame)
-            updateCachedFrame(pane, frame: frame)
+            SnapWindowRegistry.shared.recordFrameWrite(window: pane.window, frame: frame)
         }
-        rebuildDividersFromCache()
         resizeSession = ResizeSession(divider: divider, owner: session.owner, ownerSide: session.ownerSide)
         if dividerDrag {
             lastWriteTime = now
@@ -535,28 +389,6 @@ final class SnapDividerManager {
             actual = readBack
         }
         return actual
-    }
-
-    private func updateCachedFrame(_ pane: Pane, frame: CGRect) {
-        guard var snapshot else { return }
-        snapshot.panes = snapshot.panes.map {
-            var value = $0
-            if value.window == pane.window { value.frame = frame }
-            return value
-        }
-        snapshot.windows = snapshot.windows.map {
-            var value = $0
-            if value.id == pane.windowID { value.frame = frame }
-            return value
-        }
-        snapshot.generation = SnapAssistManager.currentSnapFrameGeneration
-        self.snapshot = snapshot
-        cacheGeneration = snapshot.generation
-    }
-
-    private func rebuildDividersFromCache() {
-        guard let snapshot else { return }
-        dividers = makeDividers(from: snapshot)
     }
 
     private func limit(_ frame: CGRect, axis: Axis, side: Side) -> CGFloat {
@@ -643,6 +475,8 @@ private final class SnapDividerView: NSView {
     }
 
     required init?(coder: NSCoder) { nil }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
