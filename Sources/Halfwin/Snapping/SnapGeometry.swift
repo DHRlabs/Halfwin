@@ -65,6 +65,58 @@ enum SnapGeometry {
             abs(a.width - b.width) <= tolerance && abs(a.height - b.height) <= tolerance
     }
 
+    /// Extends a full-height or full-width edge zone to the nearest snapped
+    /// pane across from it. Partial-height corner zones stay fixed.
+    static func fillFrame(for action: SnapAction, fixedFrame: CGRect, visibleFrame: CGRect,
+                          snappedFrames: [CGRect]) -> CGRect? {
+        guard action != .maximize, action != .center,
+              fixedFrame.width > 0, fixedFrame.height > 0 else { return nil }
+        let tolerance: CGFloat = 2
+        let spansHeight = abs(fixedFrame.minY - visibleFrame.minY) <= tolerance &&
+            abs(fixedFrame.maxY - visibleFrame.maxY) <= tolerance
+        let spansWidth = abs(fixedFrame.minX - visibleFrame.minX) <= tolerance &&
+            abs(fixedFrame.maxX - visibleFrame.maxX) <= tolerance
+        if spansHeight, abs(fixedFrame.minX - visibleFrame.minX) <= tolerance {
+            guard !snappedFrames.contains(where: { $0.minX <= visibleFrame.minX + tolerance && $0.maxX > visibleFrame.minX + tolerance }),
+                  let edge = snappedFrames.map(\.minX).filter({ $0 > visibleFrame.minX + tolerance }).min(),
+                  covers(snappedFrames.filter { abs($0.minX - edge) <= tolerance && $0.maxX > edge + tolerance }
+                    .map { $0.minY...$0.maxY }, from: visibleFrame.minY, to: visibleFrame.maxY) else { return nil }
+            return CGRect(x: visibleFrame.minX, y: visibleFrame.minY, width: edge - visibleFrame.minX, height: visibleFrame.height)
+        }
+        if spansHeight, abs(fixedFrame.maxX - visibleFrame.maxX) <= tolerance {
+            guard !snappedFrames.contains(where: { $0.maxX >= visibleFrame.maxX - tolerance && $0.minX < visibleFrame.maxX - tolerance }),
+                  let edge = snappedFrames.map(\.maxX).filter({ $0 < visibleFrame.maxX - tolerance }).max(),
+                  covers(snappedFrames.filter { abs($0.maxX - edge) <= tolerance && $0.minX < edge - tolerance }
+                    .map { $0.minY...$0.maxY }, from: visibleFrame.minY, to: visibleFrame.maxY) else { return nil }
+            return CGRect(x: edge, y: visibleFrame.minY, width: visibleFrame.maxX - edge, height: visibleFrame.height)
+        }
+        if spansWidth, abs(fixedFrame.maxY - visibleFrame.maxY) <= tolerance {
+            guard !snappedFrames.contains(where: { $0.maxY >= visibleFrame.maxY - tolerance && $0.minY < visibleFrame.maxY - tolerance }),
+                  let edge = snappedFrames.map(\.maxY).filter({ $0 < visibleFrame.maxY - tolerance }).max(),
+                  covers(snappedFrames.filter { abs($0.maxY - edge) <= tolerance && $0.minY < edge - tolerance }
+                    .map { $0.minX...$0.maxX }, from: visibleFrame.minX, to: visibleFrame.maxX) else { return nil }
+            return CGRect(x: visibleFrame.minX, y: edge, width: visibleFrame.width, height: visibleFrame.maxY - edge)
+        }
+        if spansWidth, abs(fixedFrame.minY - visibleFrame.minY) <= tolerance {
+            guard !snappedFrames.contains(where: { $0.minY <= visibleFrame.minY + tolerance && $0.maxY > visibleFrame.minY + tolerance }),
+                  let edge = snappedFrames.map(\.minY).filter({ $0 > visibleFrame.minY + tolerance }).min(),
+                  covers(snappedFrames.filter { abs($0.minY - edge) <= tolerance && $0.maxY > edge + tolerance }
+                    .map { $0.minX...$0.maxX }, from: visibleFrame.minX, to: visibleFrame.maxX) else { return nil }
+            return CGRect(x: visibleFrame.minX, y: visibleFrame.minY, width: visibleFrame.width, height: edge - visibleFrame.minY)
+        }
+        return nil
+    }
+
+    private static func covers(_ ranges: [ClosedRange<CGFloat>], from lower: CGFloat, to upper: CGFloat) -> Bool {
+        var edge = lower
+        for range in ranges.sorted(by: { $0.lowerBound < $1.lowerBound }) {
+            guard range.lowerBound <= edge + 2 else { return false }
+            edge = max(edge, range.upperBound)
+            if edge >= upper - 2 { return true }
+        }
+        return false
+    }
+
     /// Rectangle's `leftTopBottomHalf`/`rightTopBottomHalf` compound: near a
     /// top or bottom corner the edge acts like that half instead.
     static func resolveHalfCompound(side: Side, cursor: CGPoint, screenFrame: CGRect) -> SnapAction {
