@@ -50,7 +50,8 @@ final class WindowExtrasManager {
     private var swallowedMouseDownEventNumber: Int64?
     private var swallowedCommandArrowKeyCodes = Set<Int64>()
     private var hiddenApplications: [NSRunningApplication]?
-    private var pushedWindows: [AXWindow: (frame: CGRect, pushedFrame: CGRect, application: NSRunningApplication)] = [:]
+    private var hiddenAt: TimeInterval?
+    private var pushedWindows: [AXWindow: (frame: CGRect, pushedFrame: CGRect, windowID: CGWindowID, application: NSRunningApplication)] = [:]
     private var applicationToReactivate: NSRunningApplication?
     private let frameMemory = WindowFrameMemory()
     private var screenObserver: NSObjectProtocol?
@@ -65,7 +66,14 @@ final class WindowExtrasManager {
         ) { [weak self] notification in
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             DispatchQueue.main.async {
-                guard let self, let window = AXWindow.focusedWindow(of: app), self.pushedWindows[window] != nil else { return }
+                guard let self else { return }
+                if let hiddenAt = self.hiddenAt, ProcessInfo.processInfo.systemUptime - hiddenAt > 1 {
+                    self.hiddenApplications = nil
+                    self.hiddenAt = nil
+                    self.clearDesktopRestoreApplicationIfNeeded()
+                }
+                guard !self.pushedWindows.isEmpty,
+                      let window = AXWindow.focusedWindow(of: app), self.pushedWindows[window] != nil else { return }
                 self.restorePushedWindow(window)
             }
         }
@@ -155,19 +163,11 @@ final class WindowExtrasManager {
                 DispatchQueue.main.async { [weak self] in self?.toggleDesktop() }
                 return nil
             }
-            if showDesktopEnabled, !pushedWindows.isEmpty, let hit = AXWindow.hitTest(at: point),
-               let pushed = pushedWindows[hit.window] {
-                let (frame, error) = AXWindow.frameWithError(of: hit.window.element)
-                if error == .success, let frame {
-                    if SnapGeometry.isClose(frame, pushed.pushedFrame, tolerance: 8) {
-                        swallowMouseDown(event)
-                        DispatchQueue.main.async { [weak self] in self?.restorePushedWindow(hit.window) }
-                        return nil
-                    }
-                    pushedWindows.removeValue(forKey: hit.window)
-                    ShowDesktopEvents.didForget(hit.window)
-                    clearDesktopRestoreApplicationIfNeeded()
-                }
+            if showDesktopEnabled, !pushedWindows.isEmpty,
+               let pushedWindow = pushedWindow(at: event.location) {
+                swallowMouseDown(event)
+                DispatchQueue.main.async { [weak self] in self?.restorePushedWindow(pushedWindow) }
+                return nil
             }
             let clickCount = event.getIntegerValueField(.mouseEventClickState)
             let candidates = windowClickCandidates(at: event.location, clickCount: clickCount)
@@ -278,6 +278,28 @@ final class WindowExtrasManager {
             break
         }
         return candidates
+    }
+
+    private func pushedWindow(at point: CGPoint) -> AXWindow? {
+        guard let windows = CGWindowListCopyWindowInfo(
+            [.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID
+        ) as? [[String: Any]] else { return nil }
+        for info in windows {
+            guard ((info[kCGWindowAlpha as String] as? NSNumber)?.doubleValue ?? 1) > 0,
+                  let bounds = info[kCGWindowBounds as String] as? NSDictionary,
+                  let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary), frame.contains(point),
+                  let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value else { continue }
+            guard (info[kCGWindowLayer as String] as? Int) == 0 else { return nil }
+            guard let match = pushedWindows.first(where: { $0.value.windowID == id }) else { return nil }
+            guard SnapGeometry.isClose(frame.axFlipped, match.value.pushedFrame, tolerance: 8) else {
+                pushedWindows.removeValue(forKey: match.key)
+                ShowDesktopEvents.didForget(match.key)
+                clearDesktopRestoreApplicationIfNeeded()
+                return nil
+            }
+            return match.key
+        }
+        return nil
     }
 
     private func isEnabledGreenButton(_ element: AXUIElement, window: AXWindow) -> Bool {
@@ -465,6 +487,7 @@ final class WindowExtrasManager {
         }
         guard !applications.isEmpty else { return }
         hiddenApplications = applications
+        hiddenAt = ProcessInfo.processInfo.systemUptime
         applicationToReactivate = NSWorkspace.shared.frontmostApplication
         for application in applications { application.hide() }
     }
@@ -472,7 +495,7 @@ final class WindowExtrasManager {
     private func pushWindowsAside() {
         let choices = NSScreen.screens.flatMap { SnapWindowInventory.choices(on: $0, excluding: []) }
         let previousApplication = NSWorkspace.shared.frontmostApplication
-        var pushed: [AXWindow: (frame: CGRect, pushedFrame: CGRect, application: NSRunningApplication)] = [:]
+        var pushed: [AXWindow: (frame: CGRect, pushedFrame: CGRect, windowID: CGWindowID, application: NSRunningApplication)] = [:]
         for choice in choices {
             let window = choice.window
             guard !choice.application.isHidden, !choice.application.isTerminated,
@@ -498,9 +521,9 @@ final class WindowExtrasManager {
             window.setFrame(target)
             let (movedFrame, moveError) = AXWindow.frameWithError(of: window.element)
             if moveError == .success, let movedFrame, SnapGeometry.isClose(movedFrame, target, tolerance: 4) {
-                pushed[window] = (frame, movedFrame, choice.application)
+                pushed[window] = (frame, movedFrame, choice.id, choice.application)
             } else if moveError != .invalidUIElement && moveError != .success {
-                pushed[window] = (frame, target, choice.application)
+                pushed[window] = (frame, target, choice.id, choice.application)
             } else {
                 ShowDesktopEvents.willChangeFrame(of: window, to: frame, pushedAside: false)
                 if let movedFrame, !SnapGeometry.isClose(movedFrame, frame) { window.setFrame(frame) }
@@ -519,7 +542,7 @@ final class WindowExtrasManager {
     }
 
     @discardableResult
-    private func restorePushedWindow(_ window: AXWindow, to pushed: (frame: CGRect, pushedFrame: CGRect, application: NSRunningApplication)) -> Bool {
+    private func restorePushedWindow(_ window: AXWindow, to pushed: (frame: CGRect, pushedFrame: CGRect, windowID: CGWindowID, application: NSRunningApplication)) -> Bool {
         guard !pushed.application.isTerminated else {
             pushedWindows.removeValue(forKey: window)
             ShowDesktopEvents.didForget(window)
@@ -618,6 +641,7 @@ final class WindowExtrasManager {
     private func restoreHiddenApplications(reactivateApplication: Bool = false) {
         guard let applications = hiddenApplications else { return }
         hiddenApplications = nil
+        hiddenAt = nil
         let previousApplication = applicationToReactivate
         applicationToReactivate = nil
         for application in applications where !application.isTerminated { application.unhide() }

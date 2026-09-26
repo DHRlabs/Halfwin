@@ -161,7 +161,6 @@ final class SnapWindowRegistry {
 
     func validate() {
         guard let windows = readVisibleWindows() else { return }
-        lastValidationTime = ProcessInfo.processInfo.systemUptime
         visibleWindows = windows
 
         for window in Array(records.keys) {
@@ -219,7 +218,14 @@ final class SnapWindowRegistry {
         }
         rebuildZoneOwners()
         rebuildSeams()
+        lastValidationTime = ProcessInfo.processInfo.systemUptime
         NotificationCenter.default.post(name: Self.didValidate, object: self)
+    }
+
+    func refreshVisibleWindows() {
+        guard let windows = readVisibleWindows() else { return }
+        visibleWindows = windows
+        rebuildSeams()
     }
 
     func commitSnap(window: AXWindow, action: SnapAction, screen: NSScreen, frame: CGRect? = nil) {
@@ -247,8 +253,10 @@ final class SnapWindowRegistry {
                     removeRecord(for: other)
                 case .minimized, .hidden:
                     removeRecord(for: other)
-                case .offSpace, .stale:
+                case .offSpace:
                     break
+                case .stale:
+                    removeRecord(for: other)
                 }
             }
         }
@@ -379,9 +387,9 @@ final class SnapWindowRegistry {
                 let maxY = min(a.frame.maxY, b.frame.maxY)
                 if maxY - minY > 20 {
                     let overlap = minY...maxY
-                    if abs(a.frame.maxX - b.frame.minX) <= 2 {
+                    if abs(a.frame.maxX - b.frame.minX) <= SnapGeometry.edgeTolerance {
                         addSeam(.vertical, (a.frame.maxX + b.frame.minX) / 2, overlap, a, b, display, &groups)
-                    } else if abs(b.frame.maxX - a.frame.minX) <= 2 {
+                    } else if abs(b.frame.maxX - a.frame.minX) <= SnapGeometry.edgeTolerance {
                         addSeam(.vertical, (b.frame.maxX + a.frame.minX) / 2, overlap, b, a, display, &groups)
                     }
                 }
@@ -389,9 +397,9 @@ final class SnapWindowRegistry {
                 let maxX = min(a.frame.maxX, b.frame.maxX)
                 if maxX - minX > 20 {
                     let overlap = minX...maxX
-                    if abs(a.frame.maxY - b.frame.minY) <= 2 {
+                    if abs(a.frame.maxY - b.frame.minY) <= SnapGeometry.edgeTolerance {
                         addSeam(.horizontal, (a.frame.maxY + b.frame.minY) / 2, overlap, a, b, display, &groups)
-                    } else if abs(b.frame.maxY - a.frame.minY) <= 2 {
+                    } else if abs(b.frame.maxY - a.frame.minY) <= SnapGeometry.edgeTolerance {
                         addSeam(.horizontal, (b.frame.maxY + a.frame.minY) / 2, overlap, b, a, display, &groups)
                     }
                 }
@@ -402,7 +410,9 @@ final class SnapWindowRegistry {
 
     private func addSeam(_ axis: SnapSeamAxis, _ coordinate: CGFloat, _ range: ClosedRange<CGFloat>,
                          _ low: SnapPane, _ high: SnapPane, _ display: SnapDisplayID, _ groups: inout [SnapSeam]) {
-        if let index = groups.firstIndex(where: { $0.axis == axis && abs($0.coordinate - coordinate) <= 2 }) {
+        if let index = groups.firstIndex(where: {
+            $0.axis == axis && abs($0.coordinate - coordinate) <= SnapGeometry.edgeTolerance
+        }) {
             var group = groups[index]
             group.coordinate = (group.coordinate + coordinate) / 2
             group.range = min(group.range.lowerBound, range.lowerBound)...max(group.range.upperBound, range.upperBound)
@@ -434,18 +444,15 @@ final class SnapWindowRegistry {
             let upper = cuts[index]
             guard upper - lower > 1 else { continue }
             let along = (lower + upper) / 2
-            let lowPoint: CGPoint
-            let highPoint: CGPoint
-            switch seam.axis {
-            case .vertical:
-                lowPoint = CGPoint(x: seam.coordinate - 4, y: along)
-                highPoint = CGPoint(x: seam.coordinate + 4, y: along)
-            case .horizontal:
-                lowPoint = CGPoint(x: along, y: seam.coordinate - 4)
-                highPoint = CGPoint(x: along, y: seam.coordinate + 4)
+            let lowVisible = seam.low.contains { pane in
+                seamTouches(pane, seam: seam, at: along, side: .low) &&
+                    pane.windowID == frontmostWindowID(at: pointInside(pane, seam: seam, along: along, side: .low))
             }
-            if seam.low.contains(where: { $0.windowID == frontmostWindowID(at: lowPoint) }) &&
-                seam.high.contains(where: { $0.windowID == frontmostWindowID(at: highPoint) }) {
+            let highVisible = seam.high.contains { pane in
+                seamTouches(pane, seam: seam, at: along, side: .high) &&
+                    pane.windowID == frontmostWindowID(at: pointInside(pane, seam: seam, along: along, side: .high))
+            }
+            if lowVisible && highVisible {
                 visible.append(lower...upper)
             }
         }
@@ -461,6 +468,29 @@ final class SnapWindowRegistry {
             var segment = seam
             segment.range = range
             return segment
+        }
+    }
+
+    private func seamTouches(_ pane: SnapPane, seam: SnapSeam, at along: CGFloat, side: SnapSeamSide) -> Bool {
+        let edge: CGFloat
+        switch (seam.axis, side) {
+        case (.vertical, .low): edge = pane.frame.maxX
+        case (.vertical, .high): edge = pane.frame.minX
+        case (.horizontal, .low): edge = pane.frame.maxY
+        case (.horizontal, .high): edge = pane.frame.minY
+        }
+        let spans = seam.axis == .vertical
+            ? along >= pane.frame.minY && along <= pane.frame.maxY
+            : along >= pane.frame.minX && along <= pane.frame.maxX
+        return spans && abs(edge - seam.coordinate) <= SnapGeometry.edgeTolerance
+    }
+
+    private func pointInside(_ pane: SnapPane, seam: SnapSeam, along: CGFloat, side: SnapSeamSide) -> CGPoint {
+        switch (seam.axis, side) {
+        case (.vertical, .low): return CGPoint(x: pane.frame.maxX - 1, y: along)
+        case (.vertical, .high): return CGPoint(x: pane.frame.minX + 1, y: along)
+        case (.horizontal, .low): return CGPoint(x: along, y: pane.frame.maxY - 1)
+        case (.horizontal, .high): return CGPoint(x: along, y: pane.frame.minY + 1)
         }
     }
 }
