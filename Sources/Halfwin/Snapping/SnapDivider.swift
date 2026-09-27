@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import os
 
 /// Shows a handle at visible shared snap edges and links divider and native
 /// edge resizing. Snap frames and visibility live in SnapWindowRegistry.
@@ -41,6 +42,7 @@ final class SnapDividerManager {
     private var draggedSnapWindow: AXWindow?
     private var movedSnapWindow = false
     private var registryObserver: NSObjectProtocol?
+    private let diagLogger = Logger(subsystem: "com.dhrlabs.halfwin", category: "diag")
     private lazy var panel = SnapDividerPanel(
         mouseDown: { [weak self] event in self?.beginDividerDrag(event) },
         mouseDragged: { [weak self] in self?.dragDivider() },
@@ -266,7 +268,14 @@ final class SnapDividerManager {
     private func beginDividerDrag(_ event: NSEvent) {
         let point = NSEvent.mouseLocation
         SnapWindowRegistry.shared.refreshVisibleWindows()
-        guard let divider = divider(at: point) else {
+        let divider = divider(at: point)
+        if let divider {
+            let axis = divider.axis == .vertical ? "vertical" : "horizontal"
+            logDiagnostic("snapDivider mouseDown point=\(point) seamFound=true axis=\(axis) coordinate=\(divider.coordinate) low=[\(diagnosticPaneList(divider.low))] high=[\(diagnosticPaneList(divider.high))]") // DIAG remove after live capture
+        } else {
+            logDiagnostic("snapDivider mouseDown point=\(point) seamFound=false") // DIAG remove after live capture
+        }
+        guard let divider else {
             hideDivider()
             if let click = event.cgEvent {
                 DispatchQueue.main.async { click.post(tap: .cghidEventTap) }
@@ -372,6 +381,23 @@ final class SnapDividerManager {
                 self.resizeMissedTick = false
                 let sessionIsCurrent = self.resizeSession?.id == passSession.id
                 if let result {
+                    if final {
+                        let requestedCoordinate = requested.map {
+                            self.constrainedCoordinate($0, in: passSession)
+                        } ?? result.session.divider.coordinate
+                        let axis = result.session.divider.axis == .vertical ? "vertical" : "horizontal"
+                        for (side, panes) in [(Side.low, passSession.divider.low), (.high, passSession.divider.high)] {
+                            for pane in panes {
+                                let anchor = passSession.anchors[pane.window] ??
+                                    self.limit(pane.frame, axis: passSession.divider.axis, side: side)
+                                let requestedFrame = self.frame(
+                                    pane.frame, axis: passSession.divider.axis, side: side,
+                                    coordinate: requestedCoordinate, anchor: anchor
+                                )
+                                self.logDiagnostic("snapDivider release axis=\(axis) side=\(side == .low ? "low" : "high") titleHash=\(pane.window.title.map { String($0.hashValue) } ?? "nil") pid=\(String(describing: pane.window.processIdentifier)) requested=\(requestedFrame) readBack=\(String(describing: result.frames[pane.window])) resolvedSeam=\(result.session.divider.coordinate) pointer=\(String(describing: requested))") // DIAG remove after live capture
+                            }
+                        }
+                    }
                     for (window, frame) in result.frames {
                         SnapWindowRegistry.shared.recordFrameWrite(window: window, frame: frame)
                     }
@@ -387,6 +413,23 @@ final class SnapDividerManager {
                         if final, self.enabled { SnapWindowRegistry.shared.refreshVisibleWindows() }
                     }
                     return
+                }
+                if final {
+                    let requestedCoordinate = requested.map {
+                        self.constrainedCoordinate($0, in: passSession)
+                    } ?? passSession.divider.coordinate
+                    for (side, panes) in [(Side.low, passSession.divider.low), (.high, passSession.divider.high)] {
+                        for pane in panes {
+                            let anchor = passSession.anchors[pane.window] ??
+                                self.limit(pane.frame, axis: passSession.divider.axis, side: side)
+                            let requestedFrame = self.frame(
+                                pane.frame, axis: passSession.divider.axis, side: side,
+                                coordinate: requestedCoordinate, anchor: anchor
+                            )
+                            let readBack = pane.window.frame(primaryScreenHeight: passSession.primaryScreenHeight)
+                            self.logDiagnostic("snapDivider release result=noResizeResult side=\(side == .low ? "low" : "high") titleHash=\(pane.window.title.map { String($0.hashValue) } ?? "nil") pid=\(String(describing: pane.window.processIdentifier)) requested=\(requestedFrame) readBack=\(String(describing: readBack)) pointer=\(String(describing: requested))") // DIAG remove after live capture
+                        }
+                    }
                 }
                 if final {
                     self.completeResizeSession()
@@ -747,6 +790,16 @@ final class SnapDividerManager {
         case (.horizontal, .high): result.origin.y = anchor - frame.height
         }
         return result
+    }
+
+    private func diagnosticPaneList(_ panes: [Pane]) -> String {
+        panes.map { pane in
+            "titleHash=\(pane.window.title.map { String($0.hashValue) } ?? "nil"),pid=\(String(describing: pane.window.processIdentifier)),frame=\(pane.frame)"
+        }.joined(separator: ";")
+    }
+
+    private func logDiagnostic(_ message: String) {
+        diagLogger.info("HWDIAG \(message, privacy: .public)") // DIAG remove after live capture
     }
 }
 
