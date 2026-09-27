@@ -87,8 +87,11 @@ final class SnapAssistManager {
         if origin == .layoutMenu {
             switch settings.fillEmptySpots {
             case .mostRecent: fillEmptyZones(in: layout, excluding: window, placing: action, on: screen)
-            case .letMePick: break
-            case .leaveEmpty:
+            case .letMePick, .leaveEmpty:
+                break
+            }
+            raiseLayoutWindows(in: layout, on: screen)
+            if case .leaveEmpty = settings.fillEmptySpots {
                 hidePanel()
                 return
             }
@@ -272,7 +275,15 @@ final class SnapAssistManager {
         suppressNextAssist = true
         SnapEvents.didSnap(window: choice.window, action: action, screen: screen, frame: readBack)
         suppressNextAssist = false
+        if let layout = activeLayout { raiseLayoutWindows(in: layout, on: screen) }
         showNextZone()
+    }
+
+    private func raiseLayoutWindows(in layout: SnapMultiWindowLayout, on screen: NSScreen) {
+        let occupants = SnapWindowRegistry.shared.zoneOccupants(for: layout, on: screen)
+        for zone in layout.zones {
+            occupants[zone.action]?.raise()
+        }
     }
 
     private func fillEmptyZones(in layout: SnapMultiWindowLayout, excluding window: AXWindow,
