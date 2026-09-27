@@ -17,7 +17,8 @@ final class SnapGroupsManager {
 
     func didSnap(window: AXWindow, action: SnapAction, screen: NSScreen) {
         guard enabled, Permissions.accessibilityGranted,
-              let side = side(for: action),
+              let record = SnapWindowRegistry.shared.record(for: window),
+              let side = side(for: action, frame: record.frame, visibleFrame: screen.visibleFrame),
               let lane = SnapWindowRegistry.shared.snappedLane(for: window),
               lane.display == SnapDisplayID(screen) else { return }
         pruneGroups()
@@ -112,10 +113,11 @@ final class SnapGroupsManager {
                 continue
             }
             let valid = pair.filter { side, window in
-                guard let record = registry.record(for: window), self.side(for: record.action) == side,
+                guard let record = registry.record(for: window),
                       let screen = NSScreen.screens.first(where: {
                           $0.frame.contains(CGPoint(x: record.frame.midX, y: record.frame.midY))
-                      }) else { return false }
+                      }),
+                      self.side(for: record.action, frame: record.frame, visibleFrame: screen.visibleFrame) == side else { return false }
                 return SnapDisplayID(screen) == display
             }
             if valid.isEmpty { members.removeValue(forKey: display) }
@@ -123,10 +125,18 @@ final class SnapGroupsManager {
         }
     }
 
-    private func side(for action: SnapAction) -> Side? {
+    private func side(for action: SnapAction, frame: CGRect, visibleFrame: CGRect) -> Side? {
         switch action {
         case .leftHalf: return .left
         case .rightHalf: return .right
+        case .fill:
+            let tolerance = SnapGeometry.edgeTolerance
+            guard abs(frame.minY - visibleFrame.minY) <= tolerance,
+                  abs(frame.maxY - visibleFrame.maxY) <= tolerance else { return nil }
+            let left = abs(frame.minX - visibleFrame.minX) <= tolerance
+            let right = abs(frame.maxX - visibleFrame.maxX) <= tolerance
+            if left == right { return nil }
+            return left ? .left : .right
         default: return nil
         }
     }

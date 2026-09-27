@@ -135,15 +135,11 @@ final class SnapWindowRegistry {
         return occupants
     }
 
-    func fillNeighborFrames(on screen: NSScreen, excluding incoming: AXWindow) -> [CGRect] {
-        let display = SnapDisplayID(screen)
-        let incomingID = records[incoming]?.windowID ?? incoming.frame.flatMap { matchWindowID(incoming, frame: $0) }
+    func fillNeighborFrames(on screen: NSScreen, excluding incoming: AXWindow? = nil) -> [CGRect] {
         return records.values.compactMap { record in
             guard record.window != incoming, record.state == .active,
-                  displayID(for: record.frame) == display, let windowID = record.windowID,
-                  let index = visibleWindows.firstIndex(where: { $0.id == windowID }) else { return nil }
-            let covering = visibleWindows[..<index].filter { $0.id != incomingID }.map(\.frame)
-            return SnapWindowInventory.isCovered(record.frame, by: covering) ? nil : record.frame
+                  record.frame.intersects(screen.visibleFrame) else { return nil }
+            return record.frame
         }
     }
 
@@ -242,6 +238,8 @@ final class SnapWindowRegistry {
         validate()
         guard let frame = frame ?? window.frame else { return }
         let display = SnapDisplayID(screen)
+        let fillOwner = action == .fill ? matchingFillOwner(for: frame, on: screen) : nil
+        let storedAction = fillOwner ?? action
         let layout = chosenLayout ?? SnapMultiWindowLayout.containing(action)
         if let layout {
             if currentLayouts[display] != layout { zoneOwners[display] = [:] }
@@ -269,7 +267,7 @@ final class SnapWindowRegistry {
         for ownerDisplay in Array(zoneOwners.keys) {
             zoneOwners[ownerDisplay] = zoneOwners[ownerDisplay]?.filter { $0.value != window }
         }
-        records[window] = SnappedWindowRecord(window: window, action: action, layout: layout, frame: frame,
+        records[window] = SnappedWindowRecord(window: window, action: storedAction, layout: layout, frame: frame,
                                                state: .active, windowID: windowID)
         rebuildZoneOwners()
         rebuildSeams()
@@ -313,6 +311,18 @@ final class SnapWindowRegistry {
         }
     }
 
+    private func matchingFillOwner(for frame: CGRect, on screen: NSScreen) -> SnapAction? {
+        guard let layout = currentLayouts[SnapDisplayID(screen)] else { return nil }
+        let matches = layout.zones(portrait: screen.frame.height > screen.frame.width).compactMap { zone -> SnapAction? in
+            guard let expected = SnapGeometry.frame(for: zone.action, visibleFrame: screen.visibleFrame,
+                                                     currentWindowFrame: frame,
+                                                     portrait: screen.frame.height > screen.frame.width),
+                  SnapGeometry.isClose(frame, expected, tolerance: SnapGeometry.edgeTolerance) else { return nil }
+            return zone.action
+        }
+        return matches.count == 1 ? matches[0] : nil
+    }
+
     private func rebuildZoneOwners() {
         zoneOwners = [:]
         for record in records.values where record.state == .active {
@@ -329,6 +339,16 @@ final class SnapWindowRegistry {
         let moved = abs(previous.minX - current.minX) > tolerance || abs(previous.minY - current.minY) > tolerance
         let sameSize = abs(previous.width - current.width) <= 1 && abs(previous.height - current.height) <= 1
         if moved && sameSize { return false }
+        if action == .fill {
+            let anchors = [
+                (previous.minX, visible.minX, current.minX),
+                (previous.maxX, visible.maxX, current.maxX),
+                (previous.minY, visible.minY, current.minY),
+                (previous.maxY, visible.maxY, current.maxY),
+            ].filter { abs($0.0 - $0.1) <= 1 }
+            return anchors.allSatisfy { abs($0.1 - $0.2) <= tolerance } &&
+                (anchors.isEmpty ? SnapGeometry.isClose(previous, current, tolerance: tolerance) || !sameSize : true)
+        }
         guard let expected = SnapGeometry.frame(for: action, visibleFrame: visible,
                                                 currentWindowFrame: current,
                                                 portrait: screen.frame.height > screen.frame.width) else { return false }
