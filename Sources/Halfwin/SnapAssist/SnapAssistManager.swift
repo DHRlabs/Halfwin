@@ -75,7 +75,7 @@ final class SnapAssistManager {
             hidePanel()
             return
         }
-        guard let layout = SnapMultiWindowLayout.containing(action) else {
+        guard let layout = SnapWindowRegistry.shared.layout(for: window) ?? SnapMultiWindowLayout.containing(action) else {
             hidePanel()
             return
         }
@@ -273,7 +273,8 @@ final class SnapAssistManager {
         pickedWindows.insert(choice.window)
         activeWindow = choice.window
         suppressNextAssist = true
-        SnapEvents.didSnap(window: choice.window, action: action, screen: screen, frame: readBack)
+        SnapEvents.didSnap(window: choice.window, action: action, screen: screen,
+                           frame: readBack, layout: activeLayout)
         suppressNextAssist = false
         if let layout = activeLayout { raiseLayoutWindows(in: layout, on: screen) }
         showNextZone()
@@ -316,7 +317,8 @@ final class SnapAssistManager {
         }
         for (window, action, frame) in filled {
             suppressNextAssist = true
-            SnapEvents.didSnap(window: window, action: action, screen: screen, frame: frame)
+            SnapEvents.didSnap(window: window, action: action, screen: screen,
+                               frame: frame, layout: layout)
             suppressNextAssist = false
         }
     }

@@ -83,7 +83,7 @@ struct SnapLayoutZone {
 
 /// Shared ordered zones for menu tiles, snap memory, and Snap Assist.
 enum SnapMultiWindowLayout: CaseIterable, Equatable {
-    case halves, leftStack, thirds, commandCenter
+    case halves, leftStack, thirds, commandCenter, leftTwoThirds, rightTwoThirds
 
     var title: String {
         switch self {
@@ -91,6 +91,8 @@ enum SnapMultiWindowLayout: CaseIterable, Equatable {
         case .thirds: return "Thirds"
         case .leftStack: return "Left + Stack"
         case .commandCenter: return "Command Center"
+        case .leftTwoThirds: return "Left 2/3 + Right 1/3"
+        case .rightTwoThirds: return "Left 1/3 + Right 2/3"
         }
     }
 
@@ -112,6 +114,16 @@ enum SnapMultiWindowLayout: CaseIterable, Equatable {
                 SnapLayoutZone(action: .firstTwoThirds, rect: CGRect(x: 0, y: 0, width: 2.0 / 3, height: 1)),
                 SnapLayoutZone(action: .lastThirdTop, rect: CGRect(x: 2.0 / 3, y: 0.5, width: 1.0 / 3, height: 0.5)),
                 SnapLayoutZone(action: .lastThirdBottom, rect: CGRect(x: 2.0 / 3, y: 0, width: 1.0 / 3, height: 0.5)),
+            ]
+        case .leftTwoThirds:
+            return [
+                SnapLayoutZone(action: .firstTwoThirds, rect: CGRect(x: 0, y: 0, width: 2.0 / 3, height: 1)),
+                SnapLayoutZone(action: .lastThird, rect: CGRect(x: 2.0 / 3, y: 0, width: 1.0 / 3, height: 1)),
+            ]
+        case .rightTwoThirds:
+            return [
+                SnapLayoutZone(action: .firstThird, rect: CGRect(x: 0, y: 0, width: 1.0 / 3, height: 1)),
+                SnapLayoutZone(action: .lastTwoThirds, rect: CGRect(x: 1.0 / 3, y: 0, width: 2.0 / 3, height: 1)),
             ]
         case .commandCenter:
             let side = SnapGeometry.commandCenterSideFraction
