@@ -94,8 +94,8 @@ enum SnapGeometry {
         [.leftHalf, .rightHalf, .topHalf, .bottomHalf].contains(action)
     }
 
-    /// Extends a half into the space beside a snapped pane. Layout zones keep
-    /// their authored frames; only edge half actions reach this calculation.
+    /// Extends a screen-edge half to the nearest snapped-pane boundary on its open side.
+    /// Layout-zone snaps keep their authored frames.
     static func fillFrame(for action: SnapAction, fixedFrame: CGRect, visibleFrame: CGRect,
                           snappedFrames: [CGRect]) -> CGRect? {
         guard isHalf(action), fixedFrame.width > 0, fixedFrame.height > 0 else { return nil }
@@ -108,7 +108,7 @@ enum SnapGeometry {
         switch action {
         case .leftHalf where spansHeight && abs(fixedFrame.minX - visibleFrame.minX) <= tolerance:
             let candidates = snappedFrames.filter {
-                abs($0.maxX - visibleFrame.maxX) <= tolerance && $0.minX > visibleFrame.minX + 1
+                $0.minX > visibleFrame.minX + 1
             }
             for edge in Set(candidates.map(\.minX)).sorted() {
                 let ranges = candidates.filter { abs($0.minX - edge) <= tolerance }.map { $0.minY...$0.maxY }
@@ -119,7 +119,7 @@ enum SnapGeometry {
             }
         case .rightHalf where spansHeight && abs(fixedFrame.maxX - visibleFrame.maxX) <= tolerance:
             let candidates = snappedFrames.filter {
-                abs($0.minX - visibleFrame.minX) <= tolerance && $0.maxX < visibleFrame.maxX - 1
+                $0.maxX < visibleFrame.maxX - 1
             }
             for edge in Set(candidates.map(\.maxX)).sorted(by: >) {
                 let ranges = candidates.filter { abs($0.maxX - edge) <= tolerance }.map { $0.minY...$0.maxY }
@@ -130,7 +130,7 @@ enum SnapGeometry {
             }
         case .topHalf where spansWidth && abs(fixedFrame.maxY - visibleFrame.maxY) <= tolerance:
             let candidates = snappedFrames.filter {
-                abs($0.minY - visibleFrame.minY) <= tolerance && $0.maxY < visibleFrame.maxY - 1
+                $0.maxY < visibleFrame.maxY - 1
             }
             for edge in Set(candidates.map(\.maxY)).sorted(by: >) {
                 let ranges = candidates.filter { abs($0.maxY - edge) <= tolerance }.map { $0.minX...$0.maxX }
@@ -141,7 +141,7 @@ enum SnapGeometry {
             }
         case .bottomHalf where spansWidth && abs(fixedFrame.minY - visibleFrame.minY) <= tolerance:
             let candidates = snappedFrames.filter {
-                abs($0.maxY - visibleFrame.maxY) <= tolerance && $0.minY > visibleFrame.minY + 1
+                $0.minY > visibleFrame.minY + 1
             }
             for edge in Set(candidates.map(\.minY)).sorted() {
                 let ranges = candidates.filter { abs($0.minY - edge) <= tolerance }.map { $0.minX...$0.maxX }
