@@ -86,6 +86,7 @@ final class DockPreviewManager {
     private var peekLeaveTimer: Timer?
     private var clickMonitor: Any?
     private var pendingDockClick: DockClick?
+    private var applicationActivationTimes: [pid_t: TimeInterval] = [:]
     private var dockClickInFlight = false
     private var mouseDownGeneration = 0
     private var dockListFrame: CGRect?
@@ -834,6 +835,10 @@ final class DockPreviewManager {
                 if pendingClick.mouseDownGeneration == mouseDownGeneration { dockClickInFlight = false }
                 return
             }
+            guard (applicationActivationTimes[processID] ?? 0) <= click.mouseDownTimestamp else {
+                if pendingClick.mouseDownGeneration == mouseDownGeneration { dockClickInFlight = false }
+                return
+            }
             click.windowsToMinimize = visibleWindows
             click.previousMinimizedSet = prunedMinimizedSet(for: processID)
             click.focusedWindow = AXWindow.focusedWindow(of: click.app)
@@ -1190,6 +1195,7 @@ final class DockPreviewManager {
 
     private func applicationDidActivate(_ notification: Notification) {
         guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
+        applicationActivationTimes[app.processIdentifier] = ProcessInfo.processInfo.systemUptime
         prepareApplication(app)
     }
 
