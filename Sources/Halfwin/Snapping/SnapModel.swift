@@ -36,6 +36,15 @@ enum SnapAction: String, CaseIterable, Codable {
     case leftTopBottomHalfCompound
     case rightTopBottomHalfCompound
     case bottomThirdsCompound
+    case fill
+
+    static let allCases: [SnapAction] = [
+        .none, .maximize, .leftHalf, .rightHalf, .topHalf, .bottomHalf, .center,
+        .topLeftQuarter, .topRightQuarter, .bottomLeftQuarter, .bottomRightQuarter,
+        .firstThird, .centerThird, .lastThird, .commandCenterLeft, .commandCenter,
+        .commandCenterRight, .firstTwoThirds, .lastTwoThirds, .lastThirdTop, .lastThirdBottom,
+        .leftTopBottomHalfCompound, .rightTopBottomHalfCompound, .bottomThirdsCompound,
+    ]
 
     var displayName: String {
         switch self {
@@ -63,6 +72,7 @@ enum SnapAction: String, CaseIterable, Codable {
         case .leftTopBottomHalfCompound: return "Left Half (Optional Top/Bottom Half Near Corners)"
         case .rightTopBottomHalfCompound: return "Right Half (Optional Top/Bottom Half Near Corners)"
         case .bottomThirdsCompound: return "Thirds (Drag to Center for Two Thirds)"
+        case .fill: return "Fill Empty Space"
         }
     }
 }

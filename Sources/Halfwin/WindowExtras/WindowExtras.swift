@@ -371,7 +371,13 @@ final class WindowExtrasManager {
         frameMemory.pruneUnreadableFrames()
         let registry = SnapWindowRegistry.shared
         registry.validate()
-        let snapped = registry.snappedLane(for: window).map { ($0.action, $0.screen) } ?? snappedAction(for: frame)
+        let lane = registry.snappedLane(for: window)
+        let snapped: (action: SnapAction, screen: NSScreen)?
+        if let lane, lane.action == .fill {
+            snapped = snappedAction(for: frame) ?? snappedFillSide(for: frame, on: lane.screen)
+        } else {
+            snapped = lane.map { ($0.action, $0.screen) } ?? snappedAction(for: frame)
+        }
         let action: SnapAction
         var rememberFrame = true
         var screen: NSScreen?
@@ -435,22 +441,48 @@ final class WindowExtrasManager {
         guard let target = targetFrame(action, for: window, current: frame, on: screen) else { return }
         if let hopFromScreen { frameMemory.moveRestoreFrame(window, from: hopFromScreen, to: target.screen) }
         var destination = target.frame
-        if SnapSettings.shared.fillAvailableSpace, SnapGeometry.isHalf(action) {
-            let neighbors = registry.fillNeighborFrames(on: target.screen, excluding: window)
-            destination = SnapGeometry.fillFrame(for: action, fixedFrame: target.frame,
-                                                  visibleFrame: target.screen.visibleFrame,
-                                                  snappedFrames: neighbors) ?? destination
+        var effectiveAction = action
+        let usesFill = SnapSettings.shared.fillAvailableSpace && [123, 124].contains(keyCode)
+        if usesFill {
+            let position: SnapPosition = action == .leftHalf ? .left : .right
+            let visible = target.screen.visibleFrame
+            let point = CGPoint(x: position == .left ? visible.minX : visible.maxX, y: frame.midY)
+            if case let .fill(filled) = SnapGeometry.fillFrame(
+                at: point, position: position, visibleFrame: visible,
+                snappedFrames: registry.fillNeighborFrames(on: target.screen, excluding: window),
+                pointIsRequired: false
+            ) {
+                destination = filled
+                effectiveAction = .fill
+            }
         }
-        if rememberFrame {
+        if rememberFrame && effectiveAction != .fill {
             frameMemory.set(window, current: frame, to: destination)
         } else {
             window.setFrame(destination)
         }
         if let readBack = window.frame,
-           SnapGeometry.matchesSnapEdges(readBack, target: destination, screenFrame: target.screen.visibleFrame),
-           SnapGeometry.matchesSnapSize(readBack, target: destination) {
-            SnapEvents.didSnap(window: window, action: action, screen: target.screen, frame: readBack)
+           (effectiveAction == .fill
+            ? !SnapGeometry.isClose(readBack, frame, tolerance: 1)
+            : SnapGeometry.matchesSnapEdges(readBack, target: destination, screenFrame: target.screen.visibleFrame) &&
+                SnapGeometry.matchesSnapSize(readBack, target: destination)) {
+            if effectiveAction == .fill { frameMemory.remember(window, current: frame) }
+            SnapEvents.didSnap(window: window, action: effectiveAction, screen: target.screen, frame: readBack)
         }
+    }
+
+    private func snappedFillSide(for frame: CGRect, on screen: NSScreen) -> (action: SnapAction, screen: NSScreen)? {
+        let visible = screen.visibleFrame
+        let tolerance = SnapGeometry.edgeTolerance
+        guard abs(frame.minY - visible.minY) <= tolerance,
+              abs(frame.maxY - visible.maxY) <= tolerance else { return nil }
+        if abs(frame.minX - visible.minX) <= tolerance && abs(frame.maxX - visible.maxX) > tolerance {
+            return (.leftHalf, screen)
+        }
+        if abs(frame.maxX - visible.maxX) <= tolerance && abs(frame.minX - visible.minX) > tolerance {
+            return (.rightHalf, screen)
+        }
+        return nil
     }
 
     private func snappedAction(for frame: CGRect) -> (action: SnapAction, screen: NSScreen)? {
@@ -751,6 +783,10 @@ private final class WindowFrameMemory {
     func set(_ window: AXWindow, current: CGRect, to target: CGRect) {
         if originalFrames[window] == nil { originalFrames[window] = current }
         window.setFrame(target)
+    }
+
+    func remember(_ window: AXWindow, current: CGRect) {
+        if originalFrames[window] == nil { originalFrames[window] = current }
     }
 
     func moveRestoreFrame(_ window: AXWindow, from source: NSScreen, to destination: NSScreen) {

@@ -8,10 +8,13 @@ import Combine
 /// snap-on-release, escape-to-cancel — with the window-server/AX
 /// cross-checking and multi-monitor animation machinery stripped out.
 final class SnapManager {
-    private struct Zone: Equatable {
+    private struct Zone {
         let screen: NSScreen
         let position: SnapPosition
         let action: SnapAction
+        var effectiveAction: SnapAction
+        var frame: CGRect
+        let cursor: CGPoint
     }
 
     private let settings: SnapSettings
@@ -27,8 +30,6 @@ final class SnapManager {
     private var cancelled = false
     private var currentZone: Zone?
     private var currentPreviewFrame: CGRect?
-    private var dragNeighborFrames: [CGRect] = []
-    private var dragNeighborScreen: NSScreen?
     private var dragToTopLayoutsEnabled = false
     private var dropScreen: NSScreen?
     private var currentDropZone: LayoutDropZone?
@@ -233,16 +234,16 @@ final class SnapManager {
             return
         }
 
-        let zone = Zone(screen: screen, position: position, action: action)
-        if zone != currentZone, SnapGeometry.isHalf(action) {
-            refreshFillNeighbors(on: screen, excluding: window)
-        }
-        currentZone = zone
-
         if let rect = SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
                                          currentWindowFrame: CGRect(origin: .zero, size: size), portrait: screen.frame.isPortrait) {
-            showPreview(filledFrame(for: action, base: rect, screen: screen, excluding: window))
+            let resolved = resolvedFrame(for: action, position: position, cursor: cursor, base: rect,
+                                         screen: screen, excluding: window, previous: currentPreviewFrame)
+            let zone = Zone(screen: screen, position: position, action: action,
+                            effectiveAction: resolved.action, frame: resolved.frame, cursor: cursor)
+            currentZone = zone
+            showPreview(resolved.frame)
         } else {
+            currentZone = nil
             hidePreview()
         }
     }
@@ -282,19 +283,30 @@ final class SnapManager {
             }
             return
         }
-        guard let zone = currentZone, let frame = draggedWindow.frame else { return }
-        guard let target = SnapGeometry.frame(for: zone.action, visibleFrame: zone.screen.visibleFrame,
-                                              currentWindowFrame: frame, portrait: zone.screen.frame.isPortrait) else { return }
-        let filledTarget = filledFrame(for: zone.action, base: target, screen: zone.screen, excluding: draggedWindow)
-        draggedWindow.setFrame(filledTarget)
+        guard var zone = currentZone, let frame = draggedWindow.frame else { return }
+        if settings.fillAvailableSpace {
+            SnapWindowRegistry.shared.validate()
+            guard let fixed = SnapGeometry.frame(for: zone.action, visibleFrame: zone.screen.visibleFrame,
+                                                 currentWindowFrame: CGRect(origin: .zero, size: size),
+                                                 portrait: zone.screen.frame.isPortrait) else { return }
+            let resolved = resolvedFrame(for: zone.action, position: zone.position, cursor: zone.cursor,
+                                         base: fixed, screen: zone.screen, excluding: draggedWindow,
+                                         previous: zone.frame)
+            zone.effectiveAction = resolved.action
+            zone.frame = resolved.frame
+            showPreview(resolved.frame)
+        }
+        draggedWindow.setFrame(zone.frame)
         // Only remember this as a real snap if the window actually landed
         // there — a failed AX write shouldn't let a later drag "restore" to
         // a size it was never snapped from.
         if let readBack = draggedWindow.frame,
-           SnapGeometry.matchesSnapEdges(readBack, target: filledTarget, screenFrame: zone.screen.visibleFrame),
-           SnapGeometry.matchesSnapSize(readBack, target: filledTarget) {
+           (zone.effectiveAction == .fill
+            ? !SnapGeometry.isClose(readBack, frame, tolerance: 1)
+            : SnapGeometry.matchesSnapEdges(readBack, target: zone.frame, screenFrame: zone.screen.visibleFrame) &&
+                SnapGeometry.matchesSnapSize(readBack, target: zone.frame)) {
             preSnapSizes[draggedWindow] = frame.size
-            snapNotification = (draggedWindow, zone.action, zone.screen, readBack)
+            snapNotification = (draggedWindow, zone.effectiveAction, zone.screen, readBack)
         }
     }
 
@@ -306,8 +318,6 @@ final class SnapManager {
         cancelled = false
         currentZone = nil
         currentPreviewFrame = nil
-        dragNeighborFrames.removeAll()
-        dragNeighborScreen = nil
     }
 
     private func clearDropBar() {
@@ -334,18 +344,19 @@ final class SnapManager {
         }
     }
 
-    private func filledFrame(for action: SnapAction, base: CGRect, screen: NSScreen, excluding window: AXWindow) -> CGRect {
-        guard settings.fillAvailableSpace, SnapGeometry.isHalf(action) else { return base }
-        if dragNeighborScreen != screen { refreshFillNeighbors(on: screen, excluding: window) }
-        return SnapGeometry.fillFrame(for: action, fixedFrame: base, visibleFrame: screen.visibleFrame,
-                                      snappedFrames: dragNeighborFrames) ?? base
-    }
-
-    private func refreshFillNeighbors(on screen: NSScreen, excluding window: AXWindow) {
-        dragNeighborScreen = screen
-        SnapWindowRegistry.shared.validate()
-        dragNeighborFrames = settings.fillAvailableSpace
-            ? SnapWindowRegistry.shared.fillNeighborFrames(on: screen, excluding: window) : []
+    private func resolvedFrame(for action: SnapAction, position: SnapPosition, cursor: CGPoint, base: CGRect,
+                               screen: NSScreen, excluding window: AXWindow, previous: CGRect?) -> (action: SnapAction, frame: CGRect) {
+        guard settings.fillAvailableSpace else { return (action, base) }
+        let registry = SnapWindowRegistry.shared
+        registry.validateIfNeeded(interval: 0.1)
+        switch SnapGeometry.fillFrame(at: cursor, position: position, visibleFrame: screen.visibleFrame,
+                                      snappedFrames: registry.fillNeighborFrames(on: screen, excluding: window),
+                                      previousFrame: previous) {
+        case .fixed:
+            return (action, base)
+        case let .fill(frame):
+            return (.fill, frame)
+        }
     }
 
     private func showPreview(_ frame: CGRect) {

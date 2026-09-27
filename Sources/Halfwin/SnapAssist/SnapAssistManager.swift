@@ -18,6 +18,7 @@ final class SnapAssistManager {
     private var activeWindow: AXWindow?
     private var activeLayout: SnapMultiWindowLayout?
     private var activeAction: SnapAction?
+    private var activeFrame: CGRect?
     private var pickedWindows = Set<AXWindow>()
     private var suppressNextAssist = false
     private var lastSnappedProcessIdentifier: pid_t?
@@ -70,6 +71,21 @@ final class SnapAssistManager {
                                currentWindowFrame: $0, portrait: screen.frame.height > screen.frame.width)
         }
         guard !suppressNextAssist else { return }
+        if action == .fill {
+            guard settings.fillEmptySpots != .leaveEmpty else {
+                hidePanel()
+                return
+            }
+            activeScreen = screen
+            activeWindow = window
+            activeLayout = nil
+            activeAction = .fill
+            activeFrame = nil
+            pickedWindows = [window]
+            lastSnappedProcessIdentifier = window.processIdentifier
+            showNextVoid()
+            return
+        }
         if origin != .layoutMenu, SnapGeometry.isHalf(action), let frame, let fixed,
            !SnapGeometry.isClose(frame, fixed, tolerance: SnapGeometry.edgeTolerance) {
             hidePanel()
@@ -232,6 +248,7 @@ final class SnapAssistManager {
         activeWindow = nil
         activeLayout = nil
         activeAction = nil
+        activeFrame = nil
         pickedWindows.removeAll()
         lastSnappedProcessIdentifier = nil
     }
@@ -246,9 +263,9 @@ final class SnapAssistManager {
             return
         }
         guard let currentFrame = choice.window.frame,
-              let target = SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
-                                               currentWindowFrame: currentFrame,
-                                               portrait: screen.frame.height > screen.frame.width) else {
+              let target = activeFrame ?? SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
+                                                              currentWindowFrame: currentFrame,
+                                                              portrait: screen.frame.height > screen.frame.width) else {
             hidePanel()
             return
         }
@@ -264,9 +281,17 @@ final class SnapAssistManager {
         if mainError != .success || frontmostError != .success {
             choice.application.activate(options: [])
         }
-        guard let readBack = choice.window.frame,
-              SnapGeometry.matchesSnapEdges(readBack, target: target, screenFrame: screen.visibleFrame),
-              SnapGeometry.matchesSnapSize(readBack, target: target) else {
+        guard let readBack = choice.window.frame else {
+            hidePanel()
+            return
+        }
+        if action == .fill {
+            guard !SnapGeometry.isClose(readBack, currentFrame, tolerance: 1) else {
+                hidePanel()
+                return
+            }
+        } else if !SnapGeometry.matchesSnapEdges(readBack, target: target, screenFrame: screen.visibleFrame) ||
+                    !SnapGeometry.matchesSnapSize(readBack, target: target) {
             hidePanel()
             return
         }
@@ -277,7 +302,7 @@ final class SnapAssistManager {
                            frame: readBack, layout: activeLayout)
         suppressNextAssist = false
         if let layout = activeLayout { raiseLayoutWindows(in: layout, on: screen) }
-        showNextZone()
+        if action == .fill { showNextVoid() } else { showNextZone() }
     }
 
     private func raiseLayoutWindows(in layout: SnapMultiWindowLayout, on screen: NSScreen) {
@@ -345,6 +370,7 @@ final class SnapAssistManager {
             return
         }
         activeAction = zone.action
+        activeFrame = frame
         let panel = self.panel ?? SnapAssistPanel { [weak self] choice in self?.pick(choice) }
         self.panel = panel
         panel.show(frame: frame, choices: choices)
@@ -353,7 +379,43 @@ final class SnapAssistManager {
         let thumbnailProvider = self.thumbnailProvider
         thumbnailTask = Task { @MainActor [weak self] in
             let images = await thumbnailProvider(choices.map(\.id))
-            guard !Task.isCancelled, let self, self.activeAction == zone.action else { return }
+            guard !Task.isCancelled, let self, self.activeAction == zone.action,
+                  self.activeFrame == frame else { return }
+            self.panel?.setImages(images)
+        }
+    }
+
+    private func showNextVoid() {
+        guard enabled, Permissions.accessibilityGranted,
+              settings.fillEmptySpots != .leaveEmpty, let screen = activeScreen else {
+            hidePanel()
+            return
+        }
+        let registry = SnapWindowRegistry.shared
+        registry.validateIfNeeded(interval: 0.1)
+        let frames = registry.fillNeighborFrames(on: screen)
+        guard let frame = SnapGeometry.largestEmptyFrame(visibleFrame: screen.visibleFrame, snappedFrames: frames) else {
+            hidePanel()
+            return
+        }
+        let choices = SnapWindowInventory.choices(on: screen, excluding: pickedWindows)
+            .filter { !registry.hasRecord(for: $0.window) }
+        guard !choices.isEmpty else {
+            hidePanel()
+            return
+        }
+        activeAction = .fill
+        activeFrame = frame
+        let panel = self.panel ?? SnapAssistPanel { [weak self] choice in self?.pick(choice) }
+        self.panel = panel
+        panel.show(frame: frame, choices: choices)
+        startKeyboardTap()
+        thumbnailTask?.cancel()
+        let thumbnailProvider = self.thumbnailProvider
+        thumbnailTask = Task { @MainActor [weak self] in
+            let images = await thumbnailProvider(choices.map(\.id))
+            guard !Task.isCancelled, let self, self.activeAction == .fill,
+                  self.activeFrame == frame else { return }
             self.panel?.setImages(images)
         }
     }

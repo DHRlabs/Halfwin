@@ -94,77 +94,136 @@ enum SnapGeometry {
         [.leftHalf, .rightHalf, .topHalf, .bottomHalf].contains(action)
     }
 
-    /// Extends a screen-edge half to the nearest snapped-pane boundary on its open side.
-    /// Layout-zone snaps keep their authored frames.
-    static func fillFrame(for action: SnapAction, fixedFrame: CGRect, visibleFrame: CGRect,
-                          snappedFrames: [CGRect]) -> CGRect? {
-        guard isHalf(action), fixedFrame.width > 0, fixedFrame.height > 0 else { return nil }
-        let tolerance = edgeTolerance
-        let spansHeight = fixedFrame.minY <= visibleFrame.minY + tolerance &&
-            fixedFrame.maxY >= visibleFrame.maxY - tolerance
-        let spansWidth = fixedFrame.minX <= visibleFrame.minX + tolerance &&
-            fixedFrame.maxX >= visibleFrame.maxX - tolerance
+    enum FillResult { case fixed, fill(CGRect) }
+    static let minimumFillSize = CGSize(width: 200, height: 120)
 
-        switch action {
-        case .leftHalf where spansHeight && abs(fixedFrame.minX - visibleFrame.minX) <= tolerance:
-            let candidates = snappedFrames.filter {
-                $0.minX > visibleFrame.minX + 1
-            }
-            for edge in Set(candidates.map(\.minX)).sorted() {
-                let ranges = candidates.filter { abs($0.minX - edge) <= tolerance }.map { $0.minY...$0.maxY }
-                if covers(ranges, from: visibleFrame.minY, to: visibleFrame.maxY, tolerance: tolerance) {
-                    return CGRect(x: visibleFrame.minX, y: visibleFrame.minY,
-                                  width: edge - visibleFrame.minX, height: visibleFrame.height)
-                }
-            }
-        case .rightHalf where spansHeight && abs(fixedFrame.maxX - visibleFrame.maxX) <= tolerance:
-            let candidates = snappedFrames.filter {
-                $0.maxX < visibleFrame.maxX - 1
-            }
-            for edge in Set(candidates.map(\.maxX)).sorted(by: >) {
-                let ranges = candidates.filter { abs($0.maxX - edge) <= tolerance }.map { $0.minY...$0.maxY }
-                if covers(ranges, from: visibleFrame.minY, to: visibleFrame.maxY, tolerance: tolerance) {
-                    return CGRect(x: edge, y: visibleFrame.minY,
-                                  width: visibleFrame.maxX - edge, height: visibleFrame.height)
-                }
-            }
-        case .topHalf where spansWidth && abs(fixedFrame.maxY - visibleFrame.maxY) <= tolerance:
-            let candidates = snappedFrames.filter {
-                $0.maxY < visibleFrame.maxY - 1
-            }
-            for edge in Set(candidates.map(\.maxY)).sorted(by: >) {
-                let ranges = candidates.filter { abs($0.maxY - edge) <= tolerance }.map { $0.minX...$0.maxX }
-                if covers(ranges, from: visibleFrame.minX, to: visibleFrame.maxX, tolerance: tolerance) {
-                    return CGRect(x: visibleFrame.minX, y: edge, width: visibleFrame.width,
-                                  height: visibleFrame.maxY - edge)
-                }
-            }
-        case .bottomHalf where spansWidth && abs(fixedFrame.minY - visibleFrame.minY) <= tolerance:
-            let candidates = snappedFrames.filter {
-                $0.minY > visibleFrame.minY + 1
-            }
-            for edge in Set(candidates.map(\.minY)).sorted() {
-                let ranges = candidates.filter { abs($0.minY - edge) <= tolerance }.map { $0.minX...$0.maxX }
-                if covers(ranges, from: visibleFrame.minX, to: visibleFrame.maxX, tolerance: tolerance) {
-                    return CGRect(x: visibleFrame.minX, y: visibleFrame.minY,
-                                  width: visibleFrame.width, height: edge - visibleFrame.minY)
-                }
-            }
-        default:
-            break
+    static func fillFrame(at point: CGPoint, position: SnapPosition, visibleFrame: CGRect,
+                          snappedFrames: [CGRect], previousFrame: CGRect? = nil,
+                          pointIsRequired: Bool = true) -> FillResult {
+        guard !snappedFrames.isEmpty else { return .fixed }
+        let contact = projectedContact(point, position: position, in: visibleFrame)
+        var candidates = emptyFrames(visibleFrame: visibleFrame, snappedFrames: snappedFrames).filter {
+            touches($0, position: position, visibleFrame: visibleFrame)
         }
-        return nil
+        if pointIsRequired {
+            candidates = candidates.filter { containsClosed($0, contact) }
+        } else if !isCorner(position), !candidates.isEmpty {
+            let nearest = candidates.map { contactDistance($0, to: contact, position: position) }.min()!
+            candidates = candidates.filter { abs(contactDistance($0, to: contact, position: position) - nearest) < 0.001 }
+        }
+        guard let frame = preferred(candidates, position: position, visibleFrame: visibleFrame,
+                                    previousFrame: previousFrame) else { return .fixed }
+        return .fill(frame)
     }
 
-    private static func covers(_ ranges: [ClosedRange<CGFloat>], from lower: CGFloat, to upper: CGFloat,
-                               tolerance: CGFloat) -> Bool {
-        var edge = lower
-        for range in ranges.sorted(by: { $0.lowerBound < $1.lowerBound }) {
-            guard range.lowerBound <= edge + tolerance else { return false }
-            edge = max(edge, range.upperBound)
-            if edge >= upper - tolerance { return true }
+    static func largestEmptyFrame(visibleFrame: CGRect, snappedFrames: [CGRect]) -> CGRect? {
+        preferred(emptyFrames(visibleFrame: visibleFrame, snappedFrames: snappedFrames), position: nil, visibleFrame: visibleFrame,
+                  previousFrame: nil)
+    }
+
+    private static func emptyFrames(visibleFrame: CGRect, snappedFrames: [CGRect]) -> [CGRect] {
+        let obstacles = snappedFrames.compactMap { frame -> CGRect? in
+            guard !frame.isNull, !frame.isInfinite, frame.width > 0, frame.height > 0 else { return nil }
+            let clipped = frame.standardized.intersection(visibleFrame)
+            return clipped.isNull || clipped.width <= 0 || clipped.height <= 0 ? nil : clipped
         }
-        return false
+        guard !obstacles.isEmpty else { return [] }
+        let xs = Set([visibleFrame.minX, visibleFrame.maxX] + obstacles.flatMap { [$0.minX, $0.maxX] }).sorted()
+        guard xs.count > 1 else { return [] }
+        var result: [CGRect] = []
+        for leftIndex in 0..<(xs.count - 1) {
+            for rightIndex in (leftIndex + 1)..<xs.count {
+                let left = xs[leftIndex], right = xs[rightIndex]
+                let intervals = obstacles.filter { $0.minX < right && $0.maxX > left }
+                    .map { ($0.minY, $0.maxY) }.sorted { $0.0 < $1.0 }
+                var merged: [(CGFloat, CGFloat)] = []
+                for interval in intervals {
+                    if let last = merged.indices.last, interval.0 <= merged[last].1 {
+                        merged[last].1 = max(merged[last].1, interval.1)
+                    } else {
+                        merged.append(interval)
+                    }
+                }
+                var bottom = visibleFrame.minY
+                for interval in merged {
+                    if interval.0 - bottom >= minimumFillSize.height, right - left >= minimumFillSize.width {
+                        result.append(CGRect(x: left, y: bottom, width: right - left, height: interval.0 - bottom))
+                    }
+                    bottom = max(bottom, interval.1)
+                }
+                if visibleFrame.maxY - bottom >= minimumFillSize.height, right - left >= minimumFillSize.width {
+                    result.append(CGRect(x: left, y: bottom, width: right - left, height: visibleFrame.maxY - bottom))
+                }
+            }
+        }
+        return result
+    }
+
+    private static func preferred(_ candidates: [CGRect], position: SnapPosition?, visibleFrame: CGRect,
+                                  previousFrame: CGRect?) -> CGRect? {
+        guard let largest = candidates.map({ $0.width * $0.height }).max() else { return nil }
+        let tolerance = max(visibleFrame.width, visibleFrame.height)
+        let tied = candidates.filter { largest - $0.width * $0.height <= tolerance }
+        if let position, isCorner(position), let previousFrame,
+           let previous = tied.first(where: { isClose($0, previousFrame, tolerance: 1) }) {
+            return previous
+        }
+        return tied.min {
+            if let position, !isCorner(position), contactLength($0, position: position) != contactLength($1, position: position) {
+                return contactLength($0, position: position) > contactLength($1, position: position)
+            }
+            if position.map(isCorner) == true, $0.width != $1.width { return $0.width > $1.width }
+            if $0.minX != $1.minX { return $0.minX < $1.minX }
+            if $0.maxY != $1.maxY { return $0.maxY > $1.maxY }
+            return false
+        }
+    }
+
+    private static func projectedContact(_ point: CGPoint, position: SnapPosition, in frame: CGRect) -> CGPoint {
+        let x = min(max(point.x, frame.minX), frame.maxX)
+        let y = min(max(point.y, frame.minY), frame.maxY)
+        switch position {
+        case .left: return CGPoint(x: frame.minX, y: y)
+        case .right: return CGPoint(x: frame.maxX, y: y)
+        case .top: return CGPoint(x: x, y: frame.maxY)
+        case .bottom: return CGPoint(x: x, y: frame.minY)
+        case .topLeft: return CGPoint(x: frame.minX, y: frame.maxY)
+        case .topRight: return CGPoint(x: frame.maxX, y: frame.maxY)
+        case .bottomLeft: return CGPoint(x: frame.minX, y: frame.minY)
+        case .bottomRight: return CGPoint(x: frame.maxX, y: frame.minY)
+        }
+    }
+
+    private static func touches(_ candidate: CGRect, position: SnapPosition, visibleFrame: CGRect) -> Bool {
+        let tolerance: CGFloat = 0.001
+        switch position {
+        case .left: return abs(candidate.minX - visibleFrame.minX) < tolerance
+        case .right: return abs(candidate.maxX - visibleFrame.maxX) < tolerance
+        case .top: return abs(candidate.maxY - visibleFrame.maxY) < tolerance
+        case .bottom: return abs(candidate.minY - visibleFrame.minY) < tolerance
+        case .topLeft: return abs(candidate.minX - visibleFrame.minX) < tolerance && abs(candidate.maxY - visibleFrame.maxY) < tolerance
+        case .topRight: return abs(candidate.maxX - visibleFrame.maxX) < tolerance && abs(candidate.maxY - visibleFrame.maxY) < tolerance
+        case .bottomLeft: return abs(candidate.minX - visibleFrame.minX) < tolerance && abs(candidate.minY - visibleFrame.minY) < tolerance
+        case .bottomRight: return abs(candidate.maxX - visibleFrame.maxX) < tolerance && abs(candidate.minY - visibleFrame.minY) < tolerance
+        }
+    }
+
+    private static func containsClosed(_ frame: CGRect, _ point: CGPoint) -> Bool {
+        point.x >= frame.minX && point.x <= frame.maxX && point.y >= frame.minY && point.y <= frame.maxY
+    }
+
+    private static func contactDistance(_ frame: CGRect, to point: CGPoint, position: SnapPosition) -> CGFloat {
+        let interval: ClosedRange<CGFloat> = [.left, .right].contains(position) ? frame.minY...frame.maxY : frame.minX...frame.maxX
+        let value = [.left, .right].contains(position) ? point.y : point.x
+        return value < interval.lowerBound ? interval.lowerBound - value : max(0, value - interval.upperBound)
+    }
+
+    private static func contactLength(_ frame: CGRect, position: SnapPosition) -> CGFloat {
+        [.left, .right].contains(position) ? frame.height : frame.width
+    }
+
+    private static func isCorner(_ position: SnapPosition) -> Bool {
+        [.topLeft, .topRight, .bottomLeft, .bottomRight].contains(position)
     }
 
     /// Rectangle's `leftTopBottomHalf`/`rightTopBottomHalf` compound: near a
@@ -222,7 +281,7 @@ enum SnapGeometry {
         let halfWidth = floor(vf.width / 2)
         let halfHeight = floor(vf.height / 2)
         switch action {
-        case .none, .leftTopBottomHalfCompound, .rightTopBottomHalfCompound, .bottomThirdsCompound:
+        case .none, .leftTopBottomHalfCompound, .rightTopBottomHalfCompound, .bottomThirdsCompound, .fill:
             return nil
         case .maximize:
             return vf
