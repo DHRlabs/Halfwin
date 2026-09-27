@@ -210,9 +210,9 @@ final class DockPreviewManager {
             let eventType = event.type
             let point = event.cgEvent?.location
             let timestamp = event.timestamp
-            let clickCount = event.clickCount
+            let clickCount = eventType == .leftMouseDown || eventType == .leftMouseUp ? event.clickCount : 0
             let modifierFlags = event.modifierFlags
-            let keyCode = event.keyCode
+            let keyCode = eventType == .keyDown ? event.keyCode : 0
             if eventType == .keyDown,
                keyCode != 46 || !modifierFlags.contains(.command)
                     || !modifierFlags.intersection([.shift, .option, .control]).isEmpty {
@@ -766,8 +766,7 @@ final class DockPreviewManager {
         if isShowing { hidePreview() }
         pendingDockClick = nil
         dockClickInFlight = false
-        guard ProcessInfo.processInfo.systemUptime - timestamp <= 0.05,
-              clickToMinimizeEnabled, Permissions.accessibilityGranted,
+        guard clickToMinimizeEnabled, Permissions.accessibilityGranted,
               clickCount == 1, !hasUnsupportedModifiers(modifierFlags), let point else { return }
         checkDockProcess()
         guard let item = dockApplicationDockItem(atQuartzPoint: point),
