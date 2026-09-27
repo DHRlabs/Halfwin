@@ -458,7 +458,7 @@ final class LayoutMenuManager {
     }
 
     private func selectKeyboardNumber(_ keyCode: Int64) {
-        let digits: [Int64: Int] = [18: 1, 19: 2, 20: 3, 21: 4, 23: 5, 22: 6, 26: 7, 28: 8, 25: 9, 29: 0]
+        let digits: [Int64: Int] = [18: 1, 19: 2, 20: 3, 21: 4, 23: 5, 22: 6, 26: 7, 28: 8, 25: 9, 29: 10]
         let digit = digits[keyCode] ?? 0
         guard digit > 0 else { return }
         if let layoutIndex = dropState.keyboardLayoutIndex, dropState.keyboardZoneIndex != nil {
@@ -991,7 +991,7 @@ private struct LayoutTileView: View {
                 .stroke(Color.secondary.opacity(0.55), lineWidth: max(0.7, scale))
                 .frame(width: size.width - 10 * scale, height: size.height - 10 * scale)
                 .offset(x: 5 * scale, y: 5 * scale)
-            Text("\(tileIndex + 1)")
+            Text(tileIndex == 9 ? "0" : "\(tileIndex + 1)")
                 .font(.system(size: 10 * scale, weight: .bold, design: .rounded))
                 .foregroundStyle(.white)
                 .padding(3 * scale)
@@ -1069,15 +1069,15 @@ private struct LayoutTileView: View {
         guard let targetIcon = dropState.preview.targetIcon, let selectedZone else { return nil }
         if case .preset = zone.dropZone { return selectedZone == zone.dropZone ? targetIcon : nil }
         guard case .layout(let layout) = tile,
-              case .layout(_, let selectedAction) = selectedZone,
+              case .layout(let selectedLayout, let selectedAction) = selectedZone,
+              selectedLayout == layout,
               case .layout(_, let action) = zone.dropZone else { return nil }
-        if action == selectedAction { return targetIcon }
-        guard dropState.preview.fillMode == .mostRecent else { return nil }
-
+        if selectedZone == zone.dropZone { return targetIcon }
         let remembered = dropState.preview.rememberedWindows[layout.title] ?? [:]
         if let window = remembered[action], let pid = window.processIdentifier {
             return NSRunningApplication(processIdentifier: pid)?.icon
         }
+        guard dropState.preview.fillMode == .mostRecent else { return nil }
         let occupied = Set(remembered.keys).union([selectedAction])
         var choices = (dropState.preview.choices[layout.title] ?? []).makeIterator()
         for candidateZone in layout.zones where !occupied.contains(candidateZone.action) {
