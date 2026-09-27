@@ -128,7 +128,7 @@ final class SnapWindowRegistry {
         for (action, window) in zoneOwners[display] ?? [:] {
             guard layout.zones.contains(where: { $0.action == action }),
                   let record = records[window], record.state == .active,
-                  record.action == action, record.layout == layout,
+                  record.action == action,
                   displayID(for: record.frame) == display else { continue }
             occupants[action] = window
         }
@@ -317,8 +317,8 @@ final class SnapWindowRegistry {
         zoneOwners = [:]
         for record in records.values where record.state == .active {
             guard let display = displayID(for: record.frame),
-                  let layout = record.layout, layout.zones.contains(where: { $0.action == record.action }),
-                  currentLayouts[display] == layout else { continue }
+                  let layout = currentLayouts[display],
+                  layout.zones.contains(where: { $0.action == record.action }) else { continue }
             zoneOwners[display, default: [:]][record.action] = record.window
         }
     }
