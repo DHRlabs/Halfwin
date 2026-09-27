@@ -122,7 +122,7 @@ enum LayoutPreset: Equatable {
 
 enum LayoutDropZone: Equatable {
     case preset(LayoutPreset)
-    case layout(SnapAction)
+    case layout(SnapMultiWindowLayout, SnapAction)
 }
 
 private struct LayoutMenuZone: Identifiable {
@@ -153,7 +153,7 @@ private enum LayoutMenuTile: Identifiable {
             return [LayoutMenuZone(name: title, dropZone: .preset(preset), rect: rect)]
         case .layout(let layout):
             return layout.zones(portrait: portrait).map {
-                LayoutMenuZone(name: $0.action.displayName, dropZone: .layout($0.action), rect: $0.rect)
+                LayoutMenuZone(name: $0.action.displayName, dropZone: .layout(layout, $0.action), rect: $0.rect)
             }
         }
     }
@@ -169,6 +169,7 @@ private enum LayoutMenuTiles {
             .preset(title: "Normal", preset: .restore, rect: CGRect(x: 0.15, y: 0.15, width: 0.7, height: 0.7)),
             .preset(title: "Maximize", preset: .maximize, rect: CGRect(x: 0, y: 0, width: 1, height: 1)),
             .layout(.leftStack), .layout(.thirds), .layout(.commandCenter),
+            .layout(.leftTwoThirds), .layout(.rightTwoThirds),
         ]
     }
 }
@@ -219,7 +220,7 @@ final class LayoutMenuManager {
         settings: settings,
         previewIcons: { [weak self] in self?.makePreview() ?? .empty },
         onPick: { [weak self] preset in self?.pick(preset) },
-        onPickZone: { [weak self] action in self?.pickLayoutZone(action) }
+        onPickZone: { [weak self] layout, action in self?.pickLayoutZone(layout: layout, action: action) }
     )
 
     /// The display currently armed (dwelling or shown) for.
@@ -489,7 +490,8 @@ final class LayoutMenuManager {
         guard zones.indices.contains(zoneIndex) else { return }
         switch zones[zoneIndex].dropZone {
         case .preset(let preset): DispatchQueue.main.async { [weak self] in self?.pick(preset) }
-        case .layout(let action): DispatchQueue.main.async { [weak self] in self?.pickLayoutZone(action) }
+        case .layout(let layout, let action):
+            DispatchQueue.main.async { [weak self] in self?.pickLayoutZone(layout: layout, action: action) }
         }
     }
 
@@ -639,7 +641,7 @@ final class LayoutMenuManager {
             SnapGeometry.isClose(startFrame, $0.target) ? $0.preMove : nil
         } ?? startFrame
         return apply(target, to: window, currentFrame: currentFrame, preMove: preMove,
-                     action: action, screen: screen)
+                     action: action, screen: screen, layout: layout(for: zone))
     }
 
     private func targetFrame(for zone: LayoutDropZone, window: AXWindow, currentFrame: CGRect,
@@ -656,8 +658,13 @@ final class LayoutMenuManager {
     private func action(for zone: LayoutDropZone) -> SnapAction? {
         switch zone {
         case .preset(let preset): return snapAction(for: preset)
-        case .layout(let action): return action
+        case .layout(_, let action): return action
         }
+    }
+
+    private func layout(for zone: LayoutDropZone) -> SnapMultiWindowLayout? {
+        guard case .layout(let layout, _) = zone else { return nil }
+        return layout
     }
 
     private func hidePanel(suppressRearm: Bool = false) {
@@ -713,13 +720,13 @@ final class LayoutMenuManager {
     }
 
     /// Called for a zone inside a multi-zone thumbnail.
-    fileprivate func pickLayoutZone(_ action: SnapAction) {
+    fileprivate func pickLayoutZone(layout: SnapMultiWindowLayout, action: SnapAction) {
         defer { hidePanel(suppressRearm: true) }
         guard let screen = activeScreen, let window = targetWindow, let currentFrame = window.frame else { return }
         let portrait = screen.frame.height > screen.frame.width
         guard let target = SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
                                               currentWindowFrame: currentFrame, portrait: portrait) else { return }
-        apply(target, to: window, currentFrame: currentFrame, action: action, screen: screen)
+        apply(target, to: window, currentFrame: currentFrame, action: action, screen: screen, layout: layout)
     }
 
     /// Only sound if the window is still where this menu last put it — drop
@@ -744,7 +751,8 @@ final class LayoutMenuManager {
     @discardableResult
     private func apply(_ target: CGRect, to window: AXWindow, currentFrame: CGRect,
                        preMove explicitPreMove: CGRect? = nil,
-                       action: SnapAction, screen: NSScreen) -> CGRect? {
+                       action: SnapAction, screen: NSScreen,
+                       layout: SnapMultiWindowLayout? = nil) -> CGRect? {
         let preMove: CGRect
         if let explicitPreMove {
             preMove = explicitPreMove
@@ -758,7 +766,8 @@ final class LayoutMenuManager {
             Self.lastMoved[window] = (target: readBack, preMove: preMove)
             if SnapGeometry.matchesSnapEdges(readBack, target: target, screenFrame: screen.visibleFrame),
                SnapGeometry.matchesSnapSize(readBack, target: target) {
-                SnapEvents.didSnap(window: window, action: action, screen: screen, origin: .layoutMenu, frame: readBack)
+                SnapEvents.didSnap(window: window, action: action, screen: screen,
+                                   origin: .layoutMenu, frame: readBack, layout: layout)
             }
             return readBack
         }
@@ -802,7 +811,7 @@ final class LayoutMenuManager {
 /// just below the menu bar on the triggering display. Non-activating so the
 /// frontmost app (whose window the picks affect) never loses focus.
 private final class LayoutMenuPanel: NSPanel {
-    fileprivate static let columns = 4
+    fileprivate static let columns = 5
     fileprivate static let tileWidth: CGFloat = 120
     fileprivate static let tileHeight: CGFloat = 75
     fileprivate static let tileSpacing: CGFloat = 14
@@ -819,7 +828,7 @@ private final class LayoutMenuPanel: NSPanel {
 
     init(dropState: LayoutMenuDropState, settings: LayoutMenuSettings,
          previewIcons: @escaping () -> LayoutMenuPreview, onPick: @escaping (LayoutPreset) -> Void,
-         onPickZone: @escaping (SnapAction) -> Void) {
+         onPickZone: @escaping (SnapMultiWindowLayout, SnapAction) -> Void) {
         self.settings = settings
         self.previewIcons = previewIcons
         self.dropState = dropState
@@ -931,7 +940,7 @@ private final class LayoutMenuPanel: NSPanel {
 private struct LayoutMenuView: View {
     @ObservedObject var dropState: LayoutMenuDropState
     let onPick: (LayoutPreset) -> Void
-    let onPickZone: (SnapAction) -> Void
+    let onPickZone: (SnapMultiWindowLayout, SnapAction) -> Void
 
     var body: some View {
         let scale = dropState.scale
@@ -957,7 +966,7 @@ private struct LayoutTileView: View {
     let tileIndex: Int
     @ObservedObject var dropState: LayoutMenuDropState
     let onPick: (LayoutPreset) -> Void
-    let onPickZone: (SnapAction) -> Void
+    let onPickZone: (SnapMultiWindowLayout, SnapAction) -> Void
 
     var body: some View {
         let scale = dropState.scale
@@ -1046,7 +1055,7 @@ private struct LayoutTileView: View {
             .onTapGesture {
                 switch zone.dropZone {
                 case .preset(let preset): onPick(preset)
-                case .layout(let action): onPickZone(action)
+                case .layout(let layout, let action): onPickZone(layout, action)
                 }
             }
             .help(label)
@@ -1060,8 +1069,8 @@ private struct LayoutTileView: View {
         guard let targetIcon = dropState.preview.targetIcon, let selectedZone else { return nil }
         if case .preset = zone.dropZone { return selectedZone == zone.dropZone ? targetIcon : nil }
         guard case .layout(let layout) = tile,
-              case .layout(let selectedAction) = selectedZone,
-              case .layout(let action) = zone.dropZone else { return nil }
+              case .layout(_, let selectedAction) = selectedZone,
+              case .layout(_, let action) = zone.dropZone else { return nil }
         if action == selectedAction { return targetIcon }
         guard dropState.preview.fillMode == .mostRecent else { return nil }
 

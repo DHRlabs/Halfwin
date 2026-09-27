@@ -19,6 +19,7 @@ enum SnapRecordState { case active, hidden, minimized, offSpace, stale }
 struct SnappedWindowRecord {
     let window: AXWindow
     var action: SnapAction
+    var layout: SnapMultiWindowLayout?
     var frame: CGRect
     var state: SnapRecordState
     var windowID: CGWindowID?
@@ -112,6 +113,8 @@ final class SnapWindowRegistry {
 
     func hasRecord(for window: AXWindow) -> Bool { records[window] != nil }
 
+    func layout(for window: AXWindow) -> SnapMultiWindowLayout? { records[window]?.layout }
+
     func snappedLane(for window: AXWindow) -> SnapLane? {
         guard let record = records[window], record.state == .active,
               let display = displayID(for: record.frame), let screen = display.screen else { return nil }
@@ -125,7 +128,8 @@ final class SnapWindowRegistry {
         for (action, window) in zoneOwners[display] ?? [:] {
             guard layout.zones.contains(where: { $0.action == action }),
                   let record = records[window], record.state == .active,
-                  record.action == action, displayID(for: record.frame) == display else { continue }
+                  record.action == action, record.layout == layout,
+                  displayID(for: record.frame) == display else { continue }
             occupants[action] = window
         }
         return occupants
@@ -228,7 +232,8 @@ final class SnapWindowRegistry {
         rebuildSeams()
     }
 
-    func commitSnap(window: AXWindow, action: SnapAction, screen: NSScreen, frame: CGRect? = nil) {
+    func commitSnap(window: AXWindow, action: SnapAction, screen: NSScreen, frame: CGRect? = nil,
+                    layout chosenLayout: SnapMultiWindowLayout? = nil) {
         guard ![.none, .maximize, .center].contains(action) else {
             unsnap(window)
             return
@@ -237,13 +242,14 @@ final class SnapWindowRegistry {
         validate()
         guard let frame = frame ?? window.frame else { return }
         let display = SnapDisplayID(screen)
-        if let layout = SnapMultiWindowLayout.containing(action) {
+        let layout = chosenLayout ?? SnapMultiWindowLayout.containing(action)
+        if let layout {
             if currentLayouts[display] != layout { zoneOwners[display] = [:] }
             currentLayouts[display] = layout
         }
         let windowID = matchWindowID(window, frame: frame)
 
-        if SnapMultiWindowLayout.containing(action) != nil {
+        if layout != nil {
             for other in Array(records.keys) where other != window {
                 guard let record = records[other], record.action == action,
                       displayID(for: record.frame) == display else { continue }
@@ -263,9 +269,9 @@ final class SnapWindowRegistry {
         for ownerDisplay in Array(zoneOwners.keys) {
             zoneOwners[ownerDisplay] = zoneOwners[ownerDisplay]?.filter { $0.value != window }
         }
-        records[window] = SnappedWindowRecord(window: window, action: action, frame: frame,
+        records[window] = SnappedWindowRecord(window: window, action: action, layout: layout, frame: frame,
                                                state: .active, windowID: windowID)
-        if SnapMultiWindowLayout.containing(action) != nil { zoneOwners[display, default: [:]][action] = window }
+        rebuildZoneOwners()
         rebuildSeams()
     }
 
@@ -311,7 +317,8 @@ final class SnapWindowRegistry {
         zoneOwners = [:]
         for record in records.values where record.state == .active {
             guard let display = displayID(for: record.frame),
-                  let layout = SnapMultiWindowLayout.containing(record.action), currentLayouts[display] == layout else { continue }
+                  let layout = record.layout, layout.zones.contains(where: { $0.action == record.action }),
+                  currentLayouts[display] == layout else { continue }
             zoneOwners[display, default: [:]][record.action] = record.window
         }
     }
