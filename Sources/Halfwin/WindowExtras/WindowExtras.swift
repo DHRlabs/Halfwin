@@ -1,7 +1,7 @@
 import AppKit
 import ApplicationServices
 import CoreGraphics
-import os
+import os // DIAG remove after live capture
 
 enum ShowDesktopStyle: String, CaseIterable, Identifiable {
     case pushWindowsAside = "push-windows-aside"
@@ -55,7 +55,7 @@ final class WindowExtrasManager {
     private var pushedWindows: [AXWindow: (frame: CGRect, pushedFrame: CGRect, windowID: CGWindowID, application: NSRunningApplication)] = [:]
     private var applicationToReactivate: NSRunningApplication?
     private let frameMemory = WindowFrameMemory()
-    private let diagLogger = Logger(subsystem: "com.dhrlabs.halfwin", category: "diag")
+    private let diagLogger = Logger(subsystem: "com.dhrlabs.halfwin", category: "diag") // DIAG remove after live capture
     private var screenObserver: NSObjectProtocol?
     private var activationObserver: NSObjectProtocol?
 
@@ -161,26 +161,26 @@ final class WindowExtrasManager {
         switch type {
         case .leftMouseDown:
             let point = event.location.axFlipped
-            if showDesktopEnabled, let screen = desktopCornerScreen(point) {
-                let displayID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
+            if showDesktopEnabled, let screen = desktopCornerScreen(point) { // DIAG remove after live capture
+                let displayID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0 // DIAG remove after live capture
                 logDiagnostic("showDesktop cornerHit point=\(point) screen=\(displayID) frame=\(screen.frame)") // DIAG remove after live capture
                 swallowMouseDown(event)
                 DispatchQueue.main.async { [weak self] in self?.toggleDesktop() }
                 return nil
             }
-            if showDesktopEnabled, !pushedWindows.isEmpty {
-                let pushedWindow = pushedWindow(at: event.location)
-                let screen = NSScreen.screens.first { $0.frame.axFlipped.contains(event.location) }
-                let displayID = screen.map {
+            if showDesktopEnabled, !pushedWindows.isEmpty { // DIAG remove after live capture
+                let pushedWindow = pushedWindow(at: event.location) // DIAG remove after live capture
+                let screen = NSScreen.screens.first { $0.frame.axFlipped.contains(event.location) } // DIAG remove after live capture
+                let displayID = screen.map { // DIAG remove after live capture
                     ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? 0
-                } ?? 0
-                let hit = pushedWindow.flatMap { window in
+                } ?? 0 // DIAG remove after live capture
+                let hit = pushedWindow.flatMap { window in // DIAG remove after live capture
                     pushedWindows[window].map { pushed in
                         "windowID=\(pushed.windowID) pid=\(pushed.application.processIdentifier) expectedSliverFrame=\(pushed.pushedFrame)"
-                    }
-                } ?? "none"
+                    } // DIAG remove after live capture
+                } ?? "none" // DIAG remove after live capture
                 logDiagnostic("showDesktop sliverHitTest point=\(event.location) screen=\(displayID) hit=\(hit)") // DIAG remove after live capture
-                if let pushedWindow {
+                if let pushedWindow { // DIAG remove after live capture
                     swallowMouseDown(event)
                     DispatchQueue.main.async { [weak self] in self?.restorePushedWindow(pushedWindow) }
                     return nil
@@ -472,7 +472,7 @@ final class WindowExtrasManager {
         }
     }
 
-    private func desktopCornerScreen(_ point: CGPoint) -> NSScreen? {
+    private func desktopCornerScreen(_ point: CGPoint) -> NSScreen? { // DIAG remove after live capture
         let screens = NSScreen.screens
         return screens.first { screen in
             let frame = screen.frame
@@ -545,9 +545,9 @@ final class WindowExtrasManager {
             ShowDesktopEvents.willChangeFrame(of: window, to: target, pushedAside: true)
             window.setFrame(target)
             let (movedFrame, moveError) = AXWindow.frameWithError(of: window.element)
-            let moved = moveError == .success && movedFrame.map { SnapGeometry.isClose($0, target, tolerance: 4) } == true
+            let moved = moveError == .success && movedFrame.map { SnapGeometry.isClose($0, target, tolerance: 4) } == true // DIAG remove after live capture
             logDiagnostic("showDesktop pushWindow windowID=\(choice.id) pid=\(choice.application.processIdentifier) screen=\(screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber ?? 0) before=\(frame) requested=\(target) after=\(String(describing: movedFrame)) axError=\(String(describing: moveError)) result=\(moved ? "pushed" : "notPushed")") // DIAG remove after live capture
-            if moved, let movedFrame {
+            if moved, let movedFrame { // DIAG remove after live capture
                 pushed[window] = (frame, movedFrame, choice.id, choice.application)
             } else if moveError != .invalidUIElement && moveError != .success {
                 pushed[window] = (frame, target, choice.id, choice.application)
@@ -597,9 +597,9 @@ final class WindowExtrasManager {
         ShowDesktopEvents.willChangeFrame(of: window, to: target, pushedAside: false)
         window.setFrame(target)
         let (restoredFrame, restoreError) = AXWindow.frameWithError(of: window.element)
-        let restored = restoreError == .success && restoredFrame.map { SnapGeometry.isClose($0, target, tolerance: 8) } == true
+        let restored = restoreError == .success && restoredFrame.map { SnapGeometry.isClose($0, target, tolerance: 8) } == true // DIAG remove after live capture
         logDiagnostic("showDesktop restore windowID=\(pushed.windowID) pid=\(pushed.application.processIdentifier) before=\(String(describing: currentFrame)) requested=\(target) after=\(String(describing: restoredFrame)) axError=\(String(describing: restoreError)) currentAXError=\(String(describing: currentError)) result=\(restored ? "restored" : "failed")") // DIAG remove after live capture
-        guard restored else {
+        guard restored else { // DIAG remove after live capture
             if restoreError == .invalidUIElement {
                 pushedWindows.removeValue(forKey: window)
                 ShowDesktopEvents.didForget(window)
@@ -613,8 +613,8 @@ final class WindowExtrasManager {
         return true
     }
 
-    private func logDiagnostic(_ message: String) {
-        diagLogger.info("HWDIAG \(message, privacy: .public)") // DIAG remove after live capture
+    private func logDiagnostic(_ message: String) { // DIAG remove after live capture
+        diagLogger.notice("HWDIAG \(message, privacy: .public)") // DIAG remove after live capture
     }
 
     private func restorePushedWindows(reactivateApplication: Bool = false) {
