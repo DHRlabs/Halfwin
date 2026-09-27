@@ -26,6 +26,6 @@ final class SnapAssistSettings: ObservableObject {
 
     private init() {
         fillEmptySpots = defaults.string(forKey: fillEmptySpotsKey)
-            .flatMap(SnapAssistFillMode.init(rawValue:)) ?? .mostRecent
+            .flatMap(SnapAssistFillMode.init(rawValue:)) ?? .letMePick
     }
 }
