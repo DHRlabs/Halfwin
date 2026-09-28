@@ -73,6 +73,8 @@ final class WindowExtrasManager {
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             DispatchQueue.main.async {
                 guard let self else { return }
+                guard app.bundleIdentifier != "com.apple.finder" ||
+                    AXWindow.focusedWindow(of: app) != nil else { return }
                 if self.hiddenApplicationsAt.map({ ProcessInfo.processInfo.systemUptime - $0 >= 1 }) != false,
                    self.hiddenApplications?.contains(where: { $0.processIdentifier == app.processIdentifier }) == true,
                    !app.isHidden {
@@ -316,13 +318,13 @@ final class WindowExtrasManager {
                   let bounds = info[kCGWindowBounds as String] as? NSDictionary,
                   let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary),
                   frame.contains(point) else { continue }
-            guard (info[kCGWindowLayer as String] as? Int) == 0 else { return nil }
-            guard let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
-                  let pid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
-                  let application = NSRunningApplication(processIdentifier: pid) else { return nil }
-            guard application.bundleIdentifier != "com.dhrlabs.halfwin",
-                  application.bundleIdentifier != "com.dhrlabs.dockside",
-                  application.activationPolicy == .regular else { return nil }
+            guard let pid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
+                  let application = NSRunningApplication(processIdentifier: pid) else { continue }
+            if application.bundleIdentifier == "com.dhrlabs.halfwin" ||
+                application.bundleIdentifier == "com.dhrlabs.dockside" { return nil }
+            guard application.activationPolicy == .regular else { continue }
+            guard (info[kCGWindowLayer as String] as? Int) == 0,
+                  let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value else { return nil }
             guard let match = pushedWindows.first(where: { $0.value.windowID == id }) else { return nil }
             guard SnapGeometry.isClose(frame.axFlipped, match.value.pushedFrame, tolerance: 8) else {
                 pushedWindows.removeValue(forKey: match.key)
