@@ -372,7 +372,6 @@ final class WindowExtrasManager {
         let registry = SnapWindowRegistry.shared
         registry.validate()
         let lane = registry.snappedLane(for: window)
-        let fillSide = lane.flatMap { snappedFillSide(for: frame, on: $0.screen) }
         let snapped: (action: SnapAction, screen: NSScreen)?
         if let lane, lane.action == .fill {
             snapped = snappedAction(for: frame) ?? snappedFillSide(for: frame, on: lane.screen)
@@ -382,27 +381,12 @@ final class WindowExtrasManager {
         let action: SnapAction
         var rememberFrame = true
         var screen: NSScreen?
-        var hopFromScreen: NSScreen?
         switch keyCode {
         case 123:
-            if let hop = fillSide?.action == .leftHalf ? fillSide : snapped?.action == .leftHalf ? snapped : nil {
-                guard let adjacent = adjacentScreen(from: hop.screen, direction: -1) else { return }
-                action = .rightHalf
-                screen = adjacent
-                hopFromScreen = hop.screen
-            } else {
-                action = .leftHalf
-            }
+            action = .leftHalf
             rememberFrame = true
         case 124:
-            if let hop = fillSide?.action == .rightHalf ? fillSide : snapped?.action == .rightHalf ? snapped : nil {
-                guard let adjacent = adjacentScreen(from: hop.screen, direction: 1) else { return }
-                action = .leftHalf
-                screen = adjacent
-                hopFromScreen = hop.screen
-            } else {
-                action = .rightHalf
-            }
+            action = .rightHalf
             rememberFrame = true
         case 126:
             switch snapped?.action {
@@ -439,12 +423,9 @@ final class WindowExtrasManager {
         default:
             return
         }
-        guard let target = targetFrame(action, for: window, current: frame, on: screen) else { return }
-        if let hopFromScreen { frameMemory.moveRestoreFrame(window, from: hopFromScreen, to: target.screen) }
-        var destination = target.frame
-        var effectiveAction = action
         let usesFill = SnapSettings.shared.fillAvailableSpace && [123, 124].contains(keyCode)
-        if usesFill {
+        func resolvedDestination(for action: SnapAction, on target: (frame: CGRect, screen: NSScreen)) -> (frame: CGRect, action: SnapAction) {
+            guard usesFill else { return (target.frame, action) }
             let position: SnapPosition = action == .leftHalf ? .left : .right
             let visible = target.screen.visibleFrame
             let point = CGPoint(x: position == .left ? visible.minX : visible.maxX, y: frame.midY)
@@ -453,10 +434,24 @@ final class WindowExtrasManager {
                 snappedFrames: registry.fillNeighborFrames(on: target.screen, excluding: window),
                 pointIsRequired: false
             ) {
-                destination = filled
-                effectiveAction = .fill
+                return (filled, .fill)
             }
+            return (target.frame, action)
         }
+        guard var target = targetFrame(action, for: window, current: frame, on: screen) else { return }
+        var result = resolvedDestination(for: action, on: target)
+        if [123, 124].contains(keyCode),
+           SnapGeometry.isClose(result.frame, frame, tolerance: SnapGeometry.edgeTolerance) {
+            let direction: CGFloat = keyCode == 123 ? -1 : 1
+            let hopAction: SnapAction = keyCode == 123 ? .rightHalf : .leftHalf
+            guard let adjacent = adjacentScreen(from: target.screen, direction: direction),
+                  let hoppedTarget = targetFrame(hopAction, for: window, current: frame, on: adjacent) else { return }
+            frameMemory.moveRestoreFrame(window, from: target.screen, to: adjacent)
+            target = hoppedTarget
+            result = resolvedDestination(for: hopAction, on: target)
+        }
+        let destination = result.frame
+        let effectiveAction = result.action
         if rememberFrame && effectiveAction != .fill {
             frameMemory.set(window, current: frame, to: destination)
         } else {

@@ -15,7 +15,6 @@ final class SnapManager {
         var effectiveAction: SnapAction
         var frame: CGRect
         let cursor: CGPoint
-        let snappedFrames: [CGRect]
     }
 
     private let settings: SnapSettings
@@ -247,8 +246,7 @@ final class SnapManager {
             let resolved = resolvedFrame(for: action, position: position, cursor: cursor, base: rect,
                                          screen: screen, snappedFrames: neighbors, previous: currentPreviewFrame)
             let zone = Zone(screen: screen, position: position, action: action,
-                            effectiveAction: resolved.action, frame: resolved.frame, cursor: cursor,
-                            snappedFrames: neighbors)
+                            effectiveAction: resolved.action, frame: resolved.frame, cursor: cursor)
             currentZone = zone
             showPreview(resolved.frame)
         } else {

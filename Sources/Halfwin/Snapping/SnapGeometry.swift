@@ -106,8 +106,15 @@ enum SnapGeometry {
         let overlaps = snappedFrames.contains { overlapFrame.intersects($0) }
         guard isHalf(action) || (action != .maximize && overlaps) else { return .fixed }
         let contact = projectedContact(point, position: position, in: visibleFrame)
+        let commandArrowSide = !pointIsRequired && (position == .left || position == .right)
+        let avoidsOppositeEdge: (CGRect) -> Bool = { frame in
+            guard commandArrowSide else { return true }
+            let oppositeEdge = position == .left ? visibleFrame.maxX : visibleFrame.minX
+            let candidateEdge = position == .left ? frame.maxX : frame.minX
+            return abs(candidateEdge - oppositeEdge) > 0.001
+        }
         var candidates = emptyFrames(visibleFrame: visibleFrame, snappedFrames: snappedFrames).filter {
-            touches($0, position: position, visibleFrame: visibleFrame)
+            touches($0, position: position, visibleFrame: visibleFrame) && avoidsOppositeEdge($0)
         }
         if pointIsRequired {
             let obstacles = snappedFrames.filter { !containsClosed($0.standardized, contact) }
@@ -119,7 +126,8 @@ enum SnapGeometry {
             if candidates.isEmpty {
                 let obstacles = snappedFrames.filter { !containsClosed($0.standardized, contact) }
                 candidates = emptyFrames(visibleFrame: visibleFrame, snappedFrames: obstacles).filter {
-                    touches($0, position: position, visibleFrame: visibleFrame) && fixedFrame.contains($0)
+                    touches($0, position: position, visibleFrame: visibleFrame) && fixedFrame.contains($0) &&
+                        avoidsOppositeEdge($0)
                 }
             }
             if !isCorner(position), !candidates.isEmpty {

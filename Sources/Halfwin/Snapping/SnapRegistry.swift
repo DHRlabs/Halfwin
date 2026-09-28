@@ -256,10 +256,8 @@ final class SnapWindowRegistry {
                       displayID(for: record.frame) == display else { continue }
                 switch record.state {
                 case .active:
-                    if !isFill {
-                        _ = other.setMinimized(true)
-                        removeRecord(for: other)
-                    }
+                    _ = other.setMinimized(true)
+                    removeRecord(for: other)
                 case .minimized, .hidden:
                     removeRecord(for: other)
                 case .offSpace:
