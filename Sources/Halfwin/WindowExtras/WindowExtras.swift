@@ -372,6 +372,7 @@ final class WindowExtrasManager {
         let registry = SnapWindowRegistry.shared
         registry.validate()
         let lane = registry.snappedLane(for: window)
+        let fillSide = lane.flatMap { snappedFillSide(for: frame, on: $0.screen) }
         let snapped: (action: SnapAction, screen: NSScreen)?
         if let lane, lane.action == .fill {
             snapped = snappedAction(for: frame) ?? snappedFillSide(for: frame, on: lane.screen)
@@ -384,21 +385,21 @@ final class WindowExtrasManager {
         var hopFromScreen: NSScreen?
         switch keyCode {
         case 123:
-            if let snapped, snapped.action == .leftHalf {
-                guard let adjacent = adjacentScreen(from: snapped.screen, direction: -1) else { return }
+            if let hop = fillSide?.action == .leftHalf ? fillSide : snapped?.action == .leftHalf ? snapped : nil {
+                guard let adjacent = adjacentScreen(from: hop.screen, direction: -1) else { return }
                 action = .rightHalf
                 screen = adjacent
-                hopFromScreen = snapped.screen
+                hopFromScreen = hop.screen
             } else {
                 action = .leftHalf
             }
             rememberFrame = true
         case 124:
-            if let snapped, snapped.action == .rightHalf {
-                guard let adjacent = adjacentScreen(from: snapped.screen, direction: 1) else { return }
+            if let hop = fillSide?.action == .rightHalf ? fillSide : snapped?.action == .rightHalf ? snapped : nil {
+                guard let adjacent = adjacentScreen(from: hop.screen, direction: 1) else { return }
                 action = .leftHalf
                 screen = adjacent
-                hopFromScreen = snapped.screen
+                hopFromScreen = hop.screen
             } else {
                 action = .rightHalf
             }
