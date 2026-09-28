@@ -15,10 +15,10 @@ final class SnapGroupsManager {
         refreshPermission()
     }
 
-    func didSnap(window: AXWindow, action: SnapAction, screen: NSScreen) {
+    func didSnap(window: AXWindow, action _: SnapAction, screen: NSScreen) {
         guard enabled, Permissions.accessibilityGranted,
               let record = SnapWindowRegistry.shared.record(for: window),
-              let side = side(for: action, frame: record.frame, visibleFrame: screen.visibleFrame),
+              let side = side(for: record.action, frame: record.frame, visibleFrame: screen.visibleFrame),
               let lane = SnapWindowRegistry.shared.snappedLane(for: window),
               lane.display == SnapDisplayID(screen) else { return }
         pruneGroups()

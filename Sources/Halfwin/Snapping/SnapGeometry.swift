@@ -97,12 +97,15 @@ enum SnapGeometry {
     enum FillResult { case fixed, fill(CGRect) }
     static let minimumFillSize = CGSize(width: 200, height: 120)
 
-    static func fillFrame(at point: CGPoint, position: SnapPosition, visibleFrame: CGRect,
-                          snappedFrames: [CGRect], previousFrame: CGRect? = nil,
+    static func fillFrame(at point: CGPoint, position: SnapPosition, action: SnapAction,
+                          fixedFrame: CGRect, visibleFrame: CGRect, snappedFrames: [CGRect],
+                          previousFrame: CGRect? = nil,
                           pointIsRequired: Bool = true) -> FillResult {
         guard !snappedFrames.isEmpty else { return .fixed }
+        guard isHalf(action) || snappedFrames.contains(where: { fixedFrame.intersects($0) }) else { return .fixed }
         let contact = projectedContact(point, position: position, in: visibleFrame)
-        var candidates = emptyFrames(visibleFrame: visibleFrame, snappedFrames: snappedFrames).filter {
+        let obstacles = snappedFrames.filter { !containsClosed($0.standardized, contact) }
+        var candidates = emptyFrames(visibleFrame: visibleFrame, snappedFrames: obstacles).filter {
             touches($0, position: position, visibleFrame: visibleFrame)
         }
         if pointIsRequired {
