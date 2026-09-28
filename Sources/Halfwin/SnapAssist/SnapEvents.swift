@@ -1,7 +1,7 @@
 import AppKit
 
 enum SnapOrigin {
-    case layoutMenu, other
+    case layoutMenu, glue, other
 }
 
 /// Shared notification for successful Halfwin snaps. Called on the app's event loop.

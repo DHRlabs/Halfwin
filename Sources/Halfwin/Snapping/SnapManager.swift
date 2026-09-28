@@ -363,8 +363,8 @@ final class SnapManager {
               let aligned = SnapGlueGeometry.alignedFrame(readBack, with: neighborFrame,
                                                           in: screen.visibleFrame, tolerance: 1),
               SnapGeometry.isClose(aligned, readBack, tolerance: 1) else { return }
-        SnapEvents.didSnap(window: window, action: .fill, screen: screen, frame: readBack)
-        SnapEvents.didSnap(window: match.window, action: .fill, screen: screen, frame: neighborFrame)
+        SnapEvents.didSnap(window: window, action: .fill, screen: screen, origin: .glue, frame: readBack)
+        SnapEvents.didSnap(window: match.window, action: .fill, screen: screen, origin: .glue, frame: neighborFrame)
     }
 
     private func resetDrag() {
