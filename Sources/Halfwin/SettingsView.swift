@@ -18,6 +18,7 @@ struct SettingsView: View {
         Form {
             Section("Snapping") {
                 Toggle("Snap windows when dragged to an edge", isOn: $settings.dragSnappingEnabled)
+                Toggle("Glue windows that touch into a shared border", isOn: $settings.glueTouchingWindowsEnabled)
                 Toggle("Top and bottom of the side edges snap to the top or bottom half",
                        isOn: $settings.sideEdgesSnapToTopBottomHalf)
                     .disabled(settings.mapPreset == .windows)
