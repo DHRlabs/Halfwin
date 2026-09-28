@@ -70,7 +70,7 @@ final class SnapAssistManager {
             SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
                                currentWindowFrame: $0, portrait: screen.frame.height > screen.frame.width)
         }
-        guard !suppressNextAssist else { return }
+        guard !suppressNextAssist, origin != .glue else { return }
         if action == .fill {
             guard settings.fillEmptySpots != .leaveEmpty else {
                 hidePanel()
