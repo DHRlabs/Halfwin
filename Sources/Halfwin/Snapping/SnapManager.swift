@@ -237,16 +237,12 @@ final class SnapManager {
 
         if let rect = SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
                                          currentWindowFrame: CGRect(origin: .zero, size: size), portrait: screen.frame.isPortrait) {
-            let zoneChanged = currentZone.map {
-                $0.screen != screen || $0.position != position || $0.action != action
-            } ?? true
             let registry = SnapWindowRegistry.shared
-            if settings.fillAvailableSpace && zoneChanged {
+            if settings.fillAvailableSpace {
                 registry.validateIfNeeded(interval: 0.1)
             }
             let neighbors = settings.fillAvailableSpace
-                ? (zoneChanged ? registry.fillNeighborFrames(on: screen, excluding: window)
-                               : currentZone?.snappedFrames ?? [])
+                ? registry.fillNeighborFrames(on: screen, excluding: window)
                 : []
             let resolved = resolvedFrame(for: action, position: position, cursor: cursor, base: rect,
                                          screen: screen, snappedFrames: neighbors, previous: currentPreviewFrame)
@@ -308,7 +304,6 @@ final class SnapManager {
                                          previous: zone.frame)
             zone.effectiveAction = resolved.action
             zone.frame = resolved.frame
-            showPreview(resolved.frame)
         }
         draggedWindow.setFrame(zone.frame)
         // Only remember this as a real snap if the window actually landed

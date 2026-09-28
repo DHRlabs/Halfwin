@@ -102,17 +102,30 @@ enum SnapGeometry {
                           previousFrame: CGRect? = nil,
                           pointIsRequired: Bool = true) -> FillResult {
         guard !snappedFrames.isEmpty else { return .fixed }
-        guard isHalf(action) || snappedFrames.contains(where: { fixedFrame.intersects($0) }) else { return .fixed }
+        let overlapFrame = fixedFrame.insetBy(dx: edgeTolerance, dy: edgeTolerance)
+        let overlaps = snappedFrames.contains { overlapFrame.intersects($0) }
+        guard isHalf(action) || (action != .maximize && overlaps) else { return .fixed }
         let contact = projectedContact(point, position: position, in: visibleFrame)
-        let obstacles = snappedFrames.filter { !containsClosed($0.standardized, contact) }
-        var candidates = emptyFrames(visibleFrame: visibleFrame, snappedFrames: obstacles).filter {
+        var candidates = emptyFrames(visibleFrame: visibleFrame, snappedFrames: snappedFrames).filter {
             touches($0, position: position, visibleFrame: visibleFrame)
         }
         if pointIsRequired {
+            let obstacles = snappedFrames.filter { !containsClosed($0.standardized, contact) }
+            candidates = emptyFrames(visibleFrame: visibleFrame, snappedFrames: obstacles).filter {
+                touches($0, position: position, visibleFrame: visibleFrame)
+            }
             candidates = candidates.filter { containsClosed($0, contact) }
-        } else if !isCorner(position), !candidates.isEmpty {
-            let nearest = candidates.map { contactDistance($0, to: contact, position: position) }.min()!
-            candidates = candidates.filter { abs(contactDistance($0, to: contact, position: position) - nearest) < 0.001 }
+        } else {
+            if candidates.isEmpty {
+                let obstacles = snappedFrames.filter { !containsClosed($0.standardized, contact) }
+                candidates = emptyFrames(visibleFrame: visibleFrame, snappedFrames: obstacles).filter {
+                    touches($0, position: position, visibleFrame: visibleFrame) && fixedFrame.contains($0)
+                }
+            }
+            if !isCorner(position), !candidates.isEmpty {
+                let nearest = candidates.map { contactDistance($0, to: contact, position: position) }.min()!
+                candidates = candidates.filter { abs(contactDistance($0, to: contact, position: position) - nearest) < 0.001 }
+            }
         }
         guard let frame = preferred(candidates, position: position, visibleFrame: visibleFrame,
                                     previousFrame: previousFrame) else { return .fixed }
@@ -164,6 +177,21 @@ enum SnapGeometry {
 
     private static func preferred(_ candidates: [CGRect], position: SnapPosition?, visibleFrame: CGRect,
                                   previousFrame: CGRect?) -> CGRect? {
+        var candidates = candidates
+        if let position, position == .left || position == .right {
+            let oppositeEdgeX = position == .left ? visibleFrame.maxX : visibleFrame.minX
+            let tolerance: CGFloat = 0.001
+            let staysOnSide: (CGRect) -> Bool = { frame in
+                abs((position == .left ? frame.maxX : frame.minX) - oppositeEdgeX) >= tolerance
+            }
+            let sameStretchAsWideCandidate = candidates.filter { side in
+                staysOnSide(side) && candidates.contains { wide in
+                    !staysOnSide(wide) && abs(side.minY - wide.minY) < tolerance &&
+                        abs(side.maxY - wide.maxY) < tolerance
+                }
+            }
+            if !sameStretchAsWideCandidate.isEmpty { candidates = sameStretchAsWideCandidate }
+        }
         guard let largest = candidates.map({ $0.width * $0.height }).max() else { return nil }
         let tolerance = max(visibleFrame.width, visibleFrame.height)
         let tied = candidates.filter { largest - $0.width * $0.height <= tolerance }
