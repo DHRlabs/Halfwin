@@ -64,6 +64,14 @@ final class DockPreviewManager {
         var thumbnailTask: Task<Void, Never>?
     }
 
+    private struct PendingDockRestore {
+        let itemFrame: CGRect
+        let app: NSRunningApplication
+        let mouseDownPoint: CGPoint
+        let mouseDownTimestamp: TimeInterval
+        let mouseDownGeneration: Int
+    }
+
     private struct CachedShareableContent {
         let content: SCShareableContent
         let loadedAt: Date
@@ -88,6 +96,7 @@ final class DockPreviewManager {
     private var peekLeaveTimer: Timer?
     private var clickMonitor: Any?
     private var pendingDockClick: DockClick?
+    private var pendingDockRestore: PendingDockRestore?
     private var applicationActivationTimes: [pid_t: TimeInterval] = [:]
     private var dockClickInFlight = false
     private var mouseDownGeneration = 0
@@ -170,6 +179,7 @@ final class DockPreviewManager {
 
     func setShowDesktopDockRestoreEnabled(_ enabled: Bool) {
         showDesktopDockRestoreEnabled = enabled
+        if !enabled { pendingDockRestore = nil }
         refreshPermission()
     }
 
@@ -199,6 +209,7 @@ final class DockPreviewManager {
         previewsEnabled = false
         clickToMinimizeEnabled = false
         pendingDockClick = nil
+        pendingDockRestore = nil
         dockClickInFlight = false
         mouseDownGeneration += 1
         minimizedWindowsByApp.removeAll()
@@ -287,6 +298,7 @@ final class DockPreviewManager {
     private func stopRuntime() {
         guard running else { return }
         running = false
+        pendingDockRestore = nil
         stopBackgroundCaptureRefresh()
         cancelWarmThumbnailCaptures()
         dockProcessTimer?.invalidate()
@@ -773,18 +785,28 @@ final class DockPreviewManager {
         let clickGeneration = mouseDownGeneration
         if isShowing { hidePreview() }
         pendingDockClick = nil
+        pendingDockRestore = nil
         dockClickInFlight = false
         guard clickCount == 1, !hasUnsupportedModifiers(modifierFlags), let point else { return }
         checkDockProcess()
         guard let item = dockApplicationDockItem(atQuartzPoint: point),
               let app = runningApplication(forDockItem: item) else { return }
-        if onDockIconClick?(app) == true { return }
+        if showDesktopDockRestoreEnabled, onDockIconClick != nil,
+           let itemFrame = AXWindow.frame(of: item) {
+            pendingDockRestore = PendingDockRestore(
+                itemFrame: itemFrame,
+                app: app,
+                mouseDownPoint: point,
+                mouseDownTimestamp: timestamp,
+                mouseDownGeneration: clickGeneration
+            )
+        }
         guard clickToMinimizeEnabled, Permissions.accessibilityGranted else { return }
 
         let processID = app.processIdentifier
         let frontmostPID = frontmost?.processIdentifier
         guard frontmostPID == processID || minimizedWindowsByApp[processID] != nil else { return }
-        guard let itemFrame = AXWindow.frame(of: item) else { return }
+        guard let itemFrame = pendingDockRestore?.itemFrame ?? AXWindow.frame(of: item) else { return }
         guard let onScreenRecords = windowRecordsIfReadable(options: .optionOnScreenOnly) else { return }
         let ownsTopmostWindow = onScreenRecords.first?.processID == processID
         pendingDockClick = DockClick(
@@ -805,6 +827,16 @@ final class DockPreviewManager {
         clickCount: Int,
         modifierFlags: NSEvent.ModifierFlags
     ) {
+        let pendingRestore = pendingDockRestore
+        pendingDockRestore = nil
+        if let pendingRestore,
+           isMatchingShortDockClick(pendingRestore, at: point, timestamp: timestamp,
+                                    clickCount: clickCount, modifierFlags: modifierFlags),
+           onDockIconClick?(pendingRestore.app) == true {
+            pendingDockClick = nil
+            dockClickInFlight = false
+            return
+        }
         guard let pendingClick = pendingDockClick else { return }
         pendingDockClick = nil
         let pressDuration = timestamp - pendingClick.mouseDownTimestamp
@@ -858,6 +890,23 @@ final class DockPreviewManager {
             guard let self, self.mouseDownGeneration == click.mouseDownGeneration else { return }
             self.performDockIconClick(click)
         }
+    }
+
+    private func isMatchingShortDockClick(
+        _ click: PendingDockRestore,
+        at mouseUpPoint: CGPoint?,
+        timestamp: TimeInterval,
+        clickCount: Int,
+        modifierFlags: NSEvent.ModifierFlags
+    ) -> Bool {
+        let pressDuration = timestamp - click.mouseDownTimestamp
+        guard clickCount == 1, !hasUnsupportedModifiers(modifierFlags),
+              pressDuration >= 0, pressDuration < 0.4,
+              let mouseUpPoint,
+              hypot(mouseUpPoint.x - click.mouseDownPoint.x, mouseUpPoint.y - click.mouseDownPoint.y) <= 4,
+              click.itemFrame.contains(mouseUpPoint.axFlipped),
+              click.mouseDownGeneration == mouseDownGeneration else { return false }
+        return true
     }
 
     private func hasUnsupportedModifiers(_ flags: NSEvent.ModifierFlags) -> Bool {
