@@ -184,6 +184,7 @@ final class SnapSettings: ObservableObject {
     private let sideEdgesSnapToTopBottomHalfKey = "Halfwin.sideEdgesSnapToTopBottomHalf"
     private let fillAvailableSpaceKey = "Halfwin.fillAvailableSpace"
     private let linkedResizeEnabledKey = "Halfwin.linkedResizeEnabled"
+    private let glueTouchingWindowsEnabledKey = "Halfwin.glueTouchingWindowsEnabled"
 
     /// Lance's landscape Rectangle map: top-left/top-right corners are the
     /// outer thirds, top edge maximizes, left/right edges are halves, bottom corners are
@@ -246,6 +247,10 @@ final class SnapSettings: ObservableObject {
         didSet { defaults.set(linkedResizeEnabled, forKey: linkedResizeEnabledKey) }
     }
 
+    @Published var glueTouchingWindowsEnabled: Bool {
+        didSet { defaults.set(glueTouchingWindowsEnabled, forKey: glueTouchingWindowsEnabledKey) }
+    }
+
     private init() {
         let savedMap = defaults.data(forKey: mapKey).flatMap { try? JSONDecoder().decode(SnapMap.self, from: $0) }
         let savedPreset = defaults.string(forKey: mapPresetKey).flatMap(SnapMapPreset.init(rawValue:)) ?? .myMap
@@ -261,6 +266,8 @@ final class SnapSettings: ObservableObject {
         }
         fillAvailableSpace = defaults.object(forKey: fillAvailableSpaceKey) == nil ? true : defaults.bool(forKey: fillAvailableSpaceKey)
         linkedResizeEnabled = defaults.object(forKey: linkedResizeEnabledKey) == nil ? true : defaults.bool(forKey: linkedResizeEnabledKey)
+        glueTouchingWindowsEnabled = defaults.object(forKey: glueTouchingWindowsEnabledKey) == nil
+            ? true : defaults.bool(forKey: glueTouchingWindowsEnabledKey)
     }
 
     func action(for position: SnapPosition) -> SnapAction { map[position] ?? .none }

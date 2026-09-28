@@ -34,6 +34,14 @@ struct AXWindow {
         Self.objectAttribute(element, kAXMinimizedAttribute) ?? false
     }
 
+    var isStandardWindow: Bool {
+        Self.role(of: element) == kAXWindowRole && Self.subrole(of: element) == kAXStandardWindowSubrole
+    }
+
+    var isFullScreen: Bool {
+        Self.objectAttribute(element, "AXFullScreen") ?? false
+    }
+
     var processIdentifier: pid_t? {
         var pid: pid_t = 0
         return AXUIElementGetPid(element, &pid) == .success ? pid : nil

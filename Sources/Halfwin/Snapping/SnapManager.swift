@@ -1,9 +1,8 @@
 import AppKit
 import Combine
 
-/// Watches title-bar drags system-wide and snaps the dragged window to a
-/// Rectangle-style edge/corner zone on release. Adapted from the shape of
-/// Rectangle's `SnappingManager.swift` (MIT) — passive `NSEvent` global
+/// Watches system-wide window gestures for edge snapping and shared borders,
+/// following Rectangle's `SnappingManager.swift` (MIT): passive `NSEvent` global
 /// monitor, resolve-the-window-once-per-drag, footprint-on-hover,
 /// snap-on-release, escape-to-cancel — with the window-server/AX
 /// cross-checking and multi-monitor animation machinery stripped out.
@@ -27,6 +26,7 @@ final class SnapManager {
     private var initialFrame: CGRect?
     private var lockedSize: CGSize?
     private var isWindowMoving = false
+    private var didReceiveDrag = false
     private var cancelled = false
     private var currentZone: Zone?
     private var currentPreviewFrame: CGRect?
@@ -57,6 +57,10 @@ final class SnapManager {
             .dropFirst()
             .sink { [weak self] _ in DispatchQueue.main.async { self?.refreshPermission() } }
             .store(in: &cancellables)
+        settings.$glueTouchingWindowsEnabled
+            .dropFirst()
+            .sink { [weak self] _ in DispatchQueue.main.async { self?.refreshPermission() } }
+            .store(in: &cancellables)
         NSWorkspace.shared.notificationCenter.addObserver(
             forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
         ) { [weak self] _ in self?.refreshPermission() }
@@ -80,7 +84,7 @@ final class SnapManager {
                 self?.refreshPermission()
             }
         }
-        if Permissions.accessibilityGranted && settings.dragSnappingEnabled {
+        if Permissions.accessibilityGranted && (settings.dragSnappingEnabled || settings.glueTouchingWindowsEnabled) {
             start()
         } else {
             stop()
@@ -108,10 +112,10 @@ final class SnapManager {
     }
 
     private func handle(_ event: NSEvent) {
-        guard settings.dragSnappingEnabled else { return }
+        guard settings.dragSnappingEnabled || settings.glueTouchingWindowsEnabled else { return }
         switch event.type {
         case .keyDown:
-            guard event.keyCode == 53 else { return } // Escape
+            guard settings.dragSnappingEnabled, event.keyCode == 53 else { return } // Escape
             cancelled = true
             hidePreview()
             currentZone = nil
@@ -119,7 +123,8 @@ final class SnapManager {
         case .leftMouseDown:
             beginDrag()
         case .leftMouseDragged:
-            continueDrag()
+            didReceiveDrag = true
+            if settings.dragSnappingEnabled { continueDrag() }
         case .leftMouseUp:
             endDrag()
         default:
@@ -279,42 +284,87 @@ final class SnapManager {
             }
         }
         footprint.hide()
-        guard !cancelled, isWindowMoving, let draggedWindow, let size = lockedSize else { return }
-        if let currentDropZone {
-            let target = layoutMenu.applyDrop(currentDropZone)
-            if case .preset(.restore) = currentDropZone {
-                preSnapSizes.removeValue(forKey: draggedWindow)
-                SnapWindowRegistry.shared.unsnap(draggedWindow)
-            } else if target != nil {
-                preSnapSizes[draggedWindow] = size
+        guard !cancelled, didReceiveDrag, let draggedWindow,
+              let initialFrame, let frame = draggedWindow.frame else { return }
+        if settings.dragSnappingEnabled, isWindowMoving, let size = lockedSize {
+            if let currentDropZone {
+                let target = layoutMenu.applyDrop(currentDropZone)
+                if case .preset(.restore) = currentDropZone {
+                    preSnapSizes.removeValue(forKey: draggedWindow)
+                    SnapWindowRegistry.shared.unsnap(draggedWindow)
+                } else if target != nil {
+                    preSnapSizes[draggedWindow] = size
+                }
+                return
             }
-            return
+            if var zone = currentZone {
+                if settings.fillAvailableSpace {
+                    SnapWindowRegistry.shared.validate()
+                    guard let fixed = SnapGeometry.frame(for: zone.action, visibleFrame: zone.screen.visibleFrame,
+                                                         currentWindowFrame: CGRect(origin: .zero, size: size),
+                                                         portrait: zone.screen.frame.isPortrait) else { return }
+                    let neighbors = SnapWindowRegistry.shared.fillNeighborFrames(on: zone.screen, excluding: draggedWindow)
+                    let resolved = resolvedFrame(for: zone.action, position: zone.position, cursor: zone.cursor,
+                                                 base: fixed, screen: zone.screen, snappedFrames: neighbors,
+                                                 previous: zone.frame)
+                    zone.effectiveAction = resolved.action
+                    zone.frame = resolved.frame
+                }
+                draggedWindow.setFrame(zone.frame)
+                // Only remember this as a real snap if the window actually landed
+                // there — a failed AX write shouldn't let a later drag "restore" to
+                // a size it was never snapped from.
+                if let readBack = draggedWindow.frame,
+                   (zone.effectiveAction == .fill
+                    ? !SnapGeometry.isClose(readBack, frame, tolerance: 1)
+                    : SnapGeometry.matchesSnapEdges(readBack, target: zone.frame, screenFrame: zone.screen.visibleFrame) &&
+                        SnapGeometry.matchesSnapSize(readBack, target: zone.frame)) {
+                    preSnapSizes[draggedWindow] = frame.size
+                    snapNotification = (draggedWindow, zone.effectiveAction, zone.screen, readBack)
+                }
+                return
+            }
         }
-        guard var zone = currentZone, let frame = draggedWindow.frame else { return }
-        if settings.fillAvailableSpace {
-            SnapWindowRegistry.shared.validate()
-            guard let fixed = SnapGeometry.frame(for: zone.action, visibleFrame: zone.screen.visibleFrame,
-                                                 currentWindowFrame: CGRect(origin: .zero, size: size),
-                                                 portrait: zone.screen.frame.isPortrait) else { return }
-            let neighbors = SnapWindowRegistry.shared.fillNeighborFrames(on: zone.screen, excluding: draggedWindow)
-            let resolved = resolvedFrame(for: zone.action, position: zone.position, cursor: zone.cursor,
-                                         base: fixed, screen: zone.screen, snappedFrames: neighbors,
-                                         previous: zone.frame)
-            zone.effectiveAction = resolved.action
-            zone.frame = resolved.frame
+
+        guard settings.glueTouchingWindowsEnabled,
+              !SnapGeometry.isClose(initialFrame, frame, tolerance: 1),
+              currentZone == nil, currentDropZone == nil else { return }
+        glue(draggedWindow, to: frame)
+    }
+
+    private func glue(_ window: AXWindow, to frame: CGRect) {
+        guard window.isStandardWindow, !window.isMinimized, !window.isFullScreen,
+              let pid = window.processIdentifier,
+              let application = NSRunningApplication(processIdentifier: pid),
+              application.activationPolicy == .regular, !application.isHidden,
+              let screen = NSScreen.screens.first(where: { $0.frame.contains(CGPoint(x: frame.midX, y: frame.midY)) }) else { return }
+
+        let registry = SnapWindowRegistry.shared
+        registry.validate()
+        let matches = SnapWindowInventory.choices(on: screen, excluding: [window]).compactMap {
+            choice -> (window: AXWindow, neighborFrame: CGRect, target: CGRect, distance: CGFloat)? in
+            guard !choice.window.isMinimized, !choice.window.isFullScreen,
+                  let neighborFrame = choice.window.frame,
+                  let aligned = SnapGlueGeometry.alignedFrame(frame, with: neighborFrame,
+                                                              in: screen.visibleFrame,
+                                                              tolerance: SnapGeometry.edgeTolerance) else { return nil }
+            let distance = abs(aligned.minX - frame.minX) + abs(aligned.minY - frame.minY) +
+                abs(aligned.width - frame.width) + abs(aligned.height - frame.height)
+            return (choice.window, neighborFrame, aligned, distance)
         }
-        draggedWindow.setFrame(zone.frame)
-        // Only remember this as a real snap if the window actually landed
-        // there — a failed AX write shouldn't let a later drag "restore" to
-        // a size it was never snapped from.
-        if let readBack = draggedWindow.frame,
-           (zone.effectiveAction == .fill
-            ? !SnapGeometry.isClose(readBack, frame, tolerance: 1)
-            : SnapGeometry.matchesSnapEdges(readBack, target: zone.frame, screenFrame: zone.screen.visibleFrame) &&
-                SnapGeometry.matchesSnapSize(readBack, target: zone.frame)) {
-            preSnapSizes[draggedWindow] = frame.size
-            snapNotification = (draggedWindow, zone.effectiveAction, zone.screen, readBack)
-        }
+        guard let match = matches.min(by: { $0.distance < $1.distance }) else { return }
+        guard let neighborBefore = match.window.frame,
+              SnapGeometry.isClose(neighborBefore, match.neighborFrame, tolerance: 1) else { return }
+        window.setFrame(match.target)
+        guard let readBack = window.frame,
+              SnapGeometry.isClose(readBack, match.target, tolerance: 1),
+              let neighborFrame = match.window.frame,
+              SnapGeometry.isClose(neighborFrame, neighborBefore, tolerance: 1),
+              let aligned = SnapGlueGeometry.alignedFrame(readBack, with: neighborFrame,
+                                                          in: screen.visibleFrame, tolerance: 1),
+              SnapGeometry.isClose(aligned, readBack, tolerance: 1) else { return }
+        SnapEvents.didSnap(window: window, action: .fill, screen: screen, frame: readBack)
+        SnapEvents.didSnap(window: match.window, action: .fill, screen: screen, frame: neighborFrame)
     }
 
     private func resetDrag() {
@@ -322,6 +372,7 @@ final class SnapManager {
         draggedWindow = nil
         initialFrame = nil
         isWindowMoving = false
+        didReceiveDrag = false
         cancelled = false
         currentZone = nil
         currentPreviewFrame = nil
