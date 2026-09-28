@@ -448,7 +448,7 @@ final class WindowExtrasManager {
             let visible = target.screen.visibleFrame
             let point = CGPoint(x: position == .left ? visible.minX : visible.maxX, y: frame.midY)
             if case let .fill(filled) = SnapGeometry.fillFrame(
-                at: point, position: position, visibleFrame: visible,
+                at: point, position: position, action: action, fixedFrame: target.frame, visibleFrame: visible,
                 snappedFrames: registry.fillNeighborFrames(on: target.screen, excluding: window),
                 pointIsRequired: false
             ) {

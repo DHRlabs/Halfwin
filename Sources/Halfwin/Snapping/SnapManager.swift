@@ -15,6 +15,7 @@ final class SnapManager {
         var effectiveAction: SnapAction
         var frame: CGRect
         let cursor: CGPoint
+        let snappedFrames: [CGRect]
     }
 
     private let settings: SnapSettings
@@ -236,10 +237,22 @@ final class SnapManager {
 
         if let rect = SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
                                          currentWindowFrame: CGRect(origin: .zero, size: size), portrait: screen.frame.isPortrait) {
+            let zoneChanged = currentZone.map {
+                $0.screen != screen || $0.position != position || $0.action != action
+            } ?? true
+            let registry = SnapWindowRegistry.shared
+            if settings.fillAvailableSpace && zoneChanged {
+                registry.validateIfNeeded(interval: 0.1)
+            }
+            let neighbors = settings.fillAvailableSpace
+                ? (zoneChanged ? registry.fillNeighborFrames(on: screen, excluding: window)
+                               : currentZone?.snappedFrames ?? [])
+                : []
             let resolved = resolvedFrame(for: action, position: position, cursor: cursor, base: rect,
-                                         screen: screen, excluding: window, previous: currentPreviewFrame)
+                                         screen: screen, snappedFrames: neighbors, previous: currentPreviewFrame)
             let zone = Zone(screen: screen, position: position, action: action,
-                            effectiveAction: resolved.action, frame: resolved.frame, cursor: cursor)
+                            effectiveAction: resolved.action, frame: resolved.frame, cursor: cursor,
+                            snappedFrames: neighbors)
             currentZone = zone
             showPreview(resolved.frame)
         } else {
@@ -289,8 +302,9 @@ final class SnapManager {
             guard let fixed = SnapGeometry.frame(for: zone.action, visibleFrame: zone.screen.visibleFrame,
                                                  currentWindowFrame: CGRect(origin: .zero, size: size),
                                                  portrait: zone.screen.frame.isPortrait) else { return }
+            let neighbors = SnapWindowRegistry.shared.fillNeighborFrames(on: zone.screen, excluding: draggedWindow)
             let resolved = resolvedFrame(for: zone.action, position: zone.position, cursor: zone.cursor,
-                                         base: fixed, screen: zone.screen, excluding: draggedWindow,
+                                         base: fixed, screen: zone.screen, snappedFrames: neighbors,
                                          previous: zone.frame)
             zone.effectiveAction = resolved.action
             zone.frame = resolved.frame
@@ -345,12 +359,10 @@ final class SnapManager {
     }
 
     private func resolvedFrame(for action: SnapAction, position: SnapPosition, cursor: CGPoint, base: CGRect,
-                               screen: NSScreen, excluding window: AXWindow, previous: CGRect?) -> (action: SnapAction, frame: CGRect) {
+                               screen: NSScreen, snappedFrames: [CGRect], previous: CGRect?) -> (action: SnapAction, frame: CGRect) {
         guard settings.fillAvailableSpace else { return (action, base) }
-        let registry = SnapWindowRegistry.shared
-        registry.validateIfNeeded(interval: 0.1)
-        switch SnapGeometry.fillFrame(at: cursor, position: position, visibleFrame: screen.visibleFrame,
-                                      snappedFrames: registry.fillNeighborFrames(on: screen, excluding: window),
+        switch SnapGeometry.fillFrame(at: cursor, position: position, action: action, fixedFrame: base,
+                                      visibleFrame: screen.visibleFrame, snappedFrames: snappedFrames,
                                       previousFrame: previous) {
         case .fixed:
             return (action, base)

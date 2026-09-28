@@ -138,6 +138,7 @@ final class SnapWindowRegistry {
     func fillNeighborFrames(on screen: NSScreen, excluding incoming: AXWindow? = nil) -> [CGRect] {
         return records.values.compactMap { record in
             guard record.window != incoming, record.state == .active,
+                  displayID(for: record.frame) == SnapDisplayID(screen),
                   record.frame.intersects(screen.visibleFrame) else { return nil }
             return record.frame
         }
@@ -238,18 +239,20 @@ final class SnapWindowRegistry {
         validate()
         guard let frame = frame ?? window.frame else { return }
         let display = SnapDisplayID(screen)
-        let fillOwner = action == .fill ? matchingFillOwner(for: frame, on: screen) : nil
+        let isFill = action == .fill
+        let fillOwner = isFill ? matchingFillOwner(for: frame, on: screen) : nil
         let storedAction = fillOwner ?? action
-        let layout = chosenLayout ?? SnapMultiWindowLayout.containing(action)
+        let layout = chosenLayout ?? (isFill ? nil : SnapMultiWindowLayout.containing(action))
         if let layout {
             if currentLayouts[display] != layout { zoneOwners[display] = [:] }
             currentLayouts[display] = layout
         }
         let windowID = matchWindowID(window, frame: frame)
 
-        if layout != nil {
+        let replacementAction = isFill ? fillOwner : (layout == nil ? nil : action)
+        if let replacementAction {
             for other in Array(records.keys) where other != window {
-                guard let record = records[other], record.action == action,
+                guard let record = records[other], record.action == replacementAction,
                       displayID(for: record.frame) == display else { continue }
                 switch record.state {
                 case .active:
@@ -312,15 +315,22 @@ final class SnapWindowRegistry {
     }
 
     private func matchingFillOwner(for frame: CGRect, on screen: NSScreen) -> SnapAction? {
-        guard let layout = currentLayouts[SnapDisplayID(screen)] else { return nil }
-        let matches = layout.zones(portrait: screen.frame.height > screen.frame.width).compactMap { zone -> SnapAction? in
-            guard let expected = SnapGeometry.frame(for: zone.action, visibleFrame: screen.visibleFrame,
-                                                     currentWindowFrame: frame,
-                                                     portrait: screen.frame.height > screen.frame.width),
-                  SnapGeometry.isClose(frame, expected, tolerance: SnapGeometry.edgeTolerance) else { return nil }
-            return zone.action
+        let portrait = screen.frame.height > screen.frame.width
+        func matches(_ layouts: [SnapMultiWindowLayout]) -> Set<SnapAction> {
+            Set(layouts.flatMap { $0.zones(portrait: portrait) }.compactMap { zone in
+                guard let expected = SnapGeometry.frame(for: zone.action, visibleFrame: screen.visibleFrame,
+                                                         currentWindowFrame: frame, portrait: portrait),
+                      SnapGeometry.isClose(frame, expected, tolerance: SnapGeometry.edgeTolerance) else { return nil }
+                return zone.action
+            })
         }
-        return matches.count == 1 ? matches[0] : nil
+        if let layout = currentLayouts[SnapDisplayID(screen)] {
+            let current = matches([layout])
+            if current.count == 1 { return current.first }
+            if !current.isEmpty { return nil }
+        }
+        let all = matches(SnapMultiWindowLayout.allCases)
+        return all.count == 1 ? all.first : nil
     }
 
     private func rebuildZoneOwners() {
