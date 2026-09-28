@@ -10,6 +10,7 @@ struct SettingsView: View {
     @ObservedObject var notificationCount: NotificationCountManager
     @ObservedObject var macTweaks: MacTweaks
     @AppStorage(ShowDesktopStyle.defaultsKey) private var showDesktopStyle: ShowDesktopStyle = .pushWindowsAside
+    @AppStorage("Halfwin.feature.show-desktop-dock-button") private var showDesktopButtonEnabled = true
     @State private var alwaysFloatAppIDsText: String?
     @FocusState private var alwaysFloatAppIDsFocused: Bool
 
@@ -174,6 +175,7 @@ struct SettingsView: View {
                 }
             }
             Section("Show desktop") {
+                Toggle("Show desktop button at the end of the Dock", isOn: $showDesktopButtonEnabled)
                 Picker("Show desktop style", selection: $showDesktopStyle) {
                     ForEach(ShowDesktopStyle.allCases) { style in Text(style.title).tag(style) }
                 }

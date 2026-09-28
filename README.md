@@ -13,8 +13,11 @@ Halfwin is a native macOS 14+ menu-bar app for window snapping, mouse controls, 
 ## Other window actions
 
 - The green zoom button and a double-click on a title bar toggle maximize and restore the previous frame.
-- Click the bottom-right screen corner to hide open apps, then click it again to show them.
 - Command-Left and Command-Right snap to halves. Command-Up maximizes. Command-Down restores a saved frame or centers the window.
+
+## Show desktop
+
+- Use the button at the end of the Dock to move windows aside on all displays, or hide apps if that style is selected. Click it again to restore the remaining windows; activating an app restores its windows. The button is on by default, with a Halfwin fallback when Dockside is not hosting it.
 
 ## Mouse
 
