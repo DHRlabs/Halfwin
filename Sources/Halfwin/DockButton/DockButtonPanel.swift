@@ -27,8 +27,15 @@ private struct DockButtonLocation {
         case .left, .right:
             let width = min(frame.width, screenFrame.width)
             let x = min(max(frame.minX, screenFrame.minX), screenFrame.maxX - width)
-            let y = min(max(frame.minY - gap - target, screenFrame.minY), screenFrame.maxY - target)
-            return CGRect(x: x, y: y, width: width, height: target)
+            let belowY = frame.minY - gap - target
+            if belowY >= screenFrame.minY {
+                return CGRect(x: x, y: min(belowY, screenFrame.maxY - target), width: width, height: target)
+            }
+            let besideX = edge == .left
+                ? min(frame.maxX + gap, screenFrame.maxX - width)
+                : max(frame.minX - gap - width, screenFrame.minX)
+            let y = min(max(frame.minY, screenFrame.minY), screenFrame.maxY - target)
+            return CGRect(x: besideX, y: y, width: width, height: target)
         }
     }
 }
@@ -57,6 +64,7 @@ final class DockButtonManager {
         client = DockButtonClient(invoke: toggleShowDesktop, isToggled: isShowDesktopActive)
         client.onFallbackVisibilityChange = { [weak self] visible in
             self?.fallbackVisible = visible
+            self?.updateTracker()
             self?.refreshPanel()
         }
         panel.onActivate = { [weak self] in
@@ -74,12 +82,8 @@ final class DockButtonManager {
     func setEnabled(_ enabled: Bool) {
         self.enabled = enabled
         client.setEnabled(enabled)
-        if enabled, !trackerStarted {
-            tracker.start()
-            trackerStarted = true
-        } else if !enabled, trackerStarted {
-            tracker.stop()
-            trackerStarted = false
+        updateTracker()
+        if !enabled {
             dockLocation = nil
             fallbackVisible = false
         }
@@ -107,6 +111,18 @@ final class DockButtonManager {
         }
         panel.show(at: dockLocation.buttonFrame, edge: dockLocation.edge, toggled: toggled)
     }
+
+    private func updateTracker() {
+        let shouldTrack = enabled && fallbackVisible
+        guard shouldTrack != trackerStarted else { return }
+        trackerStarted = shouldTrack
+        if shouldTrack {
+            tracker.start()
+        } else {
+            tracker.stop()
+            dockLocation = nil
+        }
+    }
 }
 
 @MainActor
@@ -114,7 +130,6 @@ private final class DockButtonDockTracker {
     private let onLocation: (DockButtonLocation?) -> Void
     private var timer: Timer?
     private var screenObserver: NSObjectProtocol?
-    private var promptedForAccessibility = false
 
     init(onLocation: @escaping (DockButtonLocation?) -> Void) {
         self.onLocation = onLocation
@@ -141,11 +156,6 @@ private final class DockButtonDockTracker {
     private func poll() {
         guard AXIsProcessTrusted() else {
             onLocation(nil)
-            if !promptedForAccessibility {
-                promptedForAccessibility = true
-                let options = [kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String: true] as CFDictionary
-                _ = AXIsProcessTrustedWithOptions(options)
-            }
             return
         }
         guard let dock = NSRunningApplication.runningApplications(withBundleIdentifier: "com.apple.dock")
@@ -229,6 +239,7 @@ private final class DockButtonPanel: NSPanel {
         isMovable = false
         isMovableByWindowBackground = false
         hidesOnDeactivate = false
+        allowsToolTipsWhenApplicationIsInactive = true
         ignoresMouseEvents = false
         isReleasedWhenClosed = false
         orderOut(nil)
@@ -253,6 +264,7 @@ private final class DockButtonView: NSView {
     private var toggled = false
     private var isHovered = false
     private let visibleStripThickness: CGFloat = 6
+    private var trackingArea: NSTrackingArea?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -275,9 +287,11 @@ private final class DockButtonView: NSView {
 
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
-        for area in trackingAreas { removeTrackingArea(area) }
-        addTrackingArea(NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
-                                       owner: self, userInfo: nil))
+        if let trackingArea { removeTrackingArea(trackingArea) }
+        let trackingArea = NSTrackingArea(rect: .zero, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+                                          owner: self, userInfo: nil)
+        self.trackingArea = trackingArea
+        addTrackingArea(trackingArea)
     }
 
     override func mouseEntered(with event: NSEvent) {

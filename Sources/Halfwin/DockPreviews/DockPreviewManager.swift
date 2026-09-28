@@ -71,6 +71,8 @@ final class DockPreviewManager {
 
     private var previewsEnabled = false
     private var clickToMinimizeEnabled = false
+    private var showDesktopDockRestoreEnabled = false
+    var onDockIconClick: ((NSRunningApplication) -> Bool)?
     private var running = false
     private var permissionTimer: Timer?
     private var dockRetryTimer: Timer?
@@ -166,8 +168,13 @@ final class DockPreviewManager {
         refreshPermission()
     }
 
+    func setShowDesktopDockRestoreEnabled(_ enabled: Bool) {
+        showDesktopDockRestoreEnabled = enabled
+        refreshPermission()
+    }
+
     func refreshPermission() {
-        guard previewsEnabled || clickToMinimizeEnabled else {
+        guard previewsEnabled || clickToMinimizeEnabled || showDesktopDockRestoreEnabled else {
             permissionTimer?.invalidate()
             permissionTimer = nil
             stopRuntime()
@@ -767,11 +774,12 @@ final class DockPreviewManager {
         if isShowing { hidePreview() }
         pendingDockClick = nil
         dockClickInFlight = false
-        guard clickToMinimizeEnabled, Permissions.accessibilityGranted,
-              clickCount == 1, !hasUnsupportedModifiers(modifierFlags), let point else { return }
+        guard clickCount == 1, !hasUnsupportedModifiers(modifierFlags), let point else { return }
         checkDockProcess()
         guard let item = dockApplicationDockItem(atQuartzPoint: point),
               let app = runningApplication(forDockItem: item) else { return }
+        if onDockIconClick?(app) == true { return }
+        guard clickToMinimizeEnabled, Permissions.accessibilityGranted else { return }
 
         let processID = app.processIdentifier
         let frontmostPID = frontmost?.processIdentifier

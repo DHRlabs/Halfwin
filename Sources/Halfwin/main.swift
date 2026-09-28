@@ -287,11 +287,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func configureWindowExtras() {
         greenButtonSwitch.onChange = { [weak self] in self?.windowExtrasManager.setGreenButtonEnabled($0) }
         titleBarSwitch.onChange = { [weak self] in self?.windowExtrasManager.setTitleBarDoubleClickEnabled($0) }
+        MainActor.assumeIsolated {
+            dockPreviewsManager.onDockIconClick = { [weak self] app in
+                self?.windowExtrasManager.restorePushedWindows(for: app) ?? false
+            }
+        }
         windowExtrasManager.onShowDesktopStateChange = { [weak self] state in
             MainActor.assumeIsolated { self?.dockButtonManager.setToggled(state) }
         }
         showDesktopButtonSwitch.onChange = { [weak self] enabled in
             self?.windowExtrasManager.setShowDesktopEnabled(enabled)
+            MainActor.assumeIsolated { self?.dockPreviewsManager.setShowDesktopDockRestoreEnabled(enabled) }
             MainActor.assumeIsolated { self?.dockButtonManager.setEnabled(enabled) }
         }
         commandArrowSwitch.onChange = { [weak self] in self?.windowExtrasManager.setCommandArrowEnabled($0) }

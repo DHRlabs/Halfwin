@@ -51,6 +51,7 @@ final class WindowExtrasManager {
     private var swallowedMouseDownEventNumber: Int64?
     private var swallowedCommandArrowKeyCodes = Set<Int64>()
     private var hiddenApplications: [NSRunningApplication]?
+    private var hiddenApplicationsAt: TimeInterval?
     private var pushedWindows: [AXWindow: (frame: CGRect, pushedFrame: CGRect, windowID: CGWindowID, application: NSRunningApplication)] = [:]
     private var applicationToReactivate: NSRunningApplication?
     private var lastReportedDesktopState = false
@@ -72,17 +73,21 @@ final class WindowExtrasManager {
             guard let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication else { return }
             DispatchQueue.main.async {
                 guard let self else { return }
-                if self.hiddenApplications?.contains(where: { $0.processIdentifier == app.processIdentifier }) == true,
+                if self.hiddenApplicationsAt.map({ ProcessInfo.processInfo.systemUptime - $0 >= 1 }) != false,
+                   self.hiddenApplications?.contains(where: { $0.processIdentifier == app.processIdentifier }) == true,
                    !app.isHidden {
                     self.hiddenApplications?.removeAll { $0.processIdentifier == app.processIdentifier }
-                    if self.hiddenApplications?.isEmpty == true { self.hiddenApplications = nil }
+                    if self.hiddenApplications?.isEmpty == true {
+                        self.hiddenApplications = nil
+                        self.hiddenApplicationsAt = nil
+                    }
                     self.applicationToReactivate = app
                     self.clearDesktopRestoreApplicationIfNeeded()
                     self.reportShowDesktopState()
                 }
-                guard !self.pushedWindows.isEmpty,
-                      let window = AXWindow.focusedWindow(of: app), self.pushedWindows[window] != nil else { return }
-                self.restorePushedWindow(window)
+                guard !self.pushedWindows.isEmpty, app.activationPolicy == .regular else { return }
+                self.applicationToReactivate = app
+                self.restorePushedWindows(for: app)
             }
         }
     }
@@ -311,11 +316,13 @@ final class WindowExtrasManager {
                   let bounds = info[kCGWindowBounds as String] as? NSDictionary,
                   let frame = CGRect(dictionaryRepresentation: bounds as CFDictionary),
                   frame.contains(point) else { continue }
+            guard (info[kCGWindowLayer as String] as? Int) == 0 else { return nil }
             guard let id = (info[kCGWindowNumber as String] as? NSNumber)?.uint32Value,
                   let pid = (info[kCGWindowOwnerPID as String] as? NSNumber)?.int32Value,
-                  let application = NSRunningApplication(processIdentifier: pid),
-                  application.activationPolicy == .regular else { continue }
-            guard (info[kCGWindowLayer as String] as? Int) == 0 else { return nil }
+                  let application = NSRunningApplication(processIdentifier: pid) else { return nil }
+            guard application.bundleIdentifier != "com.dhrlabs.halfwin",
+                  application.bundleIdentifier != "com.dhrlabs.dockside",
+                  application.activationPolicy == .regular else { return nil }
             guard let match = pushedWindows.first(where: { $0.value.windowID == id }) else { return nil }
             guard SnapGeometry.isClose(frame.axFlipped, match.value.pushedFrame, tolerance: 8) else {
                 pushedWindows.removeValue(forKey: match.key)
@@ -503,6 +510,7 @@ final class WindowExtrasManager {
         }
         guard !applications.isEmpty else { return }
         hiddenApplications = applications
+        hiddenApplicationsAt = ProcessInfo.processInfo.systemUptime
         applicationToReactivate = NSWorkspace.shared.frontmostApplication
         for application in applications { application.hide() }
         reportShowDesktopState()
@@ -559,6 +567,20 @@ final class WindowExtrasManager {
         guard let pushed = pushedWindows[window], restorePushedWindow(window, to: pushed) else { return }
         window.restoreAndRaise(in: pushed.application)
         clearDesktopRestoreApplicationIfNeeded()
+    }
+
+    @discardableResult
+    func restorePushedWindows(for application: NSRunningApplication) -> Bool {
+        prunePushedWindows()
+        let windows = pushedWindows.filter { $0.value.application.processIdentifier == application.processIdentifier }
+        guard !windows.isEmpty else { return false }
+        let focusedWindow = AXWindow.focusedWindow(of: application)
+        for (window, pushed) in windows {
+            _ = restorePushedWindow(window, to: pushed)
+        }
+        focusedWindow?.restoreAndRaise(in: application)
+        clearDesktopRestoreApplicationIfNeeded()
+        return true
     }
 
     @discardableResult
@@ -671,6 +693,7 @@ final class WindowExtrasManager {
     private func restoreHiddenApplications() {
         guard let applications = hiddenApplications else { return }
         hiddenApplications = nil
+        hiddenApplicationsAt = nil
         for application in applications where !application.isTerminated { application.unhide() }
         if pushedWindows.isEmpty { applicationToReactivate = nil }
         reportShowDesktopState()
@@ -680,6 +703,7 @@ final class WindowExtrasManager {
         guard let applications = hiddenApplications else { return }
         let remaining = applications.filter { !$0.isTerminated }
         hiddenApplications = remaining.isEmpty ? nil : remaining
+        if hiddenApplications == nil { hiddenApplicationsAt = nil }
         clearDesktopRestoreApplicationIfNeeded()
         reportShowDesktopState()
     }

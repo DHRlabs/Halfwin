@@ -67,6 +67,7 @@ final class DockButtonClient {
     private var observers: [NSObjectProtocol] = []
     private var discoveryTimer: Timer?
     private var leaseTimer: Timer?
+    private var fallbackShowTimer: Timer?
     private var hostSession: String?
     private var leaseDeadline: TimeInterval?
     private var handledRequests: [String: String] = [:]
@@ -100,6 +101,7 @@ final class DockButtonClient {
         if enabled {
             registerButton()
             scheduleDiscovery()
+            delayFallbackShow()
         } else {
             removeButton()
         }
@@ -113,9 +115,11 @@ final class DockButtonClient {
             discover()
             if started { registerButton() }
             scheduleDiscovery()
+            if started { delayFallbackShow() }
         } else {
             discoveryTimer?.invalidate()
             discoveryTimer = nil
+            cancelFallbackShow()
             leaseTimer?.invalidate()
             leaseTimer = nil
             leaseDeadline = nil
@@ -144,6 +148,7 @@ final class DockButtonClient {
         registered = false
         discoveryTimer?.invalidate()
         discoveryTimer = nil
+        cancelFallbackShow()
         leaseTimer?.invalidate()
         leaseTimer = nil
         for observer in observers { center.removeObserver(observer) }
@@ -210,6 +215,7 @@ final class DockButtonClient {
                   let session = Self.uuid(info[Key.hostSession]), session == hostSession,
                   let seconds = Self.integer(info[Key.leaseSeconds]), (1...60).contains(seconds)
             else { return }
+            cancelFallbackShow()
             leaseDeadline = ProcessInfo.processInfo.systemUptime + TimeInterval(seconds)
             announceFallbackVisibility()
             armLeaseTimer()
@@ -219,6 +225,7 @@ final class DockButtonClient {
             guard let session = Self.uuid(info[Key.hostSession]), session == hostSession else { return }
             hostSession = nil
             leaseDeadline = nil
+            cancelFallbackShow()
             leaseTimer?.invalidate()
             leaseTimer = nil
             announceFallbackVisibility()
@@ -277,6 +284,7 @@ final class DockButtonClient {
         if ProcessInfo.processInfo.systemUptime >= leaseDeadline {
             self.leaseDeadline = nil
             leaseTimer = nil
+            cancelFallbackShow()
             announceFallbackVisibility()
             if enabled { discover() }
         } else {
@@ -285,10 +293,29 @@ final class DockButtonClient {
     }
 
     private func announceFallbackVisibility() {
-        let visible = enabled && leaseDeadline == nil
+        let visible = enabled && leaseDeadline == nil && fallbackShowTimer == nil
         guard visible != fallbackVisible else { return }
         fallbackVisible = visible
         onFallbackVisibilityChange?(visible)
+    }
+
+    private func delayFallbackShow() {
+        guard enabled, leaseDeadline == nil else { return }
+        fallbackShowTimer?.invalidate()
+        let timer = Timer(timeInterval: 0.3, repeats: false) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.fallbackShowTimer = nil
+                self?.announceFallbackVisibility()
+            }
+        }
+        fallbackShowTimer = timer
+        RunLoop.main.add(timer, forMode: .common)
+        announceFallbackVisibility()
+    }
+
+    private func cancelFallbackShow() {
+        fallbackShowTimer?.invalidate()
+        fallbackShowTimer = nil
     }
 
     private func post(_ name: Notification.Name, _ userInfo: [String: Any]) {
