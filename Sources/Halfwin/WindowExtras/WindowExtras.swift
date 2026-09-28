@@ -426,8 +426,16 @@ final class WindowExtrasManager {
         let usesFill = SnapSettings.shared.fillAvailableSpace && [123, 124].contains(keyCode)
         func resolvedDestination(for action: SnapAction, on target: (frame: CGRect, screen: NSScreen)) -> (frame: CGRect, action: SnapAction) {
             guard usesFill else { return (target.frame, action) }
-            let position: SnapPosition = action == .leftHalf ? .left : .right
             let visible = target.screen.visibleFrame
+            let tolerance = SnapGeometry.edgeTolerance
+            let snappedMemberFillsHeight = lane.flatMap {
+                SnapGeometry.frame(for: $0.action, visibleFrame: visible, currentWindowFrame: frame,
+                                   portrait: target.screen.frame.height > target.screen.frame.width)
+            }.map { abs($0.minY - visible.minY) <= tolerance && abs($0.maxY - visible.maxY) <= tolerance } ?? false
+            guard !snappedMemberFillsHeight else {
+                return (target.frame, action)
+            }
+            let position: SnapPosition = action == .leftHalf ? .left : .right
             let point = CGPoint(x: position == .left ? visible.minX : visible.maxX, y: frame.midY)
             if case let .fill(filled) = SnapGeometry.fillFrame(
                 at: point, position: position, action: action, fixedFrame: target.frame, visibleFrame: visible,
