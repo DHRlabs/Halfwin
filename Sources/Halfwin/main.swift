@@ -30,9 +30,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private lazy var layoutMenuManager = LayoutMenuManager(settings: layoutMenuSettings)
     private lazy var autoTileManager = AutoTileManager(settings: autoTileSettings)
     private lazy var windowExtrasManager = WindowExtrasManager()
+    private lazy var dockButtonManager = MainActor.assumeIsolated {
+        DockButtonManager(
+            toggleShowDesktop: { [weak self] in
+                MainActor.assumeIsolated { self?.windowExtrasManager.toggleDesktopFromButton() }
+            },
+            isShowDesktopActive: { [weak self] in
+                MainActor.assumeIsolated { self?.windowExtrasManager.isShowingDesktop ?? false }
+            }
+        )
+    }
     private let greenButtonSwitch = FeatureSwitch(key: "green-button-maximizes", title: "Green button maximizes", defaultOn: true)
     private let titleBarSwitch = FeatureSwitch(key: "title-bar-double-click-maximizes", title: "Double-click title bar maximizes", defaultOn: true)
-    private let showDesktopSwitch = FeatureSwitch(key: "show-desktop-corner", title: "Show desktop corner", defaultOn: true)
+    private let showDesktopButtonSwitch = FeatureSwitch(
+        key: "show-desktop-dock-button", title: "Show desktop button at the end of the Dock", defaultOn: true
+    )
     private let commandArrowSwitch = FeatureSwitch(key: "command-arrow-snapping", title: "Command-arrow snapping", defaultOn: true)
     private let autoTileSwitch = FeatureSwitch(key: "auto-tile", title: "Auto-tile", defaultOn: false)
     private lazy var settingsWindowController = SettingsWindowController(
@@ -60,6 +72,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private var sessionInactiveAtLaunch = false
 
     func applicationWillFinishLaunching(_ notification: Notification) {
+        UserDefaults.standard.removeObject(forKey: "Halfwin.feature.show-desktop-corner")
         let center = NSWorkspace.shared.notificationCenter
         launchSessionObservers = [
             center.addObserver(forName: NSWorkspace.sessionDidResignActiveNotification, object: nil, queue: nil) { [weak self] _ in
@@ -162,6 +175,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         }
         mouseFeatures.stop()
         keepAwake.stop()
+        MainActor.assumeIsolated { dockButtonManager.stop() }
         windowExtrasManager.stop()
         dockPreviewsManager.stop()
         snapGroupsManager.stop()
@@ -213,7 +227,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         menu.addItem(windowsHeader)
         menu.addItem(greenButtonSwitch.makeMenuItem())
         menu.addItem(titleBarSwitch.makeMenuItem())
-        menu.addItem(showDesktopSwitch.makeMenuItem())
+        menu.addItem(showDesktopButtonSwitch.makeMenuItem())
         menu.addItem(commandArrowSwitch.makeMenuItem())
         menu.addItem(autoTileSwitch.makeMenuItem())
 
@@ -273,11 +287,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private func configureWindowExtras() {
         greenButtonSwitch.onChange = { [weak self] in self?.windowExtrasManager.setGreenButtonEnabled($0) }
         titleBarSwitch.onChange = { [weak self] in self?.windowExtrasManager.setTitleBarDoubleClickEnabled($0) }
-        showDesktopSwitch.onChange = { [weak self] in self?.windowExtrasManager.setShowDesktopEnabled($0) }
+        windowExtrasManager.onShowDesktopStateChange = { [weak self] state in
+            MainActor.assumeIsolated { self?.dockButtonManager.setToggled(state) }
+        }
+        showDesktopButtonSwitch.onChange = { [weak self] enabled in
+            self?.windowExtrasManager.setShowDesktopEnabled(enabled)
+            MainActor.assumeIsolated { self?.dockButtonManager.setEnabled(enabled) }
+        }
         commandArrowSwitch.onChange = { [weak self] in self?.windowExtrasManager.setCommandArrowEnabled($0) }
+        MainActor.assumeIsolated { dockButtonManager.start() }
         greenButtonSwitch.start()
         titleBarSwitch.start()
-        showDesktopSwitch.start()
+        showDesktopButtonSwitch.start()
         commandArrowSwitch.start()
     }
 
