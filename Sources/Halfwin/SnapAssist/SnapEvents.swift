@@ -12,7 +12,7 @@ enum SnapEvents {
                         origin: SnapOrigin = .other, frame: CGRect? = nil,
                         layout: SnapMultiWindowLayout? = nil) {
         SnapWindowRegistry.shared.commitSnap(window: window, action: action, screen: screen,
-                                             frame: frame, layout: layout)
+                                             frame: frame, origin: origin, layout: layout)
         handler?(window, action, screen, origin)
     }
 }
