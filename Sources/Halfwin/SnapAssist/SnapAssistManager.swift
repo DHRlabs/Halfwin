@@ -2,6 +2,8 @@ import AppKit
 import ApplicationServices
 import SwiftUI
 
+private let snapAssistFooterHeight: CGFloat = 34
+
 final class SnapAssistManager {
     private static let keyboardEventMask: CGEventMask = [CGEventType.keyDown, .keyUp].reduce(CGEventMask(0)) {
         $0 | (CGEventMask(1) << $1.rawValue)
@@ -375,7 +377,10 @@ final class SnapAssistManager {
         }
         activeAction = zone.action
         activeFrame = frame
-        let panel = self.panel ?? SnapAssistPanel { [weak self] choice in self?.pick(choice) }
+        let panel = self.panel ?? SnapAssistPanel(
+            onPick: { [weak self] choice in self?.pick(choice) },
+            onDismiss: { [weak self] in self?.hidePanel() }
+        )
         self.panel = panel
         panel.show(frame: frame, choices: choices)
         startKeyboardTap()
@@ -410,7 +415,10 @@ final class SnapAssistManager {
         }
         activeAction = .fill
         activeFrame = frame
-        let panel = self.panel ?? SnapAssistPanel { [weak self] choice in self?.pick(choice) }
+        let panel = self.panel ?? SnapAssistPanel(
+            onPick: { [weak self] choice in self?.pick(choice) },
+            onDismiss: { [weak self] in self?.hidePanel() }
+        )
         self.panel = panel
         panel.show(frame: frame, choices: choices)
         startKeyboardTap()
@@ -548,13 +556,15 @@ enum SnapWindowInventory {
 
 private final class SnapAssistPanel: NSPanel {
     private let onPick: (SnapWindowChoice) -> Void
+    private let onDismiss: () -> Void
     private var choices: [SnapWindowChoice] = []
     private var images: [CGWindowID: CGImage] = [:]
     private var selectedIndex = 0
     private var assistView: AcceptingFirstMouseHostingView<SnapAssistView>?
 
-    init(onPick: @escaping (SnapWindowChoice) -> Void) {
+    init(onPick: @escaping (SnapWindowChoice) -> Void, onDismiss: @escaping () -> Void) {
         self.onPick = onPick
+        self.onDismiss = onDismiss
         super.init(contentRect: .zero, styleMask: [.borderless, .nonactivatingPanel], backing: .buffered, defer: false)
         isOpaque = false
         backgroundColor = .clear
@@ -574,7 +584,9 @@ private final class SnapAssistPanel: NSPanel {
         selectedIndex = 0
         images = [:]
         let assistView = AcceptingFirstMouseHostingView(
-            rootView: SnapAssistView(choices: choices, images: images, selectedIndex: selectedIndex, onPick: onPick)
+            rootView: SnapAssistView(
+                choices: choices, images: images, selectedIndex: selectedIndex, onPick: onPick, onDismiss: onDismiss
+            )
         )
         self.assistView = assistView
         contentView = assistView
@@ -589,7 +601,9 @@ private final class SnapAssistPanel: NSPanel {
 
     func moveSelection(_ keyCode: Int64) {
         guard !choices.isEmpty else { return }
-        let columns = min(choices.count, max(1, Int(ceil(sqrt(Double(choices.count) * Double(max(frame.width - 20, 1) / max(frame.height - 20, 1)))))))
+        let width = max(frame.width - 20, 1)
+        let height = max(frame.height - 20 - snapAssistFooterHeight, 1)
+        let columns = min(choices.count, max(1, Int(ceil(sqrt(Double(choices.count) * Double(width / height))))))
         let column = selectedIndex % columns
         let next: Int
         switch keyCode {
@@ -609,7 +623,7 @@ private final class SnapAssistPanel: NSPanel {
 
     private func updateView() {
         assistView?.rootView = SnapAssistView(
-            choices: choices, images: images, selectedIndex: selectedIndex, onPick: onPick
+            choices: choices, images: images, selectedIndex: selectedIndex, onPick: onPick, onDismiss: onDismiss
         )
     }
 
@@ -625,13 +639,14 @@ private struct SnapAssistView: View {
     let images: [CGWindowID: CGImage]
     let selectedIndex: Int
     let onPick: (SnapWindowChoice) -> Void
+    let onDismiss: () -> Void
 
     var body: some View {
         GeometryReader { geometry in
             let size = geometry.size
             let count = max(choices.count, 1)
             let width = max(size.width - 20, 1)
-            let height = max(size.height - 20, 1)
+            let height = max(size.height - 20 - snapAssistFooterHeight, 1)
             let columns = min(count, max(1, Int(ceil(sqrt(Double(count) * Double(width / height))))))
             let rows = (count + columns - 1) / columns
             let availableCellHeight = (height - CGFloat(rows - 1) * 8) / CGFloat(rows)
@@ -674,20 +689,44 @@ private struct SnapAssistView: View {
             ZStack {
                 Rectangle().fill(.ultraThinMaterial)
                 Color.black.opacity(0.16)
-                Group {
-                    if availableCellHeight < 70 {
-                        ScrollViewReader { proxy in
-                            ScrollView(.vertical) { grid }
-                                .scrollIndicators(.hidden)
-                                .onChange(of: selectedIndex) { _, index in
-                                    proxy.scrollTo(index, anchor: .center)
-                                }
+                VStack(spacing: 0) {
+                    Group {
+                        if availableCellHeight < 70 {
+                            ScrollViewReader { proxy in
+                                ScrollView(.vertical) { grid }
+                                    .scrollIndicators(.hidden)
+                                    .onChange(of: selectedIndex) { _, index in
+                                        proxy.scrollTo(index, anchor: .center)
+                                    }
+                            }
+                        } else {
+                            grid
                         }
-                    } else {
-                        grid
                     }
+                    .padding(10)
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+
+                    Button(action: onDismiss) {
+                        HStack {
+                            Text("Leave empty")
+                            Spacer(minLength: 0)
+                            Text("Esc")
+                                .font(.system(size: 11, weight: .medium, design: .rounded))
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .background(Color.white.opacity(0.12), in: RoundedRectangle(cornerRadius: 5))
+                        }
+                        .font(.system(size: 12, weight: .medium))
+                        .padding(.horizontal, 12)
+                        .frame(height: snapAssistFooterHeight)
+                        .frame(maxWidth: .infinity)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Leave empty")
+                    .accessibilityHint("Press Escape to leave the remaining spaces empty")
+                    .overlay(alignment: .top) { Color.white.opacity(0.12).frame(height: 1) }
                 }
-                .padding(10)
             }
             .frame(maxWidth: .infinity, maxHeight: .infinity)
         }
