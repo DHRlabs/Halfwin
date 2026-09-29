@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import os // DIAG remove after live capture
 
 /// Watches system-wide window gestures for edge snapping and shared borders,
 /// following Rectangle's `SnappingManager.swift` (MIT): passive `NSEvent` global
@@ -16,8 +17,26 @@ final class SnapManager {
         let cursor: CGPoint
     }
 
+    private struct DragDiagnostic { // DIAG remove after live capture
+        let downCursor: CGPoint // DIAG remove after live capture
+        let downEventQuartzPoint: CGPoint? // DIAG remove after live capture
+        let hitTest: String // DIAG remove after live capture
+        let processID: pid_t? // DIAG remove after live capture
+        let initialFrame: CGRect? // DIAG remove after live capture
+        var downLogged = false // DIAG remove after live capture
+        var firstDragLogged = false // DIAG remove after live capture
+        var firstDragCursor: CGPoint? // DIAG remove after live capture
+        var firstDragEventQuartzPoint: CGPoint? // DIAG remove after live capture
+        var topEncounter: String? // DIAG remove after live capture
+        var eligibleCenterEverSeen = false // DIAG remove after live capture
+        var showDropBarAttempted = false // DIAG remove after live capture
+        var dropBarEverVisible = false // DIAG remove after live capture
+        var lastFrame: CGRect? // DIAG remove after live capture
+    }
+
     private let settings: SnapSettings
     private let layoutMenu: LayoutMenuManager
+    private let diagLogger = Logger(subsystem: "com.dhrlabs.halfwin", category: "diag") // DIAG remove after live capture
     private lazy var divider = SnapDividerManager()
     private var monitor: Any?
     private lazy var footprint = FootprintWindow()
@@ -35,6 +54,7 @@ final class SnapManager {
     private var currentDropZone: LayoutDropZone?
     private var cancellables = Set<AnyCancellable>()
     private var permissionTimer: Timer?
+    private var dragDiagnostic: DragDiagnostic? // DIAG remove after live capture
 
     /// Restore size only; the registry owns the current snapped frame.
     private var preSnapSizes: [AXWindow: CGSize] = [:]
@@ -121,10 +141,25 @@ final class SnapManager {
             currentZone = nil
             clearDropBar()
         case .leftMouseDown:
-            beginDrag()
+            beginDrag(event)
         case .leftMouseDragged:
             didReceiveDrag = true
+            if var diagnostic = dragDiagnostic { // DIAG remove after live capture
+                if !diagnostic.downLogged { // DIAG remove after live capture
+                    logDiagnostic("snapDrag down cursorAppKit=\(diagnostic.downCursor) sourceQuartz=\(String(describing: diagnostic.downEventQuartzPoint)) pid=\(String(describing: diagnostic.processID)) frame=\(String(describing: diagnostic.initialFrame)) hitTest={\(diagnostic.hitTest)}") // DIAG remove after live capture
+                    diagnostic.downLogged = true // DIAG remove after live capture
+                }
+                if diagnostic.firstDragCursor == nil { // DIAG remove after live capture
+                    diagnostic.firstDragCursor = NSEvent.mouseLocation // DIAG remove after live capture
+                    diagnostic.firstDragEventQuartzPoint = event.cgEvent?.location // DIAG remove after live capture
+                }
+                dragDiagnostic = diagnostic // DIAG remove after live capture
+            }
+            recordTop8Encounter(at: NSEvent.mouseLocation) // DIAG remove after live capture
             if settings.dragSnappingEnabled { continueDrag() }
+            if dragDiagnostic?.firstDragLogged != true { // DIAG remove after live capture
+                logFirstDrag(frame: nil, classification: firstDragSkipClassification()) // DIAG remove after live capture
+            }
         case .leftMouseUp:
             endDrag()
         default:
@@ -132,15 +167,19 @@ final class SnapManager {
         }
     }
 
-    private func beginDrag() {
+    private func beginDrag(_ event: NSEvent) {
         resetDrag()
         pruneUnreadableRestoreSizes()
         let cursor = NSEvent.mouseLocation
-        draggedWindow = AXWindow.windowUnderCursor(at: cursor)
+        var hitTest = "noTrace" // DIAG remove after live capture
+        draggedWindow = AXWindow.windowUnderCursor(at: cursor) { hitTest = $0 } // DIAG remove after live capture
         if let draggedWindow, SnapWindowRegistry.shared.hasRecord(for: draggedWindow) {
             SnapWindowRegistry.shared.validateIfNeeded(interval: 0.1)
         }
         initialFrame = draggedWindow?.frame
+        dragDiagnostic = DragDiagnostic(downCursor: cursor, downEventQuartzPoint: event.cgEvent?.location, // DIAG remove after live capture
+                                        hitTest: hitTest, processID: draggedWindow?.processIdentifier, // DIAG remove after live capture
+                                        initialFrame: initialFrame, lastFrame: initialFrame) // DIAG remove after live capture
     }
 
     /// Destroyed AX elements cannot be restored; keep transient failures for
@@ -155,11 +194,26 @@ final class SnapManager {
         guard !cancelled, let draggedWindow, let initialFrame else { return }
 
         if !isWindowMoving {
-            guard let frame = draggedWindow.frame else { return }
+            guard let frame = draggedWindow.frame else {
+                logFirstDrag(frame: nil, classification: "frameUnavailable") // DIAG remove after live capture
+                return
+            }
+            if var diagnostic = dragDiagnostic { // DIAG remove after live capture
+                diagnostic.lastFrame = frame // DIAG remove after live capture
+                dragDiagnostic = diagnostic // DIAG remove after live capture
+            }
             // Only a move: the size Halfwin observed at mouse-down is unchanged
             // while the origin has. A resize, or no movement yet, does nothing.
-            guard frame.size == initialFrame.size, frame.origin != initialFrame.origin else { return }
+            guard frame.size == initialFrame.size else {
+                logFirstDrag(frame: frame, classification: "sizeChanged") // DIAG remove after live capture
+                return
+            }
+            guard frame.origin != initialFrame.origin else {
+                logFirstDrag(frame: frame, classification: "stationary") // DIAG remove after live capture
+                return
+            }
             isWindowMoving = true
+            logFirstDrag(frame: frame, classification: "sameSizeOriginChanged") // DIAG remove after live capture
             lockedSize = frame.size
             // A confirmed move uses the registry's latest frame, including a
             // manual edge resize, as the restore guard.
@@ -179,13 +233,60 @@ final class SnapManager {
         updateTarget(at: NSEvent.mouseLocation, window: draggedWindow, size: size)
     }
 
+    private func logFirstDrag(frame: CGRect?, classification: String) { // DIAG remove after live capture
+        guard var diagnostic = dragDiagnostic, !diagnostic.firstDragLogged else { return } // DIAG remove after live capture
+        logDiagnostic("snapDrag firstDrag cursorAppKit=\(String(describing: diagnostic.firstDragCursor)) sourceQuartz=\(String(describing: diagnostic.firstDragEventQuartzPoint)) frame=\(String(describing: frame)) classification=\(classification) recognizedMove=\(isWindowMoving) snapEnabled=\(settings.dragSnappingEnabled) cancelled=\(cancelled) windowPresent=\(draggedWindow != nil) initialFramePresent=\(initialFrame != nil)") // DIAG remove after live capture
+        diagnostic.firstDragLogged = true // DIAG remove after live capture
+        if let frame { diagnostic.lastFrame = frame } // DIAG remove after live capture
+        dragDiagnostic = diagnostic // DIAG remove after live capture
+    }
+
+    private func firstDragSkipClassification() -> String { // DIAG remove after live capture
+        if cancelled { return "cancelled" } // DIAG remove after live capture
+        if draggedWindow == nil { return "missingWindow" } // DIAG remove after live capture
+        if initialFrame == nil { return "missingInitialFrame" } // DIAG remove after live capture
+        if !settings.dragSnappingEnabled { return "dragSnappingDisabled" } // DIAG remove after live capture
+        return "frameReadSkipped" // DIAG remove after live capture
+    }
+
+    private func recordTop8Encounter(at cursor: CGPoint) { // DIAG remove after live capture
+        guard var diagnostic = dragDiagnostic else { return } // DIAG remove after live capture
+        guard let screen = NSScreen.screens.first(where: { // DIAG remove after live capture
+            cursor.x >= $0.frame.minX && cursor.x <= $0.frame.maxX && // DIAG remove after live capture
+                cursor.y >= $0.frame.maxY - 8 && cursor.y <= $0.frame.maxY // DIAG remove after live capture
+        }) else { return } // DIAG remove after live capture
+        let pointAbove = CGPoint(x: cursor.x, y: screen.frame.maxY + 1) // DIAG remove after live capture
+        let displayAbove = NSScreen.screens.contains { $0 != screen && $0.frame.contains(pointAbove) } // DIAG remove after live capture
+        let center = abs(cursor.x - screen.frame.midX) <= layoutMenu.hotZoneWidth / 2 // DIAG remove after live capture
+        let flags = "dragTop=\(dragToTopLayoutsEnabled),snap=\(settings.dragSnappingEnabled),glue=\(settings.glueTouchingWindowsEnabled),fill=\(settings.fillAvailableSpace)" // DIAG remove after live capture
+        diagnostic.eligibleCenterEverSeen = diagnostic.eligibleCenterEverSeen || (center && !displayAbove) // DIAG remove after live capture
+        let summary = "cursorAppKit=\(cursor),display=\(SnapDisplayID(screen).number),screenFrame=\(screen.frame),hotZoneWidth=\(layoutMenu.hotZoneWidth),center=\(center),displayAbove=\(displayAbove),flags={\(flags)},recognizedMove=\(isWindowMoving)" // DIAG remove after live capture
+        if diagnostic.topEncounter == nil { // DIAG remove after live capture
+            diagnostic.topEncounter = summary // DIAG remove after live capture
+            logDiagnostic("snapDrag top8 \(summary)") // DIAG remove after live capture
+        }
+        dragDiagnostic = diagnostic // DIAG remove after live capture
+    }
+
     private func updateTarget(at cursor: CGPoint, window: AXWindow, size: CGSize) {
+        if layoutMenu.isDropBarVisible, var diagnostic = dragDiagnostic { // DIAG remove after live capture
+            diagnostic.dropBarEverVisible = true // DIAG remove after live capture
+            dragDiagnostic = diagnostic // DIAG remove after live capture
+        }
         if dragToTopLayoutsEnabled, let screen = layoutTriggerScreen(for: cursor) {
             if dropScreen != screen || !layoutMenu.isDropBarVisible {
                 dropScreen = screen
                 currentDropZone = nil
                 hidePreview()
+                if var diagnostic = dragDiagnostic { // DIAG remove after live capture
+                    diagnostic.showDropBarAttempted = true // DIAG remove after live capture
+                    dragDiagnostic = diagnostic // DIAG remove after live capture
+                }
                 layoutMenu.showDropBar(on: screen, for: window, startFrame: initialFrame ?? .zero)
+                if layoutMenu.isDropBarVisible, var diagnostic = dragDiagnostic { // DIAG remove after live capture
+                    diagnostic.dropBarEverVisible = true // DIAG remove after live capture
+                    dragDiagnostic = diagnostic // DIAG remove after live capture
+                }
             }
             currentZone = nil
             let zone = layoutMenu.dropZone(at: cursor)
@@ -273,7 +374,11 @@ final class SnapManager {
 
     private func endDrag() {
         var snapNotification: (window: AXWindow, action: SnapAction, screen: NSScreen, frame: CGRect)?
+        var endingFrame: CGRect? // DIAG remove after live capture
         defer {
+            if didReceiveDrag, let diagnostic = dragDiagnostic { // DIAG remove after live capture
+                logDiagnostic("snapDrag end frame=\(String(describing: endingFrame ?? diagnostic.lastFrame)) recognizedMove=\(isWindowMoving) topSeen=\(diagnostic.topEncounter != nil) eligibleCenterEverSeen=\(diagnostic.eligibleCenterEverSeen) showDropBarAttempted=\(diagnostic.showDropBarAttempted) dropBarEverVisible=\(diagnostic.dropBarEverVisible)") // DIAG remove after live capture
+            }
             footprint.hide()
             resetDrag()
             if let notification = snapNotification {
@@ -286,6 +391,11 @@ final class SnapManager {
         footprint.hide()
         guard !cancelled, didReceiveDrag, let draggedWindow,
               let initialFrame, let frame = draggedWindow.frame else { return }
+        endingFrame = frame // DIAG remove after live capture
+        if var diagnostic = dragDiagnostic { // DIAG remove after live capture
+            diagnostic.lastFrame = frame // DIAG remove after live capture
+            dragDiagnostic = diagnostic // DIAG remove after live capture
+        }
         if settings.dragSnappingEnabled, isWindowMoving, let size = lockedSize {
             if let currentDropZone {
                 let target = layoutMenu.applyDrop(currentDropZone)
@@ -400,12 +510,17 @@ final class SnapManager {
         cancelled = false
         currentZone = nil
         currentPreviewFrame = nil
+        dragDiagnostic = nil // DIAG remove after live capture
     }
 
     private func clearDropBar() {
         layoutMenu.hideDropBar()
         dropScreen = nil
         currentDropZone = nil
+    }
+
+    private func logDiagnostic(_ message: String) { // DIAG remove after live capture
+        diagLogger.notice("HWDIAG \(message, privacy: .public)") // DIAG remove after live capture
     }
 
     private func resolvedAction(for position: SnapPosition, cursor: CGPoint, screen: NSScreen, previous: SnapAction?) -> SnapAction {
