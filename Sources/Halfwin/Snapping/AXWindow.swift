@@ -107,31 +107,52 @@ struct AXWindow {
     /// The window under a point in AppKit screen coordinates, the way a
     /// title-bar drag would resolve it: the element there, or its ancestor
     /// window if the hit element is a child (title bar, close button, etc).
-    static func windowUnderCursor(at appKitPoint: CGPoint) -> AXWindow? {
-        hitTest(at: appKitPoint)?.window
+    static func windowUnderCursor(at appKitPoint: CGPoint, trace: ((String) -> Void)? = nil) -> AXWindow? { // DIAG remove after live capture
+        hitTest(at: appKitPoint, trace: trace)?.window
     }
 
     /// The hit element and its containing window, for deciding which part of
     /// a window received a system-wide click.
-    static func hitTest(at appKitPoint: CGPoint) -> (element: AXUIElement, window: AXWindow)? {
+    static func hitTest(at appKitPoint: CGPoint, trace: ((String) -> Void)? = nil) // DIAG remove after live capture
+        -> (element: AXUIElement, window: AXWindow)? {
         let systemWide = AXUIElementCreateSystemWide()
         // Keep a stuck AX call from stalling the main thread indefinitely.
         AXUIElementSetMessagingTimeout(systemWide, 0.1)
         let point = appKitPoint.axFlipped
         var element: AXUIElement?
-        guard AXUIElementCopyElementAtPosition(systemWide, Float(point.x), Float(point.y), &element) == .success,
-              let element else { return nil }
+        let hitError = AXUIElementCopyElementAtPosition(systemWide, Float(point.x), Float(point.y), &element) // DIAG remove after live capture
+        guard hitError == .success, let element else {
+            trace?("hitError=\(hitError.rawValue) hitElement=\(element != nil) roles=[] parentReads=0 stop=hitTest") // DIAG remove after live capture
+            return nil
+        }
         AXUIElementSetMessagingTimeout(element, 0.1)
-        if role(of: element) == kAXWindowRole { return (element, AXWindow(element: element)) }
+        var roles: [String] = [] // DIAG remove after live capture
+        var parentReads = 0 // DIAG remove after live capture
+        let (hitRole, hitRoleError) = roleResult(of: element)
+        roles.append("hit:\(hitRole ?? "nil")/e\(hitRoleError.rawValue)") // DIAG remove after live capture
+        if hitRole == kAXWindowRole {
+            trace?("hitError=\(hitError.rawValue) hitElement=true roles=[\(roles.joined(separator: ","))] parentReads=0 stop=hitWindow") // DIAG remove after live capture
+            return (element, AXWindow(element: element))
+        }
         var current = element
-        for _ in 0..<8 {
-            guard let parent: AXUIElement = objectAttribute(current, kAXParentAttribute) else { break }
-            if role(of: parent) == kAXWindowRole {
+        for depth in 0..<8 { // DIAG remove after live capture
+            parentReads += 1 // DIAG remove after live capture
+            let (parentValue, parentError) = parentResult(of: current)
+            guard let parent = parentValue else {
+                let stop = parentError == .success ? "parentType" : "parentError:\(parentError.rawValue)"
+                trace?("hitError=\(hitError.rawValue) hitElement=true roles=[\(roles.joined(separator: ","))] parentReads=\(parentReads) stop=\(stop)") // DIAG remove after live capture
+                return nil
+            }
+            let (parentRole, parentRoleError) = roleResult(of: parent)
+            roles.append("ancestor\(depth + 1):\(parentRole ?? "nil")/e\(parentRoleError.rawValue)") // DIAG remove after live capture
+            if parentRole == kAXWindowRole {
                 AXUIElementSetMessagingTimeout(parent, 0.1)
+                trace?("hitError=\(hitError.rawValue) hitElement=true roles=[\(roles.joined(separator: ","))] parentReads=\(parentReads) stop=windowAncestor") // DIAG remove after live capture
                 return (element, AXWindow(element: parent))
             }
             current = parent
         }
+        trace?("hitError=\(hitError.rawValue) hitElement=true roles=[\(roles.joined(separator: ","))] parentReads=\(parentReads) stop=depthLimit") // DIAG remove after live capture
         return nil
     }
 
@@ -226,9 +247,19 @@ struct AXWindow {
     }
 
     static func role(of element: AXUIElement) -> String? {
+        roleResult(of: element).role
+    }
+
+    private static func roleResult(of element: AXUIElement) -> (role: String?, error: AXError) { // DIAG remove after live capture
         var value: AnyObject?
-        guard AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &value) == .success else { return nil }
-        return value as? String
+        let error = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &value)
+        return (error == .success ? value as? String : nil, error)
+    }
+
+    private static func parentResult(of element: AXUIElement) -> (parent: AXUIElement?, error: AXError) { // DIAG remove after live capture
+        var value: AnyObject?
+        let error = AXUIElementCopyAttributeValue(element, kAXParentAttribute as CFString, &value)
+        return (error == .success ? attributeValue(value) : nil, error)
     }
 
     static func subrole(of element: AXUIElement) -> String? {
@@ -241,6 +272,10 @@ struct AXWindow {
         var value: AnyObject?
         guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else { return nil }
         return value as? T
+    }
+
+    private static func attributeValue<T>(_ value: AnyObject?) -> T? { // DIAG remove after live capture
+        value as? T
     }
 
     private func setPointAttribute(_ name: String, _ point: CGPoint) {
