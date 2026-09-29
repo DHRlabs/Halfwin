@@ -341,13 +341,37 @@ final class SnapManager {
 
         let registry = SnapWindowRegistry.shared
         registry.validate()
-        let matches = SnapWindowInventory.choices(on: screen, excluding: [window]).compactMap {
+        let choices = SnapWindowInventory.choices(on: screen, excluding: [])
+        guard let handledID = choices.first(where: { $0.window == window })?.id,
+              let visibleWindows = SnapWindowInventory.onScreenWindows() else { return }
+        let matches = choices.compactMap {
             choice -> (window: AXWindow, neighborFrame: CGRect, target: CGRect, distance: CGFloat)? in
-            guard !choice.window.isMinimized, !choice.window.isFullScreen,
+            guard choice.id != handledID, !choice.window.isMinimized, !choice.window.isFullScreen,
                   let neighborFrame = choice.window.frame,
                   let aligned = SnapGlueGeometry.alignedFrame(frame, with: neighborFrame,
                                                               in: screen.visibleFrame,
                                                               tolerance: SnapGeometry.edgeTolerance) else { return nil }
+            guard let visibleIndex = visibleWindows.firstIndex(where: { $0.id == choice.id }) else { return nil }
+            let coveringFrames = visibleWindows[..<visibleIndex]
+                .filter { $0.id != handledID }
+                .map(\.frame)
+            let edge: CGRect
+            if abs(aligned.minX - neighborFrame.maxX) <= SnapGeometry.edgeTolerance {
+                guard neighborFrame.width >= 2 else { return nil }
+                edge = CGRect(x: neighborFrame.maxX - 2, y: neighborFrame.minY, width: 2, height: neighborFrame.height)
+            } else if abs(aligned.maxX - neighborFrame.minX) <= SnapGeometry.edgeTolerance {
+                guard neighborFrame.width >= 2 else { return nil }
+                edge = CGRect(x: neighborFrame.minX, y: neighborFrame.minY, width: 2, height: neighborFrame.height)
+            } else if abs(aligned.minY - neighborFrame.maxY) <= SnapGeometry.edgeTolerance {
+                guard neighborFrame.height >= 2 else { return nil }
+                edge = CGRect(x: neighborFrame.minX, y: neighborFrame.maxY - 2, width: neighborFrame.width, height: 2)
+            } else if abs(aligned.maxY - neighborFrame.minY) <= SnapGeometry.edgeTolerance {
+                guard neighborFrame.height >= 2 else { return nil }
+                edge = CGRect(x: neighborFrame.minX, y: neighborFrame.minY, width: neighborFrame.width, height: 2)
+            } else {
+                return nil
+            }
+            guard !SnapWindowInventory.isCovered(edge, by: coveringFrames) else { return nil }
             let distance = abs(aligned.minX - frame.minX) + abs(aligned.minY - frame.minY) +
                 abs(aligned.width - frame.width) + abs(aligned.height - frame.height)
             return (choice.window, neighborFrame, aligned, distance)
