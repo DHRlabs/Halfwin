@@ -12,8 +12,8 @@ final class SnapDividerManager {
 
     private struct ResizeSession {
         var divider: Divider
-        let owner: AXWindow?
-        let ownerSide: Side?
+        var owner: AXWindow?
+        var ownerSide: Side?
         let id: UUID
         let anchors: [AXWindow: CGFloat]
         let appQueues: [pid_t: DispatchQueue]
@@ -470,16 +470,51 @@ final class SnapDividerManager {
         }
     }
 
+    private func nativeResizeOwnerIndex(oldFrames: [CGRect], liveFrames: [CGRect?], lowCount: Int,
+                                        preferredIndex: Int?, axis: Axis) -> Int? {
+        guard oldFrames.count == liveFrames.count, lowCount > 0, lowCount < oldFrames.count else { return nil }
+        if let preferredIndex, oldFrames.indices.contains(preferredIndex),
+           let current = liveFrames[preferredIndex] {
+            let side: Side = preferredIndex < lowCount ? .low : .high
+            if validEdgeResize(from: oldFrames[preferredIndex], to: current, axis: axis, side: side) {
+                return preferredIndex
+            }
+        }
+        let candidates = oldFrames.indices.compactMap { index -> Int? in
+            guard index != preferredIndex, let current = liveFrames[index] else { return nil }
+            let side: Side = index < lowCount ? .low : .high
+            return validEdgeResize(from: oldFrames[index], to: current, axis: axis, side: side) ? index : nil
+        }
+        return candidates.count == 1 ? candidates[0] : nil
+    }
+
     private func resize(session original: ResizeSession, requested: CGFloat?, pointerMovement: CGFloat,
                         native: Bool, final: Bool) -> ResizeResult? {
         var session = original
         var divider = session.divider
         var frames: [AXWindow: CGRect] = [:]
+        var ownerFrame: CGRect?
+        if native {
+            let panes = divider.low + divider.high
+            if session.lastRequestedCoordinate == nil {
+                let liveFramesByWindow = readFrames(panes, session: session, cachedFallback: false)
+                let liveFrames = panes.map { liveFramesByWindow[$0.window] }
+                let preferredIndex = session.owner.flatMap { owner in panes.firstIndex(where: { $0.window == owner }) }
+                if let index = nativeResizeOwnerIndex(oldFrames: panes.map(\.frame), liveFrames: liveFrames,
+                                                      lowCount: divider.low.count, preferredIndex: preferredIndex,
+                                                      axis: divider.axis) {
+                    session.owner = panes[index].window
+                    session.ownerSide = index < divider.low.count ? .low : .high
+                }
+                ownerFrame = session.owner.flatMap { liveFramesByWindow[$0] }
+            } else if let owner = session.owner {
+                ownerFrame = owner.frame(primaryScreenHeight: session.primaryScreenHeight)
+            }
+            if let owner = session.owner { AXUIElementSetMessagingTimeout(owner.element, 0.1) }
+        }
         let oldOwnerFrame = session.owner.flatMap { owner in
             (divider.low + divider.high).first(where: { $0.window == owner })?.frame
         }
-        if let owner = session.owner { AXUIElementSetMessagingTimeout(owner.element, 0.1) }
-        let ownerFrame = native ? session.owner?.frame(primaryScreenHeight: session.primaryScreenHeight) : nil
         var desired = requested
         var movement = pointerMovement
         if native, let ownerFrame, let oldOwnerFrame, let ownerSide = session.ownerSide {
@@ -721,7 +756,8 @@ final class SnapDividerManager {
         return ResizeResult(session: result, frames: frames)
     }
 
-    private func readFrames(_ panes: [Pane], session: ResizeSession) -> [AXWindow: CGRect] {
+    private func readFrames(_ panes: [Pane], session: ResizeSession,
+                            cachedFallback: Bool = true) -> [AXWindow: CGRect] {
         let groups = Dictionary(grouping: panes, by: { $0.window.processIdentifier ?? 0 })
         let work = DispatchGroup()
         let lock = NSLock()
@@ -732,7 +768,11 @@ final class SnapDividerManager {
                 var appResult: [AXWindow: CGRect] = [:]
                 for pane in appPanes {
                     AXUIElementSetMessagingTimeout(pane.window.element, 0.1)
-                    appResult[pane.window] = pane.window.frame(primaryScreenHeight: session.primaryScreenHeight) ?? pane.frame
+                    if let frame = pane.window.frame(primaryScreenHeight: session.primaryScreenHeight) {
+                        appResult[pane.window] = frame
+                    } else if cachedFallback {
+                        appResult[pane.window] = pane.frame
+                    }
                 }
                 lock.lock()
                 result.merge(appResult) { _, new in new }
