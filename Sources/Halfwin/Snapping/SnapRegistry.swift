@@ -146,6 +146,28 @@ final class SnapWindowRegistry {
 
     func seams(on display: SnapDisplayID) -> [SnapSeam] { seamsByDisplay[display] ?? [] }
 
+    func hasVisiblePartner(for window: AXWindow) -> Bool {
+        for seam in seamsByDisplay.values.flatMap({ $0 }) {
+            for incoming in seam.low where incoming.window == window {
+                for partner in seam.high where SnapJoinGeometry.hasVisiblePartner(
+                    incomingID: incoming.windowID, partnerID: partner.windowID,
+                    incoming: incoming.frame, partner: partner.frame, incomingOnLow: true,
+                    vertical: seam.axis == .vertical, coordinate: seam.coordinate, visibleRange: seam.range,
+                    tolerance: SnapGeometry.edgeTolerance, frontmostAt: { self.frontmostWindowID(at: $0) }
+                ) { return true }
+            }
+            for incoming in seam.high where incoming.window == window {
+                for partner in seam.low where SnapJoinGeometry.hasVisiblePartner(
+                    incomingID: incoming.windowID, partnerID: partner.windowID,
+                    incoming: incoming.frame, partner: partner.frame, incomingOnLow: false,
+                    vertical: seam.axis == .vertical, coordinate: seam.coordinate, visibleRange: seam.range,
+                    tolerance: SnapGeometry.edgeTolerance, frontmostAt: { self.frontmostWindowID(at: $0) }
+                ) { return true }
+            }
+        }
+        return false
+    }
+
     func frontmostWindowID(at point: CGPoint) -> CGWindowID? {
         visibleWindows.first { $0.frame.contains(point) }?.id
     }
@@ -230,6 +252,7 @@ final class SnapWindowRegistry {
     }
 
     func commitSnap(window: AXWindow, action: SnapAction, screen: NSScreen, frame: CGRect? = nil,
+                    origin: SnapOrigin = .other,
                     layout chosenLayout: SnapMultiWindowLayout? = nil) {
         guard ![.none, .maximize, .center].contains(action) else {
             unsnap(window)
@@ -272,6 +295,9 @@ final class SnapWindowRegistry {
         }
         records[window] = SnappedWindowRecord(window: window, action: storedAction, layout: layout, frame: frame,
                                                state: .active, windowID: windowID)
+        if origin == .other, chosenLayout == nil {
+            adoptVisiblePartners(near: frame, on: screen, preferredLayout: layout, excluding: window)
+        }
         rebuildZoneOwners()
         rebuildSeams()
     }
@@ -305,6 +331,45 @@ final class SnapWindowRegistry {
             return match.id
         }
         return candidates.first { SnapGeometry.isClose($0.frame, frame, tolerance: 8) }?.id
+    }
+
+    private func adoptVisiblePartners(near frame: CGRect, on screen: NSScreen,
+                                      preferredLayout: SnapMultiWindowLayout?, excluding incoming: AXWindow) {
+        let display = SnapDisplayID(screen)
+        var excluded = Set(records.keys)
+        excluded.insert(incoming)
+        let zones = snapZones(on: screen, preferredLayout: preferredLayout)
+        for choice in SnapWindowInventory.choices(on: screen, excluding: excluded) {
+            guard !choice.window.isMinimized, !choice.window.isFullScreen,
+                  let candidateFrame = choice.window.frame,
+                  displayID(for: candidateFrame) == display,
+                  let index = visibleWindows.firstIndex(where: { $0.id == choice.id }) else { continue }
+            let isExposed = !SnapWindowInventory.isCovered(candidateFrame, by: visibleWindows[..<index].map(\.frame))
+            let zone = zones.first {
+                SnapGeometry.isClose(candidateFrame, $0.frame, tolerance: SnapGeometry.edgeTolerance)
+            }
+            guard SnapJoinGeometry.canAdopt(incoming: frame, candidate: candidateFrame, isExposed: isExposed,
+                                            matchesSnapZone: zone != nil, tolerance: SnapGeometry.edgeTolerance),
+                  let zone else { continue }
+            records[choice.window] = SnappedWindowRecord(window: choice.window, action: zone.action,
+                                                          layout: zone.layout, frame: candidateFrame,
+                                                          state: .active, windowID: choice.id)
+        }
+    }
+
+    private func snapZones(on screen: NSScreen, preferredLayout: SnapMultiWindowLayout?)
+        -> [(action: SnapAction, layout: SnapMultiWindowLayout, frame: CGRect)] {
+        let portrait = screen.frame.height > screen.frame.width
+        let layouts = [preferredLayout].compactMap { $0 } + SnapMultiWindowLayout.allCases.filter { $0 != preferredLayout }
+        var result: [(action: SnapAction, layout: SnapMultiWindowLayout, frame: CGRect)] = []
+        for layout in layouts {
+            for zone in layout.zones(portrait: portrait) {
+                guard let expected = SnapGeometry.frame(for: zone.action, visibleFrame: screen.visibleFrame,
+                                                        currentWindowFrame: screen.visibleFrame, portrait: portrait) else { continue }
+                result.append((zone.action, layout, expected))
+            }
+        }
+        return result
     }
 
     private func removeRecord(for window: AXWindow) {
@@ -422,7 +487,7 @@ final class SnapWindowRegistry {
                 let b = panes[second]
                 let minY = max(a.frame.minY, b.frame.minY)
                 let maxY = min(a.frame.maxY, b.frame.maxY)
-                if maxY - minY > 20 {
+                if maxY - minY > SnapJoinGeometry.minimumSeamOverlap {
                     let overlap = minY...maxY
                     if abs(a.frame.maxX - b.frame.minX) <= SnapGeometry.edgeTolerance {
                         addSeam(.vertical, (a.frame.maxX + b.frame.minX) / 2, overlap, a, b, display, &groups)
@@ -432,7 +497,7 @@ final class SnapWindowRegistry {
                 }
                 let minX = max(a.frame.minX, b.frame.minX)
                 let maxX = min(a.frame.maxX, b.frame.maxX)
-                if maxX - minX > 20 {
+                if maxX - minX > SnapJoinGeometry.minimumSeamOverlap {
                     let overlap = minX...maxX
                     if abs(a.frame.maxY - b.frame.minY) <= SnapGeometry.edgeTolerance {
                         addSeam(.horizontal, (a.frame.maxY + b.frame.minY) / 2, overlap, a, b, display, &groups)
