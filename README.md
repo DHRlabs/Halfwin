@@ -8,6 +8,7 @@ Halfwin is a native macOS 14+ menu-bar app for window snapping, mouse controls, 
 - The default landscape map maximizes at the top edge, puts the outer thirds at the top corners, and splits the left and right edges into halves. When the side-edge switch is on (off by default), near a side's top or bottom corner that half becomes a top or bottom half. The bottom corners are quarters. The bottom edge selects thirds, with two-thirds panes available during the same drag. Portrait screens use quarter corners, maximize at the top, left and right halves along the bottom, and vertical thirds on the sides.
 - Hover at the top center of a display to open the layout menu, or drag a window there to place it. Tiles are Left Half, Right Half, Center, Normal, Maximize, Left + Stack, Thirds, and Command Center. Left + Stack has a large left pane and two stacked right panes. Click a part of a multi-part tile or drop a dragged window on that part. Normal restores the previous frame when Halfwin has one saved.
 - Halfwin remembers windows in multi-window layouts for the current session. Snap Assist offers other visible windows for empty parts. Snapping into an occupied part minimizes the window already there. Snap Assist is on by default.
+- After a move or resize, touching full-height or full-width windows glue together; glue defaults to on, and shared resizing adds the grab bar.
 - Snap Groups brings paired left and right half windows forward as you switch between them. It is off by default.
 
 ## Other window actions
