@@ -34,7 +34,11 @@ let halvesVisible: (CGPoint) -> Int? = { point in
 }
 assert(SnapJoinGeometry.hasVisiblePartner(incomingID: 2, partnerID: 1,
                                            incoming: rightHalf, partner: leftHalf, incomingOnLow: false,
-                                           vertical: true, coordinate: 720, visibleRange: 0...900,
+                                           vertical: true, coordinate: 720, visibleRanges: [0...900],
+                                           tolerance: tolerance, frontmostAt: halvesVisible))
+assert(!SnapJoinGeometry.hasVisiblePartner(incomingID: 2, partnerID: 1,
+                                           incoming: rightHalf, partner: leftHalf, incomingOnLow: false,
+                                           vertical: true, coordinate: 720, visibleRanges: [],
                                            tolerance: tolerance, frontmostAt: halvesVisible))
 
 let exposedLowerRight = CGRect(x: 720, y: 0, width: 720, height: 300)
@@ -44,7 +48,7 @@ let visibleOnlyBelow: (CGPoint) -> Int? = { point in
 }
 assert(!SnapJoinGeometry.hasVisiblePartner(incomingID: 2, partnerID: 1,
                                            incoming: incomingUpperRight, partner: leftHalf, incomingOnLow: false,
-                                           vertical: true, coordinate: 720, visibleRange: 0...300,
+                                           vertical: true, coordinate: 720, visibleRanges: [0...300],
                                            tolerance: tolerance, frontmostAt: visibleOnlyBelow))
 
 let blocker = CGRect(x: 720, y: 450, width: 10, height: 450)
@@ -53,8 +57,21 @@ let coveredAtSeam: (CGPoint) -> Int? = { point in
 }
 assert(!SnapJoinGeometry.hasVisiblePartner(incomingID: 2, partnerID: 1,
                                            incoming: rightHalf, partner: leftHalf, incomingOnLow: false,
-                                           vertical: true, coordinate: 720, visibleRange: 0...900,
+                                           vertical: true, coordinate: 720, visibleRanges: [0...900],
                                            tolerance: tolerance, frontmostAt: coveredAtSeam))
+
+let smallBlocker = CGRect(x: 720, y: 445, width: 10, height: 10)
+let visibleAroundSmallBlocker: (CGPoint) -> Int? = { point in
+    smallBlocker.contains(point) ? 9 : halvesVisible(point)
+}
+assert(!SnapJoinGeometry.hasVisiblePartner(incomingID: 2, partnerID: 1,
+                                           incoming: rightHalf, partner: leftHalf, incomingOnLow: false,
+                                           vertical: true, coordinate: 720, visibleRanges: [0...900],
+                                           tolerance: tolerance, frontmostAt: visibleAroundSmallBlocker))
+assert(SnapJoinGeometry.hasVisiblePartner(incomingID: 2, partnerID: 1,
+                                           incoming: rightHalf, partner: leftHalf, incomingOnLow: false,
+                                           vertical: true, coordinate: 720, visibleRanges: [0...445, 455...900],
+                                           tolerance: tolerance, frontmostAt: visibleAroundSmallBlocker))
 
 let resizedFill = CGRect(x: 720, y: 0, width: 720, height: 300)
 let resizedFillVisible: (CGPoint) -> Int? = { point in
@@ -62,7 +79,7 @@ let resizedFillVisible: (CGPoint) -> Int? = { point in
 }
 assert(SnapJoinGeometry.hasVisiblePartner(incomingID: 4, partnerID: 1,
                                            incoming: resizedFill, partner: leftHalf, incomingOnLow: false,
-                                           vertical: true, coordinate: 720, visibleRange: 0...300,
+                                           vertical: true, coordinate: 720, visibleRanges: [0...300],
                                            tolerance: tolerance, frontmostAt: resizedFillVisible))
 
 print("Snap Assist join assertions passed")

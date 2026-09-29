@@ -148,21 +148,24 @@ final class SnapWindowRegistry {
 
     func hasVisiblePartner(for window: AXWindow) -> Bool {
         for seam in seamsByDisplay.values.flatMap({ $0 }) {
-            for incoming in seam.low where incoming.window == window {
-                for partner in seam.high where SnapJoinGeometry.hasVisiblePartner(
-                    incomingID: incoming.windowID, partnerID: partner.windowID,
-                    incoming: incoming.frame, partner: partner.frame, incomingOnLow: true,
-                    vertical: seam.axis == .vertical, coordinate: seam.coordinate, visibleRange: seam.range,
-                    tolerance: SnapGeometry.edgeTolerance, frontmostAt: { self.frontmostWindowID(at: $0) }
-                ) { return true }
-            }
-            for incoming in seam.high where incoming.window == window {
-                for partner in seam.low where SnapJoinGeometry.hasVisiblePartner(
-                    incomingID: incoming.windowID, partnerID: partner.windowID,
-                    incoming: incoming.frame, partner: partner.frame, incomingOnLow: false,
-                    vertical: seam.axis == .vertical, coordinate: seam.coordinate, visibleRange: seam.range,
-                    tolerance: SnapGeometry.edgeTolerance, frontmostAt: { self.frontmostWindowID(at: $0) }
-                ) { return true }
+            let visibleRanges = clippedVisibleIntervals(of: seam).ranges
+            for visibleRange in visibleRanges {
+                for incoming in seam.low where incoming.window == window {
+                    for partner in seam.high where SnapJoinGeometry.hasVisiblePartner(
+                        incomingID: incoming.windowID, partnerID: partner.windowID,
+                        incoming: incoming.frame, partner: partner.frame, incomingOnLow: true,
+                        vertical: seam.axis == .vertical, coordinate: seam.coordinate, visibleRanges: [visibleRange],
+                        tolerance: SnapGeometry.edgeTolerance, frontmostAt: { self.frontmostWindowID(at: $0) }
+                    ) { return true }
+                }
+                for incoming in seam.high where incoming.window == window {
+                    for partner in seam.low where SnapJoinGeometry.hasVisiblePartner(
+                        incomingID: incoming.windowID, partnerID: partner.windowID,
+                        incoming: incoming.frame, partner: partner.frame, incomingOnLow: false,
+                        vertical: seam.axis == .vertical, coordinate: seam.coordinate, visibleRanges: [visibleRange],
+                        tolerance: SnapGeometry.edgeTolerance, frontmostAt: { self.frontmostWindowID(at: $0) }
+                    ) { return true }
+                }
             }
         }
         return false
@@ -527,7 +530,7 @@ final class SnapWindowRegistry {
         }
     }
 
-    private func visibleSegments(of seam: SnapSeam) -> [SnapSeam] {
+    private func clippedVisibleIntervals(of seam: SnapSeam) -> (cuts: [CGFloat], ranges: [ClosedRange<CGFloat>]) {
         let endpoints: [CGFloat]
         switch seam.axis {
         case .vertical:
@@ -539,7 +542,7 @@ final class SnapWindowRegistry {
         }
         let cuts = Set([seam.range.lowerBound, seam.range.upperBound] +
             endpoints.filter { $0 > seam.range.lowerBound && $0 < seam.range.upperBound }).sorted()
-        guard cuts.count > 1 else { return [] }
+        guard cuts.count > 1 else { return (cuts, []) }
         var visible: [ClosedRange<CGFloat>] = []
         for index in 1..<cuts.count {
             let lower = cuts[index - 1]
@@ -558,6 +561,11 @@ final class SnapWindowRegistry {
                 visible.append(lower...upper)
             }
         }
+        return (cuts, visible)
+    }
+
+    private func visibleSegments(of seam: SnapSeam) -> [SnapSeam] {
+        let (cuts, visible) = clippedVisibleIntervals(of: seam)
         var merged: [ClosedRange<CGFloat>] = []
         for range in visible.sorted(by: { $0.lowerBound < $1.lowerBound }) {
             if let last = merged.last {
