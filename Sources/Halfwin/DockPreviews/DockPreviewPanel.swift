@@ -12,11 +12,13 @@ struct DockPreviewItem: Identifiable {
     let title: String
     let appIcon: NSImage
     let minimized: Bool
+    let canClose: Bool
 }
 
 @MainActor
 final class DockPreviewPanel {
     var onSelect: ((Int) -> Void)?
+    var onClose: ((Int) -> Void)?
     var onHover: ((Int, Bool) -> Void)?
     var frame: CGRect { panel.frame }
 
@@ -46,6 +48,7 @@ final class DockPreviewPanel {
         panel.contentView = NSHostingView(rootView: DockPreviewTilesView(
             state: state,
             onSelect: { [weak self] id in self?.onSelect?(id) },
+            onClose: { [weak self] id in self?.onClose?(id) },
             onHover: { [weak self] id, inside in self?.onHover?(id, inside) }
         ))
     }
@@ -152,6 +155,7 @@ private final class DockPreviewPanelState: ObservableObject {
 private struct DockPreviewTilesView: View {
     @ObservedObject var state: DockPreviewPanelState
     let onSelect: (Int) -> Void
+    let onClose: (Int) -> Void
     let onHover: (Int, Bool) -> Void
 
     private var horizontalDock: Bool {
@@ -187,7 +191,8 @@ private struct DockPreviewTilesView: View {
         let titleSize = min(12 * tileScale, state.tileSize.height * 0.095)
         let imageHeight = min(92 * tileScale, max(0, state.tileSize.height - inset * 2 - rowSpacing - titleSize * 1.2))
         let iconSize = min(42 * tileScale, min(state.tileSize.width, state.tileSize.height) * 0.45)
-        return Button { onSelect(item.id) } label: {
+        let title = item.title.isEmpty ? "Window" : item.title
+        let selectButton = Button { onSelect(item.id) } label: {
             VStack(alignment: .leading, spacing: rowSpacing) {
                 ZStack(alignment: .topLeading) {
                     RoundedRectangle(cornerRadius: 8)
@@ -213,6 +218,7 @@ private struct DockPreviewTilesView: View {
                             .padding(.horizontal, 6 * tileScale)
                             .padding(.vertical, 4 * tileScale)
                             .background(.black.opacity(0.78), in: Capsule())
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topTrailing)
                             .padding(6 * tileScale)
                     }
                 }
@@ -230,9 +236,24 @@ private struct DockPreviewTilesView: View {
             .contentShape(RoundedRectangle(cornerRadius: 10))
         }
         .buttonStyle(.plain)
+        .accessibilityLabel(item.minimized ? "\(title), Minimized" : title)
+
+        return ZStack(alignment: .topLeading) {
+            selectButton
+            if item.canClose {
+                Button { onClose(item.id) } label: {
+                    Image(systemName: "xmark")
+                        .font(.system(size: max(9, 11 * tileScale), weight: .bold))
+                        .foregroundStyle(.white)
+                        .frame(width: max(20, 22 * tileScale), height: max(20, 22 * tileScale))
+                        .background(.red, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("Close \(title)")
+                .padding(6 * tileScale)
+            }
+        }
         .onHover { onHover(item.id, $0) }
-        .accessibilityLabel(item.minimized
-            ? "\(item.title.isEmpty ? "Window" : item.title), Minimized"
-            : item.title.isEmpty ? "Window" : item.title)
+        .accessibilityElement(children: .contain)
     }
 }
