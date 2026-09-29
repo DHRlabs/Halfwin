@@ -22,7 +22,7 @@ enum SnapJoinGeometry {
     static func hasVisiblePartner<ID: Equatable>(incomingID: ID, partnerID: ID,
                                                   incoming: CGRect, partner: CGRect,
                                                   incomingOnLow: Bool, vertical: Bool,
-                                                  coordinate: CGFloat, visibleRange: ClosedRange<CGFloat>,
+                                                  coordinate: CGFloat, visibleRanges: [ClosedRange<CGFloat>],
                                                   tolerance: CGFloat,
                                                   frontmostAt: (CGPoint) -> ID?) -> Bool {
         guard incomingID != partnerID,
@@ -33,21 +33,24 @@ enum SnapJoinGeometry {
                    ? (incomingOnLow ? partner.minX : partner.maxX)
                    : (incomingOnLow ? partner.minY : partner.maxY)) - coordinate) <= tolerance else { return false }
 
-        let lower = max(visibleRange.lowerBound,
-                        vertical ? max(incoming.minY, partner.minY) : max(incoming.minX, partner.minX))
-        let upper = min(visibleRange.upperBound,
-                        vertical ? min(incoming.maxY, partner.maxY) : min(incoming.maxX, partner.maxX))
-        guard upper - lower > 1 else { return false }
-        let along = (lower + upper) / 2
-        let incomingPoint: CGPoint
-        let partnerPoint: CGPoint
-        if vertical {
-            incomingPoint = CGPoint(x: incomingOnLow ? incoming.maxX - 1 : incoming.minX + 1, y: along)
-            partnerPoint = CGPoint(x: incomingOnLow ? partner.minX + 1 : partner.maxX - 1, y: along)
-        } else {
-            incomingPoint = CGPoint(x: along, y: incomingOnLow ? incoming.maxY - 1 : incoming.minY + 1)
-            partnerPoint = CGPoint(x: along, y: incomingOnLow ? partner.minY + 1 : partner.maxY - 1)
+        for visibleRange in visibleRanges {
+            let lower = max(visibleRange.lowerBound,
+                            vertical ? max(incoming.minY, partner.minY) : max(incoming.minX, partner.minX))
+            let upper = min(visibleRange.upperBound,
+                            vertical ? min(incoming.maxY, partner.maxY) : min(incoming.maxX, partner.maxX))
+            guard upper - lower > 1 else { continue }
+            let along = (lower + upper) / 2
+            let incomingPoint: CGPoint
+            let partnerPoint: CGPoint
+            if vertical {
+                incomingPoint = CGPoint(x: incomingOnLow ? incoming.maxX - 1 : incoming.minX + 1, y: along)
+                partnerPoint = CGPoint(x: incomingOnLow ? partner.minX + 1 : partner.maxX - 1, y: along)
+            } else {
+                incomingPoint = CGPoint(x: along, y: incomingOnLow ? incoming.maxY - 1 : incoming.minY + 1)
+                partnerPoint = CGPoint(x: along, y: incomingOnLow ? partner.minY + 1 : partner.maxY - 1)
+            }
+            if frontmostAt(incomingPoint) == incomingID && frontmostAt(partnerPoint) == partnerID { return true }
         }
-        return frontmostAt(incomingPoint) == incomingID && frontmostAt(partnerPoint) == partnerID
+        return false
     }
 }
