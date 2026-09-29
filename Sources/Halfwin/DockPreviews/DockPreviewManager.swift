@@ -19,9 +19,16 @@ final class DockPreviewManager {
     }
 
     private struct CachedPreview {
-        let items: [DockPreviewItem]
-        let windows: [Int: AXWindow]
-        let screenshotIDs: [Int: CGWindowID]
+        var items: [DockPreviewItem]
+        var windows: [Int: AXWindow]
+        var screenshotIDs: [Int: CGWindowID]
+
+        mutating func removeDestroyedWindow(_ id: Int) -> Bool {
+            guard windows.removeValue(forKey: id) != nil else { return false }
+            items.removeAll { $0.id == id }
+            screenshotIDs.removeValue(forKey: id)
+            return true
+        }
     }
 
     private struct PreviewPlacement {
@@ -141,6 +148,7 @@ final class DockPreviewManager {
     init(settings: DockPreviewSettings) {
         self.settings = settings
         panel.onSelect = { [weak self] in self?.selectWindow($0) }
+        panel.onClose = { [weak self] in self?.closeWindow($0) }
         panel.onHover = { [weak self] id, inside in self?.previewTileHoverChanged(id, inside: inside) }
         settingsObserver = settings.$peekOnHover.dropFirst().sink { [weak self] enabled in
             guard !enabled else { return }
@@ -514,13 +522,14 @@ final class DockPreviewManager {
             let id = Int(truncatingIfNeeded: CFHash(window.element))
             guard observedWindowElements[id] == nil else { continue }
             AXUIElementSetMessagingTimeout(window.element, 0.1)
-            guard AXObserverAddNotification(
+            let minimization = AXObserverAddNotification(
                 minimizeObserver, window.element, kAXWindowMiniaturizedNotification as CFString, context
-            ) == .success else { continue }
-            observedWindowElements[id] = window.element
-            AXObserverAddNotification(
+            )
+            let destruction = AXObserverAddNotification(
                 minimizeObserver, window.element, kAXUIElementDestroyedNotification as CFString, context
             )
+            guard minimization == .success || destruction == .success else { continue }
+            observedWindowElements[id] = window.element
         }
     }
 
@@ -571,9 +580,27 @@ final class DockPreviewManager {
 
     func windowElementDestroyed(_ element: AXUIElement) {
         let id = Int(truncatingIfNeeded: CFHash(element))
-        guard let tracked = observedWindowElements.removeValue(forKey: id), let minimizeObserver else { return }
-        AXObserverRemoveNotification(minimizeObserver, tracked, kAXWindowMiniaturizedNotification as CFString)
-        AXObserverRemoveNotification(minimizeObserver, tracked, kAXUIElementDestroyedNotification as CFString)
+        if let tracked = observedWindowElements.removeValue(forKey: id), let minimizeObserver {
+            AXObserverRemoveNotification(minimizeObserver, tracked, kAXWindowMiniaturizedNotification as CFString)
+            AXObserverRemoveNotification(minimizeObserver, tracked, kAXUIElementDestroyedNotification as CFString)
+        }
+
+        guard let processID = minimizeObserverPID else { return }
+        if var cached = previewCache[processID], cached.removeDestroyedWindow(id) {
+            previewCache[processID] = cached
+            if isShowing, activeApp?.processIdentifier == processID {
+                if cached.items.isEmpty {
+                    hidePreview()
+                } else {
+                    captureTask?.cancel()
+                    captureTask = nil
+                    present(cached, preservingImages: true)
+                    captureThumbnails(cached.screenshotIDs, generation: generation)
+                }
+            }
+        }
+        guard let app = NSWorkspace.shared.runningApplications.first(where: { $0.processIdentifier == processID }) else { return }
+        refreshPreviewCacheLater(for: app)
     }
 
     func dockElementDestroyed() {
@@ -1106,7 +1133,13 @@ final class DockPreviewManager {
     private func placeholderPreview(for app: NSRunningApplication) -> CachedPreview {
         let icon = app.icon ?? NSWorkspace.shared.icon(forFile: app.bundleURL?.path ?? "")
         return CachedPreview(
-            items: [DockPreviewItem(id: Int.min, title: app.localizedName ?? "Loading windows…", appIcon: icon, minimized: false)],
+            items: [DockPreviewItem(
+                id: Int.min,
+                title: app.localizedName ?? "Loading windows…",
+                appIcon: icon,
+                minimized: false,
+                canClose: false
+            )],
             windows: [:],
             screenshotIDs: [:]
         )
@@ -1162,7 +1195,13 @@ final class DockPreviewManager {
             guard minimized || record != nil || hiddenApp else { continue }
             if let record { usedWindowIDs.insert(record.id) }
             let id = Int(truncatingIfNeeded: CFHash(window.element))
-            tileItems.append(DockPreviewItem(id: id, title: window.title ?? "Untitled window", appIcon: icon, minimized: minimized))
+            tileItems.append(DockPreviewItem(
+                id: id,
+                title: window.title ?? "Untitled window",
+                appIcon: icon,
+                minimized: minimized,
+                canClose: true
+            ))
             nextWindows[id] = window
             if let record { screenshotIDs[id] = record.id }
         }
@@ -1541,6 +1580,15 @@ final class DockPreviewManager {
         hoveredTileID = nil
         peekedTileID = nil
         peekPanel.hide()
+    }
+
+    private func closeWindow(_ id: Int) {
+        guard let app = activeApp, let window = windows[id] else { return }
+        clearPeek()
+        AXUIElementSetMessagingTimeout(window.element, 0.1)
+        guard let closeButton: AXUIElement = attribute(window.element, kAXCloseButtonAttribute),
+              AXUIElementPerformAction(closeButton, kAXPressAction as CFString) == .success else { return }
+        refreshPreviewCacheLater(for: app)
     }
 
     private func selectWindow(_ id: Int) {
