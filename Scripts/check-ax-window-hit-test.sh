@@ -21,9 +21,7 @@ struct CGPoint {
 
 enum AXError: Int {
     case success = 0
-    case noValue = 1
     case attributeUnsupported = 2
-    case failure = 3
 }
 
 let kAXRoleAttribute = "AXRole"
@@ -75,20 +73,14 @@ SWIFT
         capture { sub(/^    /, ""); print }
     ' "$root/Sources/Halfwin/Snapping/AXWindow.swift"
     awk '
-        /^    private static func roleResult/ { capture = 1 }
+        /^    static func role\(/ { capture = 1 }
         /^    static func subrole/ { capture = 0 }
         capture { sub(/^    /, ""); print }
     ' "$root/Sources/Halfwin/Snapping/AXWindow.swift"
     awk '
-        /^    private static func attributeValue/ { capture = 1 }
-        capture {
-            sub(/^    /, "")
-            print
-            opens = gsub(/\{/, "{")
-            closes = gsub(/\}/, "}")
-            depth += opens - closes
-            if (depth == 0) exit
-        }
+        /^    private static func objectAttribute/ { capture = 1 }
+        /^    private func setPointAttribute/ { capture = 0 }
+        capture { sub(/^    /, ""); print }
     ' "$root/Sources/Halfwin/Snapping/AXWindow.swift"
     cat <<'SWIFT'
 }
@@ -99,26 +91,22 @@ func makeElement(_ id: String, role: String) -> AXUIElement {
     return element
 }
 
-func reset(_ hit: AXUIElement) {
+func reset(_ hit: AXUIElement, role: String = "AXGroup") {
     fixture.hit = hit
     fixture.hitError = .success
     fixture.attributes = [:]
     fixture.errors = [:]
-    fixture.attributes[hit.id] = [kAXRoleAttribute: "AXGroup" as NSString]
+    fixture.attributes[hit.id] = [kAXRoleAttribute: role as NSString]
 }
 
-func runHitTest() -> ((element: AXUIElement, window: AXWindow)?, String?) {
-    var trace: String?
-    let result = AXWindow.hitTest(at: CGPoint(x: 12, y: 34)) { trace = $0 }
-    return (result, trace)
+func runHitTest() -> (element: AXUIElement, window: AXWindow)? {
+    AXWindow.hitTest(at: CGPoint(x: 12, y: 34))
 }
 
-let direct = makeElement("direct", role: kAXWindowRole)
-reset(direct)
-fixture.attributes[direct.id]?[kAXRoleAttribute] = kAXWindowRole as NSString
+let direct = AXUIElement("direct")
+reset(direct, role: kAXWindowRole)
 let directResult = runHitTest()
-assert(directResult.0?.element === direct && directResult.0?.window.element === direct)
-assert(directResult.1?.contains("stop=hitWindow") == true)
+assert(directResult?.element === direct && directResult?.window.element === direct)
 
 let deepHit = AXUIElement("deep-hit")
 reset(deepHit)
@@ -130,26 +118,30 @@ for index in 1...12 {
 }
 let deepOwner = makeElement("deep-owner", role: kAXWindowRole)
 fixture.attributes[previous.id, default: [:]][kAXParentAttribute] = deepOwner
-fixture.errors[deepHit.id, default: [:]][kAXWindowAttribute] = .attributeUnsupported
-let oldPathResult = runHitTest()
-assert(oldPathResult.0 == nil && oldPathResult.1?.contains("parentReads=8") == true)
-assert(oldPathResult.1?.contains("stop=depthLimit") == true)
-
 fixture.attributes[deepHit.id, default: [:]][kAXWindowAttribute] = deepOwner
 let deepResult = runHitTest()
-assert(deepResult.0?.element === deepHit && deepResult.0?.window.element === deepOwner)
-assert(deepResult.1?.contains("stop=windowAttribute") == true)
-assert(deepResult.1?.contains("windowRole=AXWindow/e0") == true)
+assert(deepResult?.element === deepHit && deepResult?.window.element === deepOwner)
 
-let fallbackHit = makeElement("fallback-hit", role: "AXGroup")
+let fallbackHit = AXUIElement("fallback-hit")
 reset(fallbackHit)
 let fallbackOwner = makeElement("fallback-owner", role: kAXWindowRole)
 fixture.attributes[fallbackHit.id, default: [:]][kAXParentAttribute] = fallbackOwner
-fixture.errors[fallbackHit.id, default: [:]][kAXWindowAttribute] = .attributeUnsupported
+fixture.attributes[fallbackHit.id, default: [:]][kAXWindowAttribute] = "invalid value" as NSString
 let fallbackResult = runHitTest()
-assert(fallbackResult.0?.element === fallbackHit && fallbackResult.0?.window.element === fallbackOwner)
-assert(fallbackResult.1?.contains("stop=windowAncestor") == true)
-assert(fallbackResult.1?.contains("windowAttributeError=2") == true)
+assert(fallbackResult?.element === fallbackHit && fallbackResult?.window.element === fallbackOwner)
+
+let unreachableHit = AXUIElement("unreachable-hit")
+reset(unreachableHit)
+previous = unreachableHit
+for index in 1...12 {
+    let group = makeElement("unreachable-group-\(index)", role: "AXGroup")
+    fixture.attributes[previous.id, default: [:]][kAXParentAttribute] = group
+    previous = group
+}
+let unreachableOwner = makeElement("unreachable-owner", role: kAXWindowRole)
+fixture.attributes[previous.id, default: [:]][kAXParentAttribute] = unreachableOwner
+let unreachableResult = runHitTest()
+assert(unreachableResult?.window.element == nil)
 
 print("AXWindow hit-test assertions passed")
 SWIFT
