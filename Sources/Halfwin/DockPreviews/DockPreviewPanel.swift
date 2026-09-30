@@ -260,7 +260,7 @@ private struct DockPreviewTilesView: View {
                 .buttonStyle(.plain)
                 .accessibilityLabel("Close \(title)")
                 .onHover { hoveredCloseID = $0 ? item.id : nil }
-                .padding(4)
+                .offset(x: -8, y: -8)
             }
         }
         .onHover { onHover(item.id, $0) }
