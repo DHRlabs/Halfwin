@@ -157,6 +157,7 @@ private struct DockPreviewTilesView: View {
     let onSelect: (Int) -> Void
     let onClose: (Int) -> Void
     let onHover: (Int, Bool) -> Void
+    @State private var hoveredCloseID: Int?
 
     private var horizontalDock: Bool {
         state.edge == .bottom
@@ -242,15 +243,24 @@ private struct DockPreviewTilesView: View {
             selectButton
             if item.canClose {
                 Button { onClose(item.id) } label: {
-                    Image(systemName: "xmark")
-                        .font(.system(size: max(9, 11 * tileScale), weight: .bold))
-                        .foregroundStyle(.white)
-                        .frame(width: max(20, 22 * tileScale), height: max(20, 22 * tileScale))
-                        .background(.red, in: Circle())
+                    ZStack {
+                        Circle()
+                            .fill(Color(red: 1, green: 95.0 / 255.0, blue: 87.0 / 255.0))
+                        Circle()
+                            .strokeBorder(Color(red: 224.0 / 255.0, green: 68.0 / 255.0, blue: 62.0 / 255.0), lineWidth: 0.5)
+                        Image(systemName: "xmark")
+                            .font(.system(size: 7, weight: .semibold))
+                            .foregroundStyle(Color(red: 130.0 / 255.0, green: 0, blue: 5.0 / 255.0)
+                                .opacity(hoveredCloseID == item.id ? 1 : 0))
+                    }
+                    .frame(width: 12, height: 12)
+                    .frame(width: 20, height: 20)
+                    .contentShape(Rectangle())
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Close \(title)")
-                .padding(6 * tileScale)
+                .onHover { hoveredCloseID = $0 ? item.id : nil }
+                .padding(4)
             }
         }
         .onHover { onHover(item.id, $0) }
