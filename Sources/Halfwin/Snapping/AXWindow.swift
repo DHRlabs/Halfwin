@@ -134,25 +134,52 @@ struct AXWindow {
             trace?("hitError=\(hitError.rawValue) hitElement=true roles=[\(roles.joined(separator: ","))] parentReads=0 stop=hitWindow") // DIAG remove after live capture
             return (element, AXWindow(element: element))
         }
+        var windowValue: AnyObject?
+        let windowError = AXUIElementCopyAttributeValue(element, kAXWindowAttribute as CFString, &windowValue)
+        var windowType = "unread"
+        var windowRole: String?
+        var windowRoleError: AXError?
+        if windowError == .success {
+            if let windowValue {
+                if CFGetTypeID(windowValue) == AXUIElementGetTypeID() {
+                    windowType = "AXUIElement"
+                    let window = windowValue as! AXUIElement
+                    AXUIElementSetMessagingTimeout(window, 0.1)
+                    let (role, roleError) = roleResult(of: window)
+                    windowRole = role
+                    windowRoleError = roleError
+                    roles.append("window:\(role ?? "nil")/e\(roleError.rawValue)") // DIAG remove after live capture
+                    if role == kAXWindowRole {
+                        trace?("hitError=\(hitError.rawValue) roles=[\(roles.joined(separator: ","))] parentReads=0 windowAttributeError=\(windowError.rawValue) windowAttributeType=\(windowType) windowRole=\(role ?? "nil")/e\(roleError.rawValue) stop=windowAttribute") // DIAG remove after live capture
+                        return (element, AXWindow(element: window))
+                    }
+                } else {
+                    windowType = "invalid"
+                }
+            } else {
+                windowType = "missing"
+            }
+        }
+        let windowAttributeTrace = "windowAttributeError=\(windowError.rawValue) windowAttributeType=\(windowType) windowRole=\(windowRole ?? "unread")/e\(windowRoleError?.rawValue ?? -1)"
         var current = element
         for depth in 0..<8 { // DIAG remove after live capture
             parentReads += 1 // DIAG remove after live capture
             let (parentValue, parentError) = parentResult(of: current)
             guard let parent = parentValue else {
                 let stop = parentError == .success ? "parentType" : "parentError:\(parentError.rawValue)"
-                trace?("hitError=\(hitError.rawValue) hitElement=true roles=[\(roles.joined(separator: ","))] parentReads=\(parentReads) stop=\(stop)") // DIAG remove after live capture
+                trace?("hitError=\(hitError.rawValue) hitElement=true roles=[\(roles.joined(separator: ","))] parentReads=\(parentReads) \(windowAttributeTrace) stop=\(stop)") // DIAG remove after live capture
                 return nil
             }
             let (parentRole, parentRoleError) = roleResult(of: parent)
             roles.append("ancestor\(depth + 1):\(parentRole ?? "nil")/e\(parentRoleError.rawValue)") // DIAG remove after live capture
             if parentRole == kAXWindowRole {
                 AXUIElementSetMessagingTimeout(parent, 0.1)
-                trace?("hitError=\(hitError.rawValue) hitElement=true roles=[\(roles.joined(separator: ","))] parentReads=\(parentReads) stop=windowAncestor") // DIAG remove after live capture
+                trace?("hitError=\(hitError.rawValue) hitElement=true roles=[\(roles.joined(separator: ","))] parentReads=\(parentReads) \(windowAttributeTrace) stop=windowAncestor") // DIAG remove after live capture
                 return (element, AXWindow(element: parent))
             }
             current = parent
         }
-        trace?("hitError=\(hitError.rawValue) hitElement=true roles=[\(roles.joined(separator: ","))] parentReads=\(parentReads) stop=depthLimit") // DIAG remove after live capture
+        trace?("hitError=\(hitError.rawValue) hitElement=true roles=[\(roles.joined(separator: ","))] parentReads=\(parentReads) \(windowAttributeTrace) stop=depthLimit") // DIAG remove after live capture
         return nil
     }
 
