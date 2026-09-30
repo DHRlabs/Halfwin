@@ -14,6 +14,7 @@ enum MacTweakGroup: String, CaseIterable, Identifiable {
 enum MacTweakID: String, CaseIterable {
     case dockMagnification
     case dockIndicators
+    case dockOnMainDisplay
     case minimizeEffect
     case launchAnimation
     case instantAutoHide
@@ -48,6 +49,8 @@ struct MacTweak: Identifiable {
               preferences: [.init(domain: "com.apple.dock", key: "magnification", value: false, restartPolicy: .dock)]),
         .init(id: .dockIndicators, title: "Show open-app indicators", group: .dock,
               preferences: [.init(domain: "com.apple.dock", key: "show-process-indicators", value: true, restartPolicy: .dock)]),
+        .init(id: .dockOnMainDisplay, title: "Keep Dock on the main display", group: .dock,
+              preferences: [.init(domain: "com.apple.spaces", key: "spans-displays", value: true, restartPolicy: .none)]),
         .init(id: .minimizeEffect, title: "Minimize effect: Scale", group: .dock,
               preferences: [.init(domain: "com.apple.dock", key: "mineffect", value: "scale", restartPolicy: .dock)]),
         .init(id: .launchAnimation, title: "No launch bounce", group: .dock,

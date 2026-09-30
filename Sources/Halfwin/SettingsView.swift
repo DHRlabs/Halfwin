@@ -60,6 +60,11 @@ struct SettingsView: View {
                                         get: { macTweaks.isEnabled(tweak.id) },
                                         set: { macTweaks.setEnabled($0, for: tweak.id) }
                                     ))
+                                    if tweak.id == .dockOnMainDisplay {
+                                        Text("Turns off Displays have separate Spaces. Log out and back in after changing this. Displays share Spaces; Stage Manager and Split View on other displays are unavailable.")
+                                            .font(.footnote)
+                                            .foregroundStyle(.secondary)
+                                    }
                                     if macTweaks.wasChangedOutsideHalfwin(tweak.id) {
                                         Text("Changed outside Halfwin")
                                             .font(.footnote)
