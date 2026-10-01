@@ -1,5 +1,6 @@
 import AppKit
 import ApplicationServices
+import os
 
 /// Global-screen coordinate flip between AppKit (origin bottom-left of the
 /// primary display) and Accessibility/CoreGraphics (origin top-left). The
@@ -22,6 +23,8 @@ extension CGRect {
 /// `AccessibilityElement.swift` (MIT), trimmed to the lookup and frame
 /// read/write this app needs: no enhanced-UI dance, no window-id resolution.
 struct AXWindow {
+    private static let diagLogger = Logger(subsystem: "com.dhrlabs.halfwin", category: "diag")
+
     let element: AXUIElement
 
     var title: String? {
@@ -93,15 +96,42 @@ struct AXWindow {
 
     /// Set size, then position, then size again: macOS clamps the size to
     /// whichever display the position lands on, so the final call wins.
-    func setFrame(_ appKitFrame: CGRect) {
-        setFrame(appKitFrame, primaryScreenHeight: primaryScreenHeight)
+    func setFrame(_ appKitFrame: CGRect, caller: String = #fileID, line: Int = #line, function: String = #function) {
+        setFrame(appKitFrame, primaryScreenHeight: primaryScreenHeight,
+                 caller: caller, line: line, function: function)
     }
 
-    func setFrame(_ appKitFrame: CGRect, primaryScreenHeight: CGFloat) {
+    func setFrame(_ appKitFrame: CGRect, primaryScreenHeight: CGFloat,
+                  caller: String = #fileID, line: Int = #line, function: String = #function) {
         let target = appKitFrame.axFlipped(primaryScreenHeight: primaryScreenHeight)
-        setSizeAttribute(kAXSizeAttribute, target.size)
-        setPointAttribute(kAXPositionAttribute, target.origin)
-        setSizeAttribute(kAXSizeAttribute, target.size)
+        let startedAt = ProcessInfo.processInfo.systemUptime
+        let firstSizeError = setSizeAttribute(kAXSizeAttribute, target.size)
+        let positionError = setPointAttribute(kAXPositionAttribute, target.origin)
+        let finalSizeError = setSizeAttribute(kAXSizeAttribute, target.size)
+
+        let finishedAt = ProcessInfo.processInfo.systemUptime
+        let immediate = Self.frameWithError(of: element)
+        let pid = processIdentifier
+        var enhancedUI = "unknown"
+        var enhancedUIError: AXError = .failure
+        if let pid {
+            let appElement = AXUIElementCreateApplication(pid)
+            AXUIElementSetMessagingTimeout(appElement, 0.1)
+            var value: AnyObject?
+            enhancedUIError = AXUIElementCopyAttributeValue(
+                appElement, "AXEnhancedUserInterface" as CFString, &value
+            )
+            if enhancedUIError == .success, let number = value as? NSNumber {
+                enhancedUI = number.boolValue ? "true" : "false"
+            }
+        }
+        let details = "caller=\(caller):\(line) \(function) pid=\(pid.map(String.init) ?? "unknown") axHash=\(CFHash(element)) " +
+            "uptime=\(startedAt)...\(finishedAt) duration=\(finishedAt - startedAt) " +
+            "requestedAppKit=\(appKitFrame) requestedAX=\(target) conversionHeight=\(primaryScreenHeight) " +
+            "writeErrors=[\(firstSizeError),\(positionError),\(finalSizeError)] " +
+            "immediate=\(String(describing: immediate.frame)) immediateError=\(immediate.error) " +
+            "enhancedUI=\(enhancedUI) enhancedUIError=\(enhancedUIError)"
+        Self.diagLogger.notice("HWDIAG snapRelease setFrame \(details, privacy: .public)")
     }
 
     /// The window under a point in AppKit screen coordinates, the way a
@@ -253,16 +283,16 @@ struct AXWindow {
         return value as? T
     }
 
-    private func setPointAttribute(_ name: String, _ point: CGPoint) {
+    private func setPointAttribute(_ name: String, _ point: CGPoint) -> AXError {
         var point = point
-        guard let value = AXValueCreate(.cgPoint, &point) else { return }
-        AXUIElementSetAttributeValue(element, name as CFString, value)
+        guard let value = AXValueCreate(.cgPoint, &point) else { return .failure }
+        return AXUIElementSetAttributeValue(element, name as CFString, value)
     }
 
-    private func setSizeAttribute(_ name: String, _ size: CGSize) {
+    private func setSizeAttribute(_ name: String, _ size: CGSize) -> AXError {
         var size = size
-        guard let value = AXValueCreate(.cgSize, &size) else { return }
-        AXUIElementSetAttributeValue(element, name as CFString, value)
+        guard let value = AXValueCreate(.cgSize, &size) else { return .failure }
+        return AXUIElementSetAttributeValue(element, name as CFString, value)
     }
 }
 
