@@ -1,5 +1,6 @@
 import AppKit
 import Combine
+import os
 
 /// Watches system-wide window gestures for edge snapping and shared borders,
 /// following Rectangle's `SnappingManager.swift` (MIT): passive `NSEvent` global
@@ -18,6 +19,7 @@ final class SnapManager {
 
     private let settings: SnapSettings
     private let layoutMenu: LayoutMenuManager
+    private let diagLogger = Logger(subsystem: "com.dhrlabs.halfwin", category: "diag")
     private lazy var divider = SnapDividerManager()
     private var monitor: Any?
     private lazy var footprint = FootprintWindow()
@@ -273,6 +275,13 @@ final class SnapManager {
 
     private func endDrag() {
         var snapNotification: (window: AXWindow, action: SnapAction, screen: NSScreen, frame: CGRect)?
+        var releaseSnapshot: (window: AXWindow, uptime: TimeInterval)?
+        var releaseRecord: (uptime: TimeInterval, initial: CGRect, frame: CGRect?, pid: pid_t?, axHash: CFHashCode,
+                            flags: (cancelled: Bool, drag: Bool, moving: Bool, dragSnap: Bool,
+                                    glue: Bool, fill: Bool, topLayouts: Bool), dropZone: LayoutDropZone?,
+                            edgeZone: Zone?, screenFrame: CGRect?, visibleFrame: CGRect?)?
+        var resolvedEdgeTarget: Zone?
+        var layoutResult: (zone: LayoutDropZone, actual: CGRect?)?
         defer {
             footprint.hide()
             resetDrag()
@@ -282,13 +291,56 @@ final class SnapManager {
                                        screen: notification.screen, frame: notification.frame)
                 }
             }
+            if let releaseSnapshot {
+                scheduleReleaseSnapshots(for: releaseSnapshot.window, releasedAt: releaseSnapshot.uptime)
+            }
+            if let releaseRecord {
+                let pid = releaseRecord.pid.map { String($0) } ?? "unknown"
+                let dropChoice = releaseRecord.dropZone.map { String(describing: $0) } ?? "none"
+                let edgeChoice = releaseRecord.edgeZone.map {
+                    "position=\($0.position) action=\($0.action) effective=\($0.effectiveAction) frame=\($0.frame)"
+                } ?? "none"
+                let flags = releaseRecord.flags
+                let details = "pid=\(pid) axHash=\(releaseRecord.axHash) uptime=\(releaseRecord.uptime) " +
+                    "initial=\(releaseRecord.initial) release=\(String(describing: releaseRecord.frame)) " +
+                    "flags[cancelled=\(flags.cancelled),drag=\(flags.drag),moving=\(flags.moving)," +
+                    "dragSnap=\(flags.dragSnap),glue=\(flags.glue),fill=\(flags.fill),topLayouts=\(flags.topLayouts)] " +
+                    "dropChoice=\(dropChoice) edgeChoice[\(edgeChoice)] " +
+                    "screenFrame=\(String(describing: releaseRecord.screenFrame)) " +
+                    "visibleFrame=\(String(describing: releaseRecord.visibleFrame))"
+                diagLogger.notice("HWDIAG snapRelease release \(details, privacy: .public)")
+                if let zone = resolvedEdgeTarget {
+                    let edgeDetails = "pid=\(pid) axHash=\(releaseRecord.axHash) " +
+                        "action=\(zone.action) effective=\(zone.effectiveAction) position=\(zone.position) " +
+                        "target=\(zone.frame) screenFrame=\(zone.screen.frame) visibleFrame=\(zone.screen.visibleFrame)"
+                    diagLogger.notice("HWDIAG snapRelease edgeTarget \(edgeDetails, privacy: .public)")
+                }
+                if let layoutResult {
+                    let layoutDetails = "pid=\(pid) axHash=\(releaseRecord.axHash) " +
+                        "choice=\(String(describing: layoutResult.zone)) " +
+                        "actualTarget=\(String(describing: layoutResult.actual))"
+                    diagLogger.notice("HWDIAG snapRelease layoutResult \(layoutDetails, privacy: .public)")
+                }
+            }
         }
         footprint.hide()
-        guard !cancelled, didReceiveDrag, let draggedWindow,
-              let initialFrame, let frame = draggedWindow.frame else { return }
+        guard !cancelled, didReceiveDrag, let draggedWindow, let initialFrame else { return }
+        let releaseUptime = ProcessInfo.processInfo.systemUptime
+        releaseSnapshot = (draggedWindow, releaseUptime)
+        let releaseFrame = draggedWindow.frame
+        let releaseScreen = currentZone?.screen ?? dropScreen ??
+            NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
+        releaseRecord = (
+            releaseUptime, initialFrame, releaseFrame, draggedWindow.processIdentifier, CFHash(draggedWindow.element),
+            (cancelled, didReceiveDrag, isWindowMoving, settings.dragSnappingEnabled,
+             settings.glueTouchingWindowsEnabled, settings.fillAvailableSpace, dragToTopLayoutsEnabled),
+            currentDropZone, currentZone, releaseScreen?.frame, releaseScreen?.visibleFrame
+        )
+        guard let frame = releaseFrame else { return }
         if settings.dragSnappingEnabled, isWindowMoving, let size = lockedSize {
             if let currentDropZone {
                 let target = layoutMenu.applyDrop(currentDropZone)
+                layoutResult = (currentDropZone, target)
                 if case .preset(.restore) = currentDropZone {
                     preSnapSizes.removeValue(forKey: draggedWindow)
                     SnapWindowRegistry.shared.unsnap(draggedWindow)
@@ -310,6 +362,7 @@ final class SnapManager {
                     zone.effectiveAction = resolved.action
                     zone.frame = resolved.frame
                 }
+                resolvedEdgeTarget = zone
                 draggedWindow.setFrame(zone.frame)
                 // Only remember this as a real snap if the window actually landed
                 // there — a failed AX write shouldn't let a later drag "restore" to
@@ -330,6 +383,21 @@ final class SnapManager {
               !SnapGeometry.isClose(initialFrame, frame, tolerance: 1),
               currentZone == nil, currentDropZone == nil else { return }
         glue(draggedWindow, to: frame)
+    }
+
+    private func scheduleReleaseSnapshots(for window: AXWindow, releasedAt: TimeInterval) {
+        let logSnapshot: (String) -> Void = { [weak self] label in
+            guard let self else { return }
+            let snapshot = AXWindow.frameWithError(of: window.element)
+            let elapsed = ProcessInfo.processInfo.systemUptime - releasedAt
+            let details = "label=\(label) pid=\(window.processIdentifier.map { String($0) } ?? "unknown") " +
+                "axHash=\(CFHash(window.element)) elapsed=\(elapsed) " +
+                "frame=\(String(describing: snapshot.frame)) error=\(snapshot.error)"
+            self.diagLogger.notice("HWDIAG snapRelease snapshot \(details, privacy: .public)")
+        }
+        DispatchQueue.main.async { logSnapshot("nextMainTurn") }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { logSnapshot("50ms") }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.25) { logSnapshot("250ms") }
     }
 
     private func glue(_ window: AXWindow, to frame: CGRect) {
