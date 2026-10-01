@@ -128,7 +128,7 @@ final class SnapManager {
             didReceiveDrag = true
             if settings.dragSnappingEnabled { continueDrag() }
         case .leftMouseUp:
-            endDrag()
+            endDrag(at: event.cgEvent?.unflippedLocation ?? NSEvent.mouseLocation)
         default:
             break
         }
@@ -273,10 +273,11 @@ final class SnapManager {
         }
     }
 
-    private func endDrag() {
+    private func endDrag(at cursor: CGPoint) {
         var snapNotification: (window: AXWindow, action: SnapAction, screen: NSScreen, frame: CGRect)?
         var releaseSnapshot: (window: AXWindow, uptime: TimeInterval)?
-        var releaseRecord: (uptime: TimeInterval, initial: CGRect, frame: CGRect?, pid: pid_t?, axHash: CFHashCode,
+        var releaseRecord: (uptime: TimeInterval, cursor: CGPoint, initial: CGRect, frame: CGRect?,
+                            pid: pid_t?, axHash: CFHashCode,
                             flags: (cancelled: Bool, drag: Bool, moving: Bool, dragSnap: Bool,
                                     glue: Bool, fill: Bool, topLayouts: Bool), dropZone: LayoutDropZone?,
                             edgeZone: Zone?, screenFrame: CGRect?, visibleFrame: CGRect?)?
@@ -302,6 +303,7 @@ final class SnapManager {
                 } ?? "none"
                 let flags = releaseRecord.flags
                 let details = "pid=\(pid) axHash=\(releaseRecord.axHash) uptime=\(releaseRecord.uptime) " +
+                    "releaseCursor=\(releaseRecord.cursor) " +
                     "initial=\(releaseRecord.initial) release=\(String(describing: releaseRecord.frame)) " +
                     "flags[cancelled=\(flags.cancelled),drag=\(flags.drag),moving=\(flags.moving)," +
                     "dragSnap=\(flags.dragSnap),glue=\(flags.glue),fill=\(flags.fill),topLayouts=\(flags.topLayouts)] " +
@@ -328,10 +330,14 @@ final class SnapManager {
         let releaseUptime = ProcessInfo.processInfo.systemUptime
         releaseSnapshot = (draggedWindow, releaseUptime)
         let releaseFrame = draggedWindow.frame
+        if settings.dragSnappingEnabled, isWindowMoving, let size = lockedSize {
+            updateTarget(at: cursor, window: draggedWindow, size: size)
+        }
         let releaseScreen = currentZone?.screen ?? dropScreen ??
-            NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) })
+            NSScreen.screens.first(where: { $0.frame.contains(cursor) })
         releaseRecord = (
-            releaseUptime, initialFrame, releaseFrame, draggedWindow.processIdentifier, CFHash(draggedWindow.element),
+            releaseUptime, cursor, initialFrame, releaseFrame,
+            draggedWindow.processIdentifier, CFHash(draggedWindow.element),
             (cancelled, didReceiveDrag, isWindowMoving, settings.dragSnappingEnabled,
              settings.glueTouchingWindowsEnabled, settings.fillAvailableSpace, dragToTopLayoutsEnabled),
             currentDropZone, currentZone, releaseScreen?.frame, releaseScreen?.visibleFrame
