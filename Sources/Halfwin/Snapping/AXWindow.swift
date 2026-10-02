@@ -21,7 +21,7 @@ extension CGRect {
 
 /// A window reached through the Accessibility API. Adapted from Rectangle's
 /// `AccessibilityElement.swift` (MIT), trimmed to the lookup and frame
-/// read/write this app needs: no enhanced-UI dance, no window-id resolution.
+/// read/write this app needs: no window-id resolution.
 struct AXWindow {
     private static let diagLogger = Logger(subsystem: "com.dhrlabs.halfwin", category: "diag")
 
@@ -105,32 +105,57 @@ struct AXWindow {
                   caller: String = #fileID, line: Int = #line, function: String = #function) {
         let target = appKitFrame.axFlipped(primaryScreenHeight: primaryScreenHeight)
         let startedAt = ProcessInfo.processInfo.systemUptime
-        let firstSizeError = setSizeAttribute(kAXSizeAttribute, target.size)
-        let positionError = setPointAttribute(kAXPositionAttribute, target.origin)
-        let finalSizeError = setSizeAttribute(kAXSizeAttribute, target.size)
+        let pid = processIdentifier
+        let enhancedUIAttribute = "AXEnhancedUserInterface" as CFString
+        var appElement: AXUIElement?
+        var enhancedUI: Bool?
+        var enhancedUIReadError: AXError = .failure
+        var enhancedUIDisableError: AXError?
+        var enhancedUIRestoreError: AXError?
+        if let pid {
+            let app = AXUIElementCreateApplication(pid)
+            appElement = app
+            // Keep the app-level flag read bounded like other AX reads here.
+            AXUIElementSetMessagingTimeout(app, 0.1)
+            var value: AnyObject?
+            enhancedUIReadError = AXUIElementCopyAttributeValue(app, enhancedUIAttribute, &value)
+            if enhancedUIReadError == .success, let number = value as? NSNumber {
+                enhancedUI = number.boolValue
+            }
+        }
+
+        if enhancedUI == true, let appElement {
+            enhancedUIDisableError = AXUIElementSetAttributeValue(
+                appElement, enhancedUIAttribute, kCFBooleanFalse
+            )
+        }
+
+        let writeErrors: (firstSize: AXError, position: AXError, finalSize: AXError) = {
+            defer {
+                if enhancedUIDisableError == .success, let appElement {
+                    enhancedUIRestoreError = AXUIElementSetAttributeValue(
+                        appElement, enhancedUIAttribute, kCFBooleanTrue
+                    )
+                }
+            }
+            let firstSizeError = setSizeAttribute(kAXSizeAttribute, target.size)
+            let positionError = setPointAttribute(kAXPositionAttribute, target.origin)
+            let finalSizeError = setSizeAttribute(kAXSizeAttribute, target.size)
+            return (firstSizeError, positionError, finalSizeError)
+        }()
 
         let finishedAt = ProcessInfo.processInfo.systemUptime
         let immediate = Self.frameWithError(of: element)
-        let pid = processIdentifier
-        var enhancedUI = "unknown"
-        var enhancedUIError: AXError = .failure
-        if let pid {
-            let appElement = AXUIElementCreateApplication(pid)
-            AXUIElementSetMessagingTimeout(appElement, 0.1)
-            var value: AnyObject?
-            enhancedUIError = AXUIElementCopyAttributeValue(
-                appElement, "AXEnhancedUserInterface" as CFString, &value
-            )
-            if enhancedUIError == .success, let number = value as? NSNumber {
-                enhancedUI = number.boolValue ? "true" : "false"
-            }
-        }
+        let enhancedUIState = enhancedUI.map { $0 ? "true" : "false" } ?? "unknown"
+        let disableResult = enhancedUIDisableError.map(String.init(describing:)) ?? "notAttempted"
+        let restoreResult = enhancedUIRestoreError.map(String.init(describing:)) ?? "notAttempted"
         let details = "caller=\(caller):\(line) \(function) pid=\(pid.map(String.init) ?? "unknown") axHash=\(CFHash(element)) " +
             "uptime=\(startedAt)...\(finishedAt) duration=\(finishedAt - startedAt) " +
             "requestedAppKit=\(appKitFrame) requestedAX=\(target) conversionHeight=\(primaryScreenHeight) " +
-            "writeErrors=[\(firstSizeError),\(positionError),\(finalSizeError)] " +
+            "writeErrors=[\(writeErrors.firstSize),\(writeErrors.position),\(writeErrors.finalSize)] " +
             "immediate=\(String(describing: immediate.frame)) immediateError=\(immediate.error) " +
-            "enhancedUI=\(enhancedUI) enhancedUIError=\(enhancedUIError)"
+            "enhancedUI=\(enhancedUIState) enhancedUIReadError=\(enhancedUIReadError) " +
+            "enhancedUIDisableError=\(disableResult) enhancedUIRestoreError=\(restoreResult)"
         Self.diagLogger.notice("HWDIAG snapRelease setFrame \(details, privacy: .public)")
     }
 
