@@ -104,7 +104,7 @@ enum SnapGeometry {
         guard !snappedFrames.isEmpty else { return .fixed }
         let overlapFrame = fixedFrame.insetBy(dx: edgeTolerance, dy: edgeTolerance)
         let overlaps = snappedFrames.contains { overlapFrame.intersects($0) }
-        guard isHalf(action) || (action != .maximize && overlaps) else { return .fixed }
+        guard isHalf(action) || (action != .maximize && (overlaps || isCorner(position))) else { return .fixed }
         let contact = projectedContact(point, position: position, in: visibleFrame)
         let commandArrowSide = !pointIsRequired && (position == .left || position == .right)
         let avoidsOppositeEdge: (CGRect) -> Bool = { frame in
@@ -137,6 +137,12 @@ enum SnapGeometry {
         }
         guard let frame = preferred(candidates, position: position, visibleFrame: visibleFrame,
                                     previousFrame: previousFrame) else { return .fixed }
+        if isCorner(position) {
+            guard let half = halfOfRemainingFrame(frame, toward: position, visibleFrame: visibleFrame) else {
+                return (isHalf(action) || (action != .maximize && overlaps)) ? .fill(frame) : .fixed
+            }
+            return .fill(half)
+        }
         return .fill(frame)
     }
 
@@ -259,6 +265,26 @@ enum SnapGeometry {
 
     private static func contactLength(_ frame: CGRect, position: SnapPosition) -> CGFloat {
         [.left, .right].contains(position) ? frame.height : frame.width
+    }
+
+    private static func halfOfRemainingFrame(_ frame: CGRect, toward position: SnapPosition,
+                                             visibleFrame: CGRect) -> CGRect? {
+        let isOnMatchingSide: Bool
+        switch position {
+        case .topLeft, .bottomLeft:
+            isOnMatchingSide = abs(frame.minX - visibleFrame.minX) <= 2
+        case .topRight, .bottomRight:
+            isOnMatchingSide = abs(frame.maxX - visibleFrame.maxX) <= 2
+        case .left, .right, .top, .bottom:
+            return nil
+        }
+        guard abs(frame.minY - visibleFrame.minY) <= 2,
+              abs(frame.maxY - visibleFrame.maxY) <= 2,
+              isOnMatchingSide else { return nil }
+        let halfHeight = floor(frame.height / 2)
+        guard halfHeight >= minimumFillSize.height else { return nil }
+        let y = [.topLeft, .topRight].contains(position) ? frame.maxY - halfHeight : frame.minY
+        return CGRect(x: frame.minX, y: y, width: frame.width, height: halfHeight)
     }
 
     private static func isCorner(_ position: SnapPosition) -> Bool {
