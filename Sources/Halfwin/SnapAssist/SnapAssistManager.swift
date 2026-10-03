@@ -585,7 +585,8 @@ private final class SnapAssistPanel: NSPanel {
         images = [:]
         let assistView = AcceptingFirstMouseHostingView(
             rootView: SnapAssistView(
-                choices: choices, images: images, selectedIndex: selectedIndex, onPick: onPick, onDismiss: onDismiss
+                choices: choices, images: images, selectedIndex: selectedIndex,
+                onPick: onPick, onDismiss: onDismiss
             )
         )
         self.assistView = assistView
@@ -623,7 +624,8 @@ private final class SnapAssistPanel: NSPanel {
 
     private func updateView() {
         assistView?.rootView = SnapAssistView(
-            choices: choices, images: images, selectedIndex: selectedIndex, onPick: onPick, onDismiss: onDismiss
+            choices: choices, images: images, selectedIndex: selectedIndex,
+            onPick: onPick, onDismiss: onDismiss
         )
     }
 
@@ -689,11 +691,20 @@ private struct SnapAssistView: View {
             ZStack {
                 Rectangle().fill(.ultraThinMaterial)
                 Color.black.opacity(0.16)
+                    .contentShape(Rectangle())
+                    .onTapGesture(perform: onDismiss)
                 VStack(spacing: 0) {
                     Group {
                         if availableCellHeight < 70 {
                             ScrollViewReader { proxy in
-                                ScrollView(.vertical) { grid }
+                                ScrollView(.vertical) {
+                                    grid
+                                        .frame(maxWidth: .infinity, minHeight: height, alignment: .top)
+                                        .background {
+                                            Rectangle().fill(Color.clear).contentShape(Rectangle())
+                                                .onTapGesture(perform: onDismiss)
+                                        }
+                                }
                                     .scrollIndicators(.hidden)
                                     .onChange(of: selectedIndex) { _, index in
                                         proxy.scrollTo(index, anchor: .center)
