@@ -73,10 +73,6 @@ final class SnapAssistManager {
                                currentWindowFrame: $0, portrait: screen.frame.height > screen.frame.width)
         }
         guard !suppressNextAssist, origin != .glue else { return }
-        if origin == .other, SnapWindowRegistry.shared.hasVisiblePartner(for: window) {
-            hidePanel()
-            return
-        }
         if action == .fill {
             guard settings.fillEmptySpots != .leaveEmpty else {
                 hidePanel()
@@ -90,6 +86,10 @@ final class SnapAssistManager {
             pickedWindows = [window]
             lastSnappedProcessIdentifier = window.processIdentifier
             showNextVoid()
+            return
+        }
+        if origin == .other, SnapWindowRegistry.shared.hasVisiblePartner(for: window) {
+            hidePanel()
             return
         }
         if origin != .layoutMenu, SnapGeometry.isHalf(action), let frame, let fixed,
