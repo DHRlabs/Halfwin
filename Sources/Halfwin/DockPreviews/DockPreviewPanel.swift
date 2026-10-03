@@ -157,6 +157,7 @@ private struct DockPreviewTilesView: View {
     let onSelect: (Int) -> Void
     let onClose: (Int) -> Void
     let onHover: (Int, Bool) -> Void
+    @State private var hoveredTileID: Int?
     @State private var hoveredCloseID: Int?
 
     private var horizontalDock: Bool {
@@ -193,6 +194,7 @@ private struct DockPreviewTilesView: View {
         let imageHeight = min(92 * tileScale, max(0, state.tileSize.height - inset * 2 - rowSpacing - titleSize * 1.2))
         let iconSize = min(42 * tileScale, min(state.tileSize.width, state.tileSize.height) * 0.45)
         let title = item.title.isEmpty ? "Window" : item.title
+        let closeIsVisible = hoveredTileID == item.id || hoveredCloseID == item.id
         let selectButton = Button { onSelect(item.id) } label: {
             VStack(alignment: .leading, spacing: rowSpacing) {
                 ZStack(alignment: .topLeading) {
@@ -251,7 +253,7 @@ private struct DockPreviewTilesView: View {
                         Image(systemName: "xmark")
                             .font(.system(size: 7, weight: .semibold))
                             .foregroundStyle(Color(red: 130.0 / 255.0, green: 0, blue: 5.0 / 255.0)
-                                .opacity(hoveredCloseID == item.id ? 1 : 0))
+                                .opacity(closeIsVisible ? 1 : 0))
                     }
                     .frame(width: 12, height: 12)
                     .frame(width: 20, height: 20)
@@ -259,11 +261,26 @@ private struct DockPreviewTilesView: View {
                 }
                 .buttonStyle(.plain)
                 .accessibilityLabel("Close \(title)")
-                .onHover { hoveredCloseID = $0 ? item.id : nil }
+                .opacity(closeIsVisible ? 1 : 0)
+                .allowsHitTesting(closeIsVisible)
+                .onHover {
+                    if $0 {
+                        hoveredCloseID = item.id
+                    } else if hoveredCloseID == item.id {
+                        hoveredCloseID = nil
+                    }
+                }
                 .offset(x: -8, y: -8)
             }
         }
-        .onHover { onHover(item.id, $0) }
+        .onHover {
+            if $0 {
+                hoveredTileID = item.id
+            } else if hoveredTileID == item.id {
+                hoveredTileID = nil
+            }
+            onHover(item.id, $0)
+        }
         .accessibilityElement(children: .contain)
     }
 }
