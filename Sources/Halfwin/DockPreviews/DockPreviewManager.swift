@@ -123,6 +123,7 @@ final class DockPreviewManager {
     private var activeApp: NSRunningApplication?
     private var windows: [Int: AXWindow] = [:]
     private var generation = 0
+    private var coldReadRetryGeneration: Int?
     private var isShowing = false
     private var captureTask: Task<Void, Never>?
     private var peekCaptureTask: Task<Void, Never>?
@@ -1113,36 +1114,25 @@ final class DockPreviewManager {
         activeApp = selection.app
         isShowing = true
         previewPlacement = selection.placement
-        let cached = previewCache[selection.app.processIdentifier].flatMap { $0.items.isEmpty ? nil : $0 }
-            ?? placeholderPreview(for: selection.app)
-        present(cached, preservingImages: false)
+        if let cached = previewCache[selection.app.processIdentifier], !cached.items.isEmpty {
+            present(cached, preservingImages: false)
+            captureThumbnails(cached.screenshotIDs, generation: captureGeneration)
+        } else {
+            clearPeek()
+            panel.hide()
+            windows.removeAll()
+            screenshotIDsByTile.removeAll()
+        }
         startPointerTimer()
-        captureThumbnails(cached.screenshotIDs, generation: captureGeneration)
         let selectionToken = selection.token
         DispatchQueue.main.async { [weak self] in
             guard let self,
                   self.generation == captureGeneration,
                   self.isShowing,
                   self.activeApp?.processIdentifier == selection.app.processIdentifier,
-                  self.selection?.token == selectionToken,
-                  self.selection?.placement.itemFrame.contains(NSEvent.mouseLocation) == true else { return }
+                  self.selection?.token == selectionToken else { return }
             self.refreshPreviewCache(for: selection.app, visibleGeneration: captureGeneration)
         }
-    }
-
-    private func placeholderPreview(for app: NSRunningApplication) -> CachedPreview {
-        let icon = app.icon ?? NSWorkspace.shared.icon(forFile: app.bundleURL?.path ?? "")
-        return CachedPreview(
-            items: [DockPreviewItem(
-                id: Int.min,
-                title: app.localizedName ?? "Loading windows…",
-                appIcon: icon,
-                minimized: false,
-                canClose: false
-            )],
-            windows: [:],
-            screenshotIDs: [:]
-        )
     }
 
     private func present(_ preview: CachedPreview, preservingImages: Bool) {
@@ -1169,6 +1159,10 @@ final class DockPreviewManager {
 
     private func buildCachedPreview(for app: NSRunningApplication) -> CachedPreview? {
         let processID = app.processIdentifier
+        guard let appWindows = AXWindow.standardWindowsIfReadable(of: app) else { return nil }
+        guard !appWindows.isEmpty else {
+            return CachedPreview(items: [], windows: [:], screenshotIDs: [:])
+        }
         guard let allRecords = windowRecordsIfReadable(options: .optionAll) else { return nil }
         let allFrames = allRecords.filter { $0.processID == processID }
         let visibleFrames = allFrames.filter(\.isOnScreen)
@@ -1179,9 +1173,6 @@ final class DockPreviewManager {
         var nextWindows: [Int: AXWindow] = [:]
         var screenshotIDs: [Int: CGWindowID] = [:]
         let icon = app.icon ?? NSWorkspace.shared.icon(forFile: app.bundleURL?.path ?? "")
-        guard let appWindows = AXWindow.standardWindowsIfReadable(of: app) else {
-            return previewCache[processID]
-        }
 
         for window in appWindows {
             let minimized = window.isMinimized
@@ -1209,9 +1200,42 @@ final class DockPreviewManager {
         return CachedPreview(items: tileItems, windows: nextWindows, screenshotIDs: screenshotIDs)
     }
 
-    private func refreshPreviewCache(for app: NSRunningApplication, visibleGeneration: Int? = nil) {
-        guard previewsEnabled, running, Permissions.accessibilityGranted, !app.isTerminated,
-              let cached = buildCachedPreview(for: app) else { return }
+    private func refreshPreviewCache(
+        for app: NSRunningApplication,
+        visibleGeneration: Int? = nil,
+        allowColdReadRetry: Bool = true
+    ) {
+        guard previewsEnabled, running, Permissions.accessibilityGranted, !app.isTerminated else { return }
+        guard let cached = buildCachedPreview(for: app) else {
+            guard let visibleGeneration,
+                  generation == visibleGeneration,
+                  isShowing,
+                  activeApp?.processIdentifier == app.processIdentifier else { return }
+
+            if previewCache[app.processIdentifier] == nil, allowColdReadRetry {
+                guard coldReadRetryGeneration != visibleGeneration else { return }
+                coldReadRetryGeneration = visibleGeneration
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.15) { [weak self] in
+                    guard let self,
+                          self.coldReadRetryGeneration == visibleGeneration else { return }
+                    self.coldReadRetryGeneration = nil
+                    guard self.generation == visibleGeneration,
+                          self.isShowing,
+                          self.activeApp?.processIdentifier == app.processIdentifier else { return }
+                    self.refreshPreviewCache(
+                        for: app,
+                        visibleGeneration: visibleGeneration,
+                        allowColdReadRetry: false
+                    )
+                }
+            } else if previewCache[app.processIdentifier] == nil || previewCache[app.processIdentifier]?.items.isEmpty == true {
+                hidePreview()
+            }
+            return
+        }
+        if let visibleGeneration, coldReadRetryGeneration == visibleGeneration {
+            coldReadRetryGeneration = nil
+        }
         previewCache[app.processIdentifier] = cached
         guard let visibleGeneration,
               generation == visibleGeneration,
@@ -1638,6 +1662,7 @@ final class DockPreviewManager {
 
     private func hidePreview() {
         generation += 1
+        coldReadRetryGeneration = nil
         captureTask?.cancel()
         captureTask = nil
         clearPeek()
