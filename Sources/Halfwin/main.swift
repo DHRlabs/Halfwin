@@ -58,6 +58,27 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     )
     private let menu = NSMenu()
     private var statusItem: NSStatusItem!
+    private lazy var menuBarIcon: NSImage? = {
+        let bundle = Bundle.main
+        guard let oneXURL = bundle.url(forResource: "MenuBarIcon", withExtension: "png"),
+              let twoXURL = bundle.url(forResource: "MenuBarIcon@2x", withExtension: "png"),
+              let oneXData = try? Data(contentsOf: oneXURL),
+              let twoXData = try? Data(contentsOf: twoXURL),
+              let oneX = NSBitmapImageRep(data: oneXData),
+              let twoX = NSBitmapImageRep(data: twoXData) else {
+            NSLog("Halfwin: menu bar icon resources are missing from the app bundle")
+            return nil
+        }
+
+        let size = NSSize(width: 19, height: 18)
+        oneX.size = size
+        twoX.size = size
+        let image = NSImage(size: size)
+        image.addRepresentation(oneX)
+        image.addRepresentation(twoX)
+        image.isTemplate = true
+        return image
+    }()
     private var statusLine: NSMenuItem!
     private var awakeItem: NSMenuItem!
     private var durationItems: [NSMenuItem] = []
@@ -351,13 +372,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func updateUI() {
         statusLine.title = keepAwake.statusTitle
-        if let image = NSImage(
-            systemSymbolName: keepAwake.isAwake ? "rectangle.split.2x1.fill" : "rectangle.split.2x1",
-            accessibilityDescription: "Halfwin"
-        ) {
-            image.isTemplate = true
-            statusItem.button?.image = image
-        }
+        statusItem.button?.image = menuBarIcon
         updateStatusTitle()
         statusItem.button?.imagePosition = .imageLeft
 
