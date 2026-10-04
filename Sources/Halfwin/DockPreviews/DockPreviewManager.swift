@@ -1159,7 +1159,7 @@ final class DockPreviewManager {
 
     private func buildCachedPreview(for app: NSRunningApplication) -> CachedPreview? {
         let processID = app.processIdentifier
-        guard let appWindows = AXWindow.standardWindowsIfReadable(of: app) else { return nil }
+        guard let appWindows = previewWindowsIfReadable(of: app) else { return nil }
         guard !appWindows.isEmpty else {
             return CachedPreview(items: [], windows: [:], screenshotIDs: [:])
         }
@@ -1198,6 +1198,42 @@ final class DockPreviewManager {
         }
         observeWindowMinimization(in: app, windows: appWindows)
         return CachedPreview(items: tileItems, windows: nextWindows, screenshotIDs: screenshotIDs)
+    }
+
+    private func previewWindowsIfReadable(of app: NSRunningApplication) -> [AXWindow]? {
+        let processID = app.processIdentifier
+        let application = AXUIElementCreateApplication(processID)
+        AXUIElementSetMessagingTimeout(application, 0.1)
+        var value: AnyObject?
+        guard AXUIElementCopyAttributeValue(application, kAXWindowsAttribute as CFString, &value) == .success,
+              let elements = value as? [AXUIElement] else { return nil }
+
+        var windows: [AXWindow] = []
+        var windowIDs = Set<Int>()
+        for element in elements {
+            AXUIElementSetMessagingTimeout(element, 0.1)
+            var roleValue: AnyObject?
+            let roleError = AXUIElementCopyAttributeValue(element, kAXRoleAttribute as CFString, &roleValue)
+            if roleError == .noValue || roleError == .attributeUnsupported { continue }
+            guard roleError == .success, let role = roleValue as? String else { return nil }
+            guard role == kAXWindowRole else { continue }
+
+            let window = AXWindow(element: element)
+            var subroleValue: AnyObject?
+            let subroleError = AXUIElementCopyAttributeValue(element, kAXSubroleAttribute as CFString, &subroleValue)
+            if subroleError == .noValue || subroleError == .attributeUnsupported {
+                guard window.isMinimized else { continue }
+            } else {
+                guard subroleError == .success, let subrole = subroleValue as? String else { return nil }
+                guard subrole == kAXStandardWindowSubrole || window.isMinimized else { continue }
+            }
+
+            let id = Int(truncatingIfNeeded: CFHash(element))
+            guard windowIDs.insert(id).inserted else { continue }
+            windows.append(window)
+        }
+
+        return windows
     }
 
     private func refreshPreviewCache(
