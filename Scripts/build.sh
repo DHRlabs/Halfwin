@@ -13,7 +13,9 @@ swift build -c release
 echo "Assembling ${APP}…"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS"
+mkdir -p "$APP/Contents/Resources"
 cp ".build/release/$BIN" "$APP/Contents/MacOS/$BIN"
+cp Sources/Halfwin/Resources/MenuBarIcon.png Sources/Halfwin/Resources/MenuBarIcon@2x.png "$APP/Contents/Resources/"
 
 cat > "$APP/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>

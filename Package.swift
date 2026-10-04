@@ -5,6 +5,6 @@ let package = Package(
     name: "Halfwin",
     platforms: [.macOS(.v14)],
     products: [.executable(name: "Halfwin", targets: ["Halfwin"])],
-    targets: [.executableTarget(name: "Halfwin", path: "Sources/Halfwin")],
+    targets: [.executableTarget(name: "Halfwin", path: "Sources/Halfwin", exclude: ["Resources"])],
     swiftLanguageModes: [.v5]
 )
