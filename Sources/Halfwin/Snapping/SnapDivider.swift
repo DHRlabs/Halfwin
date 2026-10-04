@@ -28,6 +28,11 @@ final class SnapDividerManager {
         var frames: [AXWindow: CGRect]
     }
 
+    private struct DividerHit {
+        let divider: Divider
+        let region: CGRect
+    }
+
     private var enabled = false
     private var monitor: Any?
     private var validationTimer: Timer?
@@ -106,13 +111,13 @@ final class SnapDividerManager {
             if nearCachedSeam(point) { SnapWindowRegistry.shared.refreshVisibleWindows() }
             draggedSnapWindow = SnapWindowRegistry.shared.snappedWindow(at: point)
             movedSnapWindow = false
-            guard let divider = divider(at: point), let owner = paneUnderCursor(point, in: divider) else {
+            guard let hit = dividerHit(at: point), let owner = paneUnderCursor(point, in: hit.divider) else {
                 hideDivider()
                 return
             }
             resizeSession = makeResizeSession(
-                divider: divider, owner: owner.window,
-                ownerSide: divider.low.contains { $0.window == owner.window } ? .low : .high
+                divider: hit.divider, owner: owner.window,
+                ownerSide: hit.divider.low.contains { $0.window == owner.window } ? .low : .high
             )
             nativeResizePending = false
             resizeFinishPending = false
@@ -156,11 +161,11 @@ final class SnapDividerManager {
     }
 
     private func showHoverFromCache(at point: CGPoint) {
-        guard let divider = divider(at: point) else {
+        guard let hit = dividerHit(at: point) else {
             hideDivider()
             return
         }
-        panel.show(frame: panelFrame(for: divider), vertical: divider.axis == .vertical)
+        panel.show(frame: hit.region, vertical: hit.divider.axis == .vertical)
         if validationTimer == nil {
             validationTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
                 guard let self, self.enabled, self.resizeSession == nil else { return }
@@ -190,20 +195,25 @@ final class SnapDividerManager {
         }
     }
 
-    private func divider(at point: CGPoint) -> Divider? {
-        return allSeams().filter { seam in
-            let along: CGFloat
-            switch seam.axis {
-            case .vertical:
-                along = point.y
-                guard abs(point.x - seam.coordinate) <= 6, seam.range.contains(along) else { return false }
-            case .horizontal:
-                along = point.x
-                guard abs(point.y - seam.coordinate) <= 6, seam.range.contains(along) else { return false }
+    private func dividerHit(at point: CGPoint, maximumDistance: CGFloat? = nil) -> DividerHit? {
+        allSeams().compactMap { seam -> DividerHit? in
+            let region = dividerRegion(for: seam)
+            if let maximumDistance {
+                let alongIsInRegion = seam.axis == .vertical
+                    ? point.y >= region.minY && point.y < region.maxY
+                    : point.x >= region.minX && point.x < region.maxX
+                let acrossCoordinate = seam.axis == .vertical ? point.x : point.y
+                guard alongIsInRegion && abs(acrossCoordinate - seam.coordinate) <= maximumDistance else {
+                    return nil
+                }
+            } else {
+                guard region.contains(point) else { return nil }
             }
-            return visiblePane(seam.low, side: .low, in: seam, at: along) != nil ||
-                visiblePane(seam.high, side: .high, in: seam, at: along) != nil
-        }.min { distance($0, point) < distance($1, point) }
+            let along = seam.axis == .vertical ? point.y : point.x
+            guard visiblePane(seam.low, side: .low, in: seam, at: along) != nil ||
+                    visiblePane(seam.high, side: .high, in: seam, at: along) != nil else { return nil }
+            return DividerHit(divider: seam, region: region)
+        }.min { distance($0.divider, point) < distance($1.divider, point) }
     }
 
     private func paneUnderCursor(_ point: CGPoint, in seam: Divider) -> Pane? {
@@ -254,7 +264,7 @@ final class SnapDividerManager {
         abs((seam.axis == .vertical ? point.x : point.y) - seam.coordinate)
     }
 
-    private func panelFrame(for divider: Divider) -> CGRect {
+    private func dividerRegion(for divider: Divider) -> CGRect {
         switch divider.axis {
         case .vertical:
             return CGRect(x: divider.coordinate - 3, y: divider.range.lowerBound,
@@ -268,7 +278,8 @@ final class SnapDividerManager {
     private func beginDividerDrag(_ event: NSEvent) {
         let point = NSEvent.mouseLocation
         SnapWindowRegistry.shared.refreshVisibleWindows()
-        let divider = divider(at: point) // DIAG remove after live capture
+        let hit = dividerHit(at: point, maximumDistance: 6) // DIAG remove after live capture
+        let divider = hit?.divider
         if let divider {
             let axis = divider.axis == .vertical ? "vertical" : "horizontal" // DIAG remove after live capture
             logDiagnostic("snapDivider mouseDown point=\(point) seamFound=true axis=\(axis) coordinate=\(divider.coordinate) low=[\(diagnosticPaneList(divider.low))] high=[\(diagnosticPaneList(divider.high))]") // DIAG remove after live capture
@@ -351,7 +362,7 @@ final class SnapDividerManager {
             let coordinate = constrainedCoordinate(pointerCoordinate, in: session)
             var preview = session.divider
             preview.coordinate = coordinate
-            panel.show(frame: panelFrame(for: preview), vertical: preview.axis == .vertical)
+            panel.show(frame: dividerRegion(for: preview), vertical: preview.axis == .vertical)
             guard !resizeWorkInFlight else {
                 resizeMissedTick = true
                 return
@@ -404,7 +415,7 @@ final class SnapDividerManager {
                     if sessionIsCurrent { self.resizeSession = result.session }
                     if sessionIsCurrent && self.dividerDrag && final {
                         let divider = result.session.divider
-                        self.panel.show(frame: self.panelFrame(for: divider), vertical: divider.axis == .vertical)
+                        self.panel.show(frame: self.dividerRegion(for: divider), vertical: divider.axis == .vertical)
                     }
                 }
                 guard sessionIsCurrent else {
@@ -869,7 +880,12 @@ private final class SnapDividerPanel: NSPanel {
         dividerView.vertical = vertical
         let changed = self.frame != frame
         if changed { setFrame(frame, display: true) }
-        if !isVisible || changed { orderFrontRegardless() }
+        if !isVisible || changed {
+            orderFrontRegardless()
+            if frame.contains(NSEvent.mouseLocation) {
+                (vertical ? NSCursor.resizeLeftRight : NSCursor.resizeUpDown).set()
+            }
+        }
     }
 
     func hide() {
@@ -881,7 +897,6 @@ private final class SnapDividerView: NSView {
     var vertical = true {
         didSet {
             needsDisplay = true
-            window?.invalidateCursorRects(for: self)
         }
     }
     private let onMouseDown: (NSEvent) -> Void
@@ -902,19 +917,21 @@ private final class SnapDividerView: NSView {
     override func updateTrackingAreas() {
         super.updateTrackingAreas()
         for area in trackingAreas { removeTrackingArea(area) }
-        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+        addTrackingArea(NSTrackingArea(rect: bounds, options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
                                        owner: self, userInfo: nil))
     }
 
-    override func resetCursorRects() {
-        addCursorRect(bounds, cursor: vertical ? .resizeLeftRight : .resizeUpDown)
+    override func mouseEntered(with event: NSEvent) {
+        setResizeCursor()
     }
 
-    override func mouseEntered(with event: NSEvent) {
-        (vertical ? NSCursor.resizeLeftRight : NSCursor.resizeUpDown).set()
-    }
+    override func mouseMoved(with event: NSEvent) { setResizeCursor() }
 
     override func mouseExited(with event: NSEvent) { NSCursor.arrow.set() }
+
+    private func setResizeCursor() {
+        (vertical ? NSCursor.resizeLeftRight : NSCursor.resizeUpDown).set()
+    }
 
     override func draw(_ dirtyRect: NSRect) {
         let track = bounds.insetBy(dx: 0.5, dy: 0.5)
