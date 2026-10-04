@@ -20,7 +20,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
     private let dragToTopLayoutsSwitch = FeatureSwitch(key: "drag-to-top-layouts", title: "Drag to top for layouts", defaultOn: true)
     private let dockPreviewsSwitch = FeatureSwitch(key: "dock-previews", title: "Dock previews", defaultOn: true)
     private let clickDockIconMinimizeSwitch = FeatureSwitch(key: "click-dock-icon-to-minimize", title: "Click Dock icon to minimize", defaultOn: true)
-    private let notificationCountSwitch = FeatureSwitch(key: "notification-count", title: "Notification count", defaultOn: true)
+    private let notificationCountSwitch = FeatureSwitch(key: "show-notification-count", title: "Show notification count", defaultOn: false)
     private let notificationCountManager = NotificationCountManager()
     private let layoutMenuSettings = LayoutMenuSettings.shared
     private let dockPreviewSettings = DockPreviewSettings.shared
@@ -151,7 +151,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         clickDockIconMinimizeSwitch.onChange = { [weak self] in
             self?.dockPreviewsManager.setClickToMinimizeEnabled($0)
         }
-        notificationCountSwitch.onChange = { [weak self] in self?.notificationCountManager.setEnabled($0) }
+        notificationCountSwitch.onChange = { [weak self] _ in self?.updateStatusTitle() }
         copyProgressSwitch.onChange = { [weak self] enabled in
             if !enabled { self?.copyProgressWindow.stopWatching() }
         }
@@ -178,6 +178,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
         statusItem.menu = menu
         notificationCountManager.onChange = { [weak self] in self?.updateStatusTitle() }
         notificationCountManager.refreshPermission()
+        notificationCountManager.setEnabled(true)
         notificationCountSwitch.start()
         configureWindowExtras()
         keepAwake.onChange = { [weak self] in self?.updateUI() }
@@ -394,16 +395,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSMenuDelegate {
 
     private func updateStatusTitle() {
         let title = NSMutableAttributedString(string: hasPendingFinderCut ? "✂︎ hfWn" : "hfWn")
-        if notificationCountManager.isCounting, notificationCountManager.total > 0 {
-            title.append(NSAttributedString(string: " \(notificationCountManager.total) ", attributes: [
-                .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
-                .foregroundColor: NSColor.white,
-                .backgroundColor: NSColor.systemRed
-            ]))
+        if notificationCountManager.isCounting {
+            NotificationBadgeRenderer.appendBadge(
+                to: title,
+                count: notificationCountManager.total,
+                showsCount: notificationCountSwitch.isOn
+            )
         }
         statusItem.button?.attributedTitle = title
         statusItem.button?.toolTip = notificationCountManager.isCounting
-            ? "\(notificationCountManager.total) Dock badge notifications. Click the date to open Notification Center."
+            ? (notificationCountSwitch.isOn
+                ? "\(notificationCountManager.total) Dock badge notifications. Click the date to open Notification Center."
+                : "Click the date to open Notification Center.")
             : nil
     }
 }
