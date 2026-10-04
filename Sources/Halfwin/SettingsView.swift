@@ -11,6 +11,7 @@ struct SettingsView: View {
     @ObservedObject var macTweaks: MacTweaks
     @AppStorage(ShowDesktopStyle.defaultsKey) private var showDesktopStyle: ShowDesktopStyle = .pushWindowsAside
     @AppStorage("Halfwin.feature.show-desktop-dock-button") private var showDesktopButtonEnabled = true
+    @AppStorage("Halfwin.feature.show-notification-count") private var showNotificationCount = false
     @State private var alwaysFloatAppIDsText: String?
     @FocusState private var alwaysFloatAppIDsFocused: Bool
 
@@ -151,6 +152,10 @@ struct SettingsView: View {
                 }
             }
             Section("Notifications") {
+                Toggle("Show notification count", isOn: $showNotificationCount)
+                Text("When off, a red dot marks waiting notifications in the menu bar.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
                 Text("1. Leave Do Not Disturb on with no allowed apps to keep banners quiet.")
                 Button("Open Focus Settings") { openSystemSettings("com.apple.Focus-Settings.extension") }
                 Text("2. Turn off Desktop banners per app and choose By Application grouping.")
@@ -158,8 +163,6 @@ struct SettingsView: View {
                 if !notificationCount.hasAccessibility {
                     Text("Accessibility access is required to read Dock badge counts.")
                     Button("Open Accessibility Settings", action: Permissions.requestAccessibility)
-                } else if !notificationCount.isEnabled {
-                    Text("Turn on Notification count in Halfwin's menu to list Dock badges.")
                 } else {
                     Text("Current waiting count: \(notificationCount.total)")
                     if notificationCount.apps.isEmpty {
