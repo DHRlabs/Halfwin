@@ -71,6 +71,9 @@ final class SnapWindowRegistry {
     private var suspendedForShowDesktop = Set<AXWindow>()
     private var helperWindowIDs = Set<CGWindowID>()
     private var lastValidationTime: TimeInterval = 0
+    /// Window IDs the adoption pass has evaluated; each window is learned once,
+    /// when first seen.
+    private var seenWindowIDs = Set<CGWindowID>()
     private var workspaceObservers: [NSObjectProtocol] = []
     private var notificationObservers: [NSObjectProtocol] = []
 
@@ -273,6 +276,7 @@ final class SnapWindowRegistry {
             record.state = .active
             records[window] = record
         }
+        adoptVisibleWindowsIfNeeded()
         rebuildZoneOwners()
         rebuildSeams()
         lastValidationTime = ProcessInfo.processInfo.systemUptime
@@ -283,6 +287,34 @@ final class SnapWindowRegistry {
         guard let windows = readVisibleWindows() else { return }
         visibleWindows = windows
         rebuildSeams()
+    }
+
+    /// After launch, adopt windows that already sit in snap zones so fill and
+    /// the picker see them. Runs through validate, which refreshes the window
+    /// list first; safe to call repeatedly.
+    func adoptVisibleWindowsAtLaunch() {
+        guard Permissions.accessibilityGranted else { return }
+        validate()
+    }
+
+    /// Learns on-screen layer-0 windows that have not been evaluated yet. Each
+    /// window is learned once, when first seen: an exposed window is marked seen
+    /// even when it fits no zone, while a covered window is retried on a later
+    /// pass. Does nothing while the left mouse button is held, so a window
+    /// mid-drag is never adopted.
+    private func adoptVisibleWindowsIfNeeded() {
+        guard Permissions.accessibilityGranted,
+              NSEvent.pressedMouseButtons & 1 == 0 else { return }
+        // Windows with a record were already learned by a snap, so they count
+        // as seen.
+        seenWindowIDs.formUnion(records.values.compactMap(\.windowID))
+        let unseen = Set(visibleWindows.filter {
+            $0.layer == 0 && !seenWindowIDs.contains($0.id)
+        }.map(\.id))
+        guard !unseen.isEmpty else { return }
+        for screen in NSScreen.screens {
+            adoptVisibleWindows(on: screen, unseen: unseen)
+        }
     }
 
     func commitSnap(window: AXWindow, action: SnapAction, screen: NSScreen, frame: CGRect? = nil,
@@ -400,31 +432,115 @@ final class SnapWindowRegistry {
                   displayID(for: candidateFrame) == display,
                   let index = visibleWindows.firstIndex(where: { $0.id == choice.id }) else { continue }
             let isExposed = !SnapWindowInventory.isCovered(candidateFrame, by: visibleWindows[..<index].map(\.frame))
-            let zone = zones.first {
-                SnapGeometry.isClose(candidateFrame, $0.frame, tolerance: SnapGeometry.edgeTolerance)
-            }
+            let zone = matchingZone(for: candidateFrame, among: zones)
             guard SnapJoinGeometry.canAdopt(incoming: frame, candidate: candidateFrame, isExposed: isExposed,
                                             matchesSnapZone: zone != nil, tolerance: SnapGeometry.edgeTolerance),
-                  let zone else { continue }
+                  let zone, let layout = zone.layout else { continue }
             records[choice.window] = SnappedWindowRecord(window: choice.window, action: zone.action,
-                                                          layout: zone.layout, frame: candidateFrame,
+                                                          layout: layout, frame: candidateFrame,
                                                           state: .active, windowID: choice.id)
         }
     }
 
-    private func snapZones(on screen: NSScreen, preferredLayout: SnapMultiWindowLayout?)
-        -> [(action: SnapAction, layout: SnapMultiWindowLayout, frame: CGRect)] {
+    /// Records exposed windows that already sit in a snap zone on this display,
+    /// with no incoming snap and no window moved, considering only windows in
+    /// `unseen`. Picks the menu layout that fits the most windows (menuLayouts
+    /// order breaks ties), records those with its actions, then records any other
+    /// fitting windows, including quarters, top/bottom halves, and third stacks,
+    /// with the layout containing their action (nil when no menu layout contains
+    /// it), which is what an in-session drag snap stores.
+    private func adoptVisibleWindows(on screen: NSScreen, unseen: Set<CGWindowID>) {
+        let display = SnapDisplayID(screen)
         let portrait = screen.frame.height > screen.frame.width
-        let layouts = [preferredLayout].compactMap { $0 } + SnapMultiWindowLayout.menuLayouts.filter { $0 != preferredLayout }
-        var result: [(action: SnapAction, layout: SnapMultiWindowLayout, frame: CGRect)] = []
-        for layout in layouts {
-            for zone in layout.zones(portrait: portrait) {
-                guard let expected = SnapGeometry.frame(for: zone.action, visibleFrame: screen.visibleFrame,
-                                                        currentWindowFrame: screen.visibleFrame, portrait: portrait) else { continue }
-                result.append((zone.action, layout, expected))
+        let candidateZones = SnapMultiWindowLayout.allCases.flatMap { zones(of: $0, on: screen) }
+            + [SnapAction.topHalf, .bottomHalf].compactMap {
+                layoutlessZone($0, on: screen, portrait: portrait)
+            }
+        let excluded = Set(records.keys)
+        var candidates: [(choice: SnapWindowChoice, frame: CGRect,
+                          matches: [(action: SnapAction, layout: SnapMultiWindowLayout?)])] = []
+        for choice in SnapWindowInventory.choices(on: screen, excluding: excluded) where unseen.contains(choice.id) {
+            guard !choice.window.isMinimized, !choice.window.isFullScreen,
+                  let frame = choice.window.frame,
+                  displayID(for: frame) == display,
+                  let index = visibleWindows.firstIndex(where: { $0.id == choice.id }) else { continue }
+            let isExposed = !SnapWindowInventory.isCovered(frame, by: visibleWindows[..<index].map(\.frame))
+            guard isExposed else { continue }
+            seenWindowIDs.insert(choice.id)
+            // A window filling the visible frame is a maximize or a center,
+            // which commitSnap refuses; it is not a slot.
+            guard !SnapGeometry.isClose(frame, screen.visibleFrame, tolerance: SnapGeometry.edgeTolerance) else { continue }
+            let matches = matchingZones(for: frame, among: candidateZones)
+            guard !matches.isEmpty else { continue }
+            candidates.append((choice, frame, matches))
+        }
+        guard !candidates.isEmpty else { return }
+        var best: (layout: SnapMultiWindowLayout, count: Int)?
+        for layout in SnapMultiWindowLayout.menuLayouts {
+            let count = candidates.filter { candidate in
+                candidate.matches.contains { $0.layout == layout }
+            }.count
+            if count > (best?.count ?? 0) { best = (layout, count) }
+        }
+        if let best {
+            if currentLayouts[display] == nil { currentLayouts[display] = best.layout }
+            for candidate in candidates {
+                guard let match = candidate.matches.first(where: { $0.layout == best.layout }) else { continue }
+                records[candidate.choice.window] = SnappedWindowRecord(
+                    window: candidate.choice.window, action: match.action, layout: best.layout,
+                    frame: candidate.frame, state: .active, windowID: candidate.choice.id)
             }
         }
-        return result
+        for candidate in candidates {
+            if let best, candidate.matches.contains(where: { $0.layout == best.layout }) { continue }
+            guard let match = candidate.matches.first else { continue }
+            records[candidate.choice.window] = SnappedWindowRecord(
+                window: candidate.choice.window, action: match.action,
+                layout: SnapMultiWindowLayout.containing(match.action),
+                frame: candidate.frame, state: .active, windowID: candidate.choice.id)
+        }
+    }
+
+    private func zones(of layout: SnapMultiWindowLayout, on screen: NSScreen)
+        -> [(action: SnapAction, layout: SnapMultiWindowLayout?, frame: CGRect)] {
+        let portrait = screen.frame.height > screen.frame.width
+        return layout.zones(portrait: portrait).compactMap { zone in
+            guard let expected = SnapGeometry.frame(for: zone.action, visibleFrame: screen.visibleFrame,
+                                                    currentWindowFrame: screen.visibleFrame,
+                                                    portrait: portrait) else { return nil }
+            return (action: zone.action, layout: layout, frame: expected)
+        }
+    }
+
+    /// A zone with no owning layout, for top and bottom halves, which no menu
+    /// layout contains.
+    private func layoutlessZone(_ action: SnapAction, on screen: NSScreen, portrait: Bool)
+        -> (action: SnapAction, layout: SnapMultiWindowLayout?, frame: CGRect)? {
+        guard let expected = SnapGeometry.frame(for: action, visibleFrame: screen.visibleFrame,
+                                                currentWindowFrame: screen.visibleFrame,
+                                                portrait: portrait) else { return nil }
+        return (action: action, layout: nil, frame: expected)
+    }
+
+    private func snapZones(on screen: NSScreen, preferredLayout: SnapMultiWindowLayout?)
+        -> [(action: SnapAction, layout: SnapMultiWindowLayout?, frame: CGRect)] {
+        let layouts = [preferredLayout].compactMap { $0 } + SnapMultiWindowLayout.menuLayouts.filter { $0 != preferredLayout }
+        return layouts.flatMap { zones(of: $0, on: screen) }
+    }
+
+    /// The zone-fit test shared by partner adoption and launch adoption.
+    private func matchingZones(for frame: CGRect,
+                               among zones: [(action: SnapAction, layout: SnapMultiWindowLayout?, frame: CGRect)])
+        -> [(action: SnapAction, layout: SnapMultiWindowLayout?)] {
+        zones.filter {
+            SnapGeometry.isClose(frame, $0.frame, tolerance: SnapGeometry.edgeTolerance)
+        }.map { (action: $0.action, layout: $0.layout) }
+    }
+
+    private func matchingZone(for frame: CGRect,
+                              among zones: [(action: SnapAction, layout: SnapMultiWindowLayout?, frame: CGRect)])
+        -> (action: SnapAction, layout: SnapMultiWindowLayout?)? {
+        matchingZones(for: frame, among: zones).first
     }
 
     private func removeRecord(for window: AXWindow) {

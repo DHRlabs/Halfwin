@@ -79,6 +79,7 @@ final class SnapManager {
             MissionControlDrag.setDragSnappingEnabled(true)
         }
         if Permissions.accessibilityGranted {
+            SnapWindowRegistry.shared.adoptVisibleWindowsAtLaunch()
             permissionTimer?.invalidate()
             permissionTimer = nil
         } else if permissionTimer == nil {
