@@ -144,6 +144,35 @@ final class SnapWindowRegistry {
         }
     }
 
+    /// The zones of `layout` that one snapped window already sits in, each with
+    /// that window. A single snapped window filling the slot counts even when
+    /// the registry no longer owns the zone by action; two windows that only
+    /// cover it between them (two halves over a Command Center center) do not.
+    func filledZones(for layout: SnapMultiWindowLayout, on screen: NSScreen,
+                     excluding incoming: AXWindow? = nil) -> [SnapAction: AXWindow] {
+        // Same filters as fillNeighborFrames.
+        let neighbors = records.values.filter { record in
+            record.window != incoming && record.state == .active &&
+                displayID(for: record.frame) == SnapDisplayID(screen) &&
+                record.frame.intersects(screen.visibleFrame)
+        }
+        guard !neighbors.isEmpty else { return [:] }
+        let portrait = screen.frame.height > screen.frame.width
+        var filled: [SnapAction: AXWindow] = [:]
+        for zone in layout.zones(portrait: portrait) {
+            guard let expected = SnapGeometry.frame(for: zone.action, visibleFrame: screen.visibleFrame,
+                                                    currentWindowFrame: screen.visibleFrame,
+                                                    portrait: portrait) else { continue }
+            // Allow the same slack a landed snap gets: AX writes settle a few
+            // points off, and an app's minimum size can shave a zone edge.
+            let probe = expected.insetBy(dx: SnapGeometry.edgeTolerance, dy: SnapGeometry.edgeTolerance)
+            guard !probe.isNull, probe.width > 0, probe.height > 0,
+                  let record = neighbors.first(where: { $0.frame.contains(probe) }) else { continue }
+            filled[zone.action] = record.window
+        }
+        return filled
+    }
+
     func seams(on display: SnapDisplayID) -> [SnapSeam] { seamsByDisplay[display] ?? [] }
 
     func hasVisiblePartner(for window: AXWindow) -> Bool {
@@ -308,6 +337,20 @@ final class SnapWindowRegistry {
     func unsnap(_ window: AXWindow) {
         guard records[window] != nil else { return }
         removeRecord(for: window)
+        rebuildSeams()
+    }
+
+    /// Puts back a record a drag dropped when the window never actually left
+    /// its slot. Deliberately not `commitSnap`: nothing is being placed, so no
+    /// zone eviction and no partner adoption, just the index entry again.
+    func reinstate(_ record: SnappedWindowRecord, frame: CGRect) {
+        guard records[record.window] == nil else { return }
+        var restored = record
+        restored.frame = frame
+        restored.state = .active
+        if restored.windowID == nil { restored.windowID = matchWindowID(record.window, frame: frame) }
+        records[record.window] = restored
+        rebuildZoneOwners()
         rebuildSeams()
     }
 

@@ -32,6 +32,9 @@ final class SnapManager {
     private var cancelled = false
     private var currentZone: Zone?
     private var currentPreviewFrame: CGRect?
+    /// The snap record dropped when this drag's move was confirmed, kept so a
+    /// drag that leaves the window back in its slot can put it back.
+    private var unsnappedRecord: SnappedWindowRecord?
     private var dragToTopLayoutsEnabled = false
     private var dropScreen: NSScreen?
     private var currentDropZone: LayoutDropZone?
@@ -166,6 +169,9 @@ final class SnapManager {
             // A confirmed move uses the registry's latest frame, including a
             // manual edge resize, as the restore guard.
             let registry = SnapWindowRegistry.shared
+            if let record = registry.record(for: draggedWindow), record.state == .active {
+                unsnappedRecord = record
+            }
             if let size = preSnapSizes.removeValue(forKey: draggedWindow),
                let record = registry.record(for: draggedWindow), record.state == .active,
                SnapGeometry.isClose(initialFrame, record.frame, tolerance: 1) {
@@ -326,7 +332,14 @@ final class SnapManager {
             }
         }
         footprint.hide()
-        guard !cancelled, didReceiveDrag, let draggedWindow, let initialFrame else { return }
+        guard let draggedWindow, let initialFrame else { return }
+        if cancelled || !didReceiveDrag {
+            // Plain clicks never drop a record (continueDrag only runs on drag
+            // events), so this matters for Escape-cancelled drags: if the window
+            // never left its slot, its dropped record belongs back in the index.
+            reinstateIfInSlot(draggedWindow)
+            return
+        }
         let releaseUptime = ProcessInfo.processInfo.systemUptime
         releaseSnapshot = (draggedWindow, releaseUptime)
         let releaseFrame = draggedWindow.frame
@@ -385,10 +398,31 @@ final class SnapManager {
             }
         }
 
-        guard settings.glueTouchingWindowsEnabled,
-              !SnapGeometry.isClose(initialFrame, frame, tolerance: 1),
-              currentZone == nil, currentDropZone == nil else { return }
-        glue(draggedWindow, to: frame)
+        if settings.glueTouchingWindowsEnabled,
+           !SnapGeometry.isClose(initialFrame, frame, tolerance: 1),
+           currentZone == nil, currentDropZone == nil {
+            let beforeGlue = draggedWindow.frame
+            glue(draggedWindow, to: frame)
+            // Glue owns the outcome when it actually moves the window.
+            if let beforeGlue, let afterGlue = draggedWindow.frame,
+               !SnapGeometry.isClose(beforeGlue, afterGlue, tolerance: 1) {
+                return
+            }
+        }
+        reinstateIfInSlot(draggedWindow)
+    }
+
+    /// A drag that ends without snapping anywhere leaves the window where the
+    /// user let go; if that is still its old slot, put the dropped record back
+    /// so fill and Snap Assist keep treating the zone as occupied.
+    private func reinstateIfInSlot(_ window: AXWindow) {
+        guard let record = unsnappedRecord, let frame = window.frame,
+              SnapGeometry.isClose(frame, record.frame, tolerance: 2) else { return }
+        // Land it exactly in the slot: a 1px title-bar jitter would otherwise
+        // leave it a point off, and a later edge fill would butt against that.
+        window.setFrame(record.frame)
+        let landed = window.frame.flatMap { SnapGeometry.isClose($0, record.frame, tolerance: 2) ? $0 : nil }
+        SnapWindowRegistry.shared.reinstate(record, frame: landed ?? frame)
     }
 
     private func scheduleReleaseSnapshots(for window: AXWindow, releasedAt: TimeInterval) {
@@ -474,6 +508,7 @@ final class SnapManager {
         cancelled = false
         currentZone = nil
         currentPreviewFrame = nil
+        unsnappedRecord = nil
     }
 
     private func clearDropBar() {

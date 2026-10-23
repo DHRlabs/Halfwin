@@ -323,11 +323,15 @@ final class SnapAssistManager {
         guard Permissions.accessibilityGranted else { return }
         let registry = SnapWindowRegistry.shared
         var occupants = registry.zoneOccupants(for: layout, on: screen)
-        var excluded = Set(occupants.values)
+        // A window already sitting in a slot keeps it, whether or not the
+        // registry owns that zone by action.
+        let covered = registry.filledZones(for: layout, on: screen, excluding: window)
+        var excluded = Set(occupants.values).union(covered.values)
         excluded.insert(window)
         var choices = SnapWindowInventory.choices(on: screen, excluding: excluded).makeIterator()
         var filled: [(AXWindow, SnapAction, CGRect)] = []
-        for zone in layout.zones where zone.action != action && occupants[zone.action] == nil {
+        for zone in layout.zones where zone.action != action && occupants[zone.action] == nil
+            && covered[zone.action] == nil {
             while let choice = choices.next() {
                 guard let current = choice.window.frame,
                       let target = SnapGeometry.frame(for: zone.action, visibleFrame: screen.visibleFrame,
@@ -360,8 +364,13 @@ final class SnapAssistManager {
             hidePanel()
             return
         }
-        let occupants = SnapWindowRegistry.shared.zoneOccupants(for: layout, on: screen)
+        let registry = SnapWindowRegistry.shared
+        let occupants = registry.zoneOccupants(for: layout, on: screen)
+        // A zone a snapped window already sits in is filled even when the
+        // registry doesn't own it by action, so Snap Assist stops offering
+        // slots fill would refuse to run over.
         let filledActions = Set(occupants.keys)
+            .union(registry.filledZones(for: layout, on: screen, excluding: activeWindow).keys)
         guard let zone = layout.zones.first(where: { !filledActions.contains($0.action) }),
               let frame = SnapGeometry.frame(for: zone.action, visibleFrame: screen.visibleFrame,
                                                currentWindowFrame: activeWindow?.frame ?? .zero,
