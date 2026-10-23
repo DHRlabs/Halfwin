@@ -788,7 +788,7 @@ final class LayoutMenuManager {
         var remembered: [String: [SnapAction: AXWindow]] = [:]
         var choices: [String: [SnapWindowChoice]] = [:]
 
-        for layout in SnapMultiWindowLayout.allCases where layout != .halves {
+        for layout in SnapMultiWindowLayout.menuLayouts where layout != .halves {
             let occupants = SnapWindowRegistry.shared.zoneOccupants(for: layout, on: screen)
                 .filter { $0.value != targetWindow }
             // A slot a snapped window already sits in is filled even when the

@@ -24,6 +24,11 @@ final class SnapAssistManager {
     private var pickedWindows = Set<AXWindow>()
     private var suppressNextAssist = false
     private var lastSnappedProcessIdentifier: pid_t?
+    /// The snap a Command-arrow press produced. Its prompt waits here until
+    /// the Command key comes up, and a later press replaces it.
+    private var pendingCommandArrow: (window: AXWindow, action: SnapAction, screen: NSScreen,
+                                      layout: SnapMultiWindowLayout?)?
+    private var commandArrowObservers: [NSObjectProtocol] = []
     private var activationObserver: NSObjectProtocol?
     private var spaceObserver: NSObjectProtocol?
     private var screenObserver: NSObjectProtocol?
@@ -53,12 +58,19 @@ final class SnapAssistManager {
         screenObserver = NotificationCenter.default.addObserver(
             forName: NSApplication.didChangeScreenParametersNotification, object: nil, queue: .main
         ) { [weak self] _ in self?.hidePanel() }
+        commandArrowObservers.append(NotificationCenter.default.addObserver(
+            forName: SnapEvents.commandArrowDidCancel, object: nil, queue: nil
+        ) { [weak self] _ in self?.pendingCommandArrow = nil })
+        commandArrowObservers.append(NotificationCenter.default.addObserver(
+            forName: SnapEvents.commandArrowDidFinish, object: nil, queue: nil
+        ) { [weak self] _ in self?.showPendingCommandArrowAssist() })
     }
 
     deinit {
         if let activationObserver { NSWorkspace.shared.notificationCenter.removeObserver(activationObserver) }
         if let spaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(spaceObserver) }
         if let screenObserver { NotificationCenter.default.removeObserver(screenObserver) }
+        for observer in commandArrowObservers { NotificationCenter.default.removeObserver(observer) }
     }
 
     func setEnabled(_ enabled: Bool) {
@@ -73,6 +85,13 @@ final class SnapAssistManager {
                                currentWindowFrame: $0, portrait: screen.frame.height > screen.frame.width)
         }
         guard !suppressNextAssist, origin != .glue else { return }
+        if origin == .commandArrow {
+            // The registry has already committed the snap, so it carries the
+            // layout the keyboard path chose. Hold the prompt until Command
+            // comes up; another press replaces this one.
+            pendingCommandArrow = (window, action, screen, SnapWindowRegistry.shared.layout(for: window))
+            return
+        }
         if action == .fill {
             guard settings.fillEmptySpots != .leaveEmpty else {
                 hidePanel()
@@ -257,6 +276,39 @@ final class SnapAssistManager {
         activeFrame = nil
         pickedWindows.removeAll()
         lastSnappedProcessIdentifier = nil
+    }
+
+    /// Opens Snap Assist for the last Command-arrow snap once Command is up.
+    /// The layout came from the keyboard path, so zones outside it are never
+    /// offered and zones a window already covers are skipped by `showNextZone`.
+    private func showPendingCommandArrowAssist() {
+        guard let pending = pendingCommandArrow else { return }
+        pendingCommandArrow = nil
+        guard NSWorkspace.shared.frontmostApplication?.processIdentifier == pending.window.processIdentifier else {
+            hidePanel()
+            return
+        }
+        let (window, action, screen, layout) = pending
+        activeScreen = screen
+        activeWindow = window
+        activeAction = action
+        activeFrame = nil
+        activeLayout = layout
+        pickedWindows = [window]
+        lastSnappedProcessIdentifier = window.processIdentifier
+        if action == .fill {
+            guard settings.fillEmptySpots != .leaveEmpty else {
+                hidePanel()
+                return
+            }
+            showNextVoid()
+            return
+        }
+        guard enabled, Permissions.accessibilityGranted, layout != nil else {
+            hidePanel()
+            return
+        }
+        showNextZone()
     }
 
     private func pick(_ choice: SnapWindowChoice) {

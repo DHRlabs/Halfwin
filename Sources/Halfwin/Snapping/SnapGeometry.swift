@@ -436,6 +436,24 @@ enum SnapGeometry {
             }
             let w = floor(vf.width * 2 / 3)
             return CGRect(x: vf.maxX - w, y: vf.minY, width: w, height: vf.height)
+        case .firstThirdTop:
+            if portrait {
+                let h = floor(vf.height / 3)
+                let halfW = floor(vf.width / 2)
+                return CGRect(x: vf.maxX - halfW, y: vf.maxY - h, width: halfW, height: h)
+            }
+            let w = floor(vf.width / 3)
+            let halfH = floor(vf.height / 2)
+            return CGRect(x: vf.minX, y: vf.maxY - halfH, width: w, height: halfH)
+        case .firstThirdBottom:
+            if portrait {
+                let h = floor(vf.height / 3)
+                let halfW = floor(vf.width / 2)
+                return CGRect(x: vf.minX, y: vf.maxY - h, width: halfW, height: h)
+            }
+            let w = floor(vf.width / 3)
+            let halfH = floor(vf.height / 2)
+            return CGRect(x: vf.minX, y: vf.minY, width: w, height: halfH)
         case .lastThirdTop:
             if portrait {
                 let h = floor(vf.height / 3)

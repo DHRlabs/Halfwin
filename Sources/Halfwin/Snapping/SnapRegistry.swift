@@ -329,7 +329,7 @@ final class SnapWindowRegistry {
         }
         records[window] = SnappedWindowRecord(window: window, action: storedAction, layout: layout, frame: frame,
                                                state: .active, windowID: windowID)
-        if origin == .other, chosenLayout == nil {
+        if origin == .commandArrow || (origin == .other && chosenLayout == nil) {
             adoptVisiblePartners(near: frame, on: screen, preferredLayout: layout, excluding: window)
         }
         rebuildZoneOwners()
@@ -415,7 +415,7 @@ final class SnapWindowRegistry {
     private func snapZones(on screen: NSScreen, preferredLayout: SnapMultiWindowLayout?)
         -> [(action: SnapAction, layout: SnapMultiWindowLayout, frame: CGRect)] {
         let portrait = screen.frame.height > screen.frame.width
-        let layouts = [preferredLayout].compactMap { $0 } + SnapMultiWindowLayout.allCases.filter { $0 != preferredLayout }
+        let layouts = [preferredLayout].compactMap { $0 } + SnapMultiWindowLayout.menuLayouts.filter { $0 != preferredLayout }
         var result: [(action: SnapAction, layout: SnapMultiWindowLayout, frame: CGRect)] = []
         for layout in layouts {
             for zone in layout.zones(portrait: portrait) {
@@ -449,7 +449,7 @@ final class SnapWindowRegistry {
             if current.count == 1 { return current.first }
             if !current.isEmpty { return nil }
         }
-        let all = matches(SnapMultiWindowLayout.allCases)
+        let all = matches(SnapMultiWindowLayout.menuLayouts)
         return all.count == 1 ? all.first : nil
     }
 

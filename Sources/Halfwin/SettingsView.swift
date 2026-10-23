@@ -31,7 +31,9 @@ struct SettingsView: View {
                     .foregroundStyle(.secondary)
                 ForEach(SnapPosition.allCases, id: \.self) { position in
                     Picker(position.displayName, selection: binding(for: position)) {
-                        ForEach(SnapAction.allCases.filter { $0 != .lastThirdTop && $0 != .lastThirdBottom }, id: \.self) { action in
+                        ForEach(SnapAction.allCases.filter {
+                            ![.firstThirdTop, .firstThirdBottom, .lastThirdTop, .lastThirdBottom].contains($0)
+                        }, id: \.self) { action in
                             Text(action.displayName).tag(action)
                         }
                     }

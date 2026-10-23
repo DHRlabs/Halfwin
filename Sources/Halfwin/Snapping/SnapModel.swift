@@ -32,7 +32,7 @@ enum SnapAction: String, CaseIterable, Codable {
     case firstThird, centerThird, lastThird
     case commandCenterLeft, commandCenter, commandCenterRight
     case firstTwoThirds, lastTwoThirds
-    case lastThirdTop, lastThirdBottom
+    case firstThirdTop, firstThirdBottom, lastThirdTop, lastThirdBottom
     case leftTopBottomHalfCompound
     case rightTopBottomHalfCompound
     case bottomThirdsCompound
@@ -67,6 +67,8 @@ enum SnapAction: String, CaseIterable, Codable {
         case .commandCenterRight: return "Command Center Right"
         case .firstTwoThirds: return "First Two Thirds"
         case .lastTwoThirds: return "Last Two Thirds"
+        case .firstThirdTop: return "First Third Top Half"
+        case .firstThirdBottom: return "First Third Bottom Half"
         case .lastThirdTop: return "Last Third Top Half"
         case .lastThirdBottom: return "Last Third Bottom Half"
         case .leftTopBottomHalfCompound: return "Left Half (Optional Top/Bottom Half Near Corners)"
@@ -94,6 +96,17 @@ struct SnapLayoutZone {
 /// Shared ordered zones for menu tiles, snap memory, and Snap Assist.
 enum SnapMultiWindowLayout: CaseIterable, Equatable {
     case halves, leftStack, thirds, commandCenter, leftTwoThirds, rightTwoThirds
+    // Command-arrow layouts. Appended for the registry's zone checks and the
+    // keyboard path, which picks them explicitly. The layout menu tiles list
+    // layouts by hand, so they do not grow.
+    case firstStack, lastStack, leftQuarters, rightQuarters
+
+    /// The layouts drag snapping and the layout menu have always resolved
+    /// through `containing(_:)`. The Command-arrow layouts are left out so an
+    /// edge drag that lands in a quarter keeps its current Snap Assist result.
+    static let menuLayouts: [Self] = [
+        .halves, .leftStack, .thirds, .commandCenter, .leftTwoThirds, .rightTwoThirds,
+    ]
 
     var title: String {
         switch self {
@@ -103,6 +116,10 @@ enum SnapMultiWindowLayout: CaseIterable, Equatable {
         case .commandCenter: return "Command Center"
         case .leftTwoThirds: return "Left 2/3 + Right 1/3"
         case .rightTwoThirds: return "Left 1/3 + Right 2/3"
+        case .firstStack: return "Left Third Stack"
+        case .lastStack: return "Right Third Stack"
+        case .leftQuarters: return "Left Quarters + Right Half"
+        case .rightQuarters: return "Left Half + Right Quarters"
         }
     }
 
@@ -142,6 +159,30 @@ enum SnapMultiWindowLayout: CaseIterable, Equatable {
                 SnapLayoutZone(action: .commandCenter, rect: CGRect(x: side, y: 0, width: 1 - 2 * side, height: 1)),
                 SnapLayoutZone(action: .commandCenterRight, rect: CGRect(x: 1 - side, y: 0, width: side, height: 1)),
             ]
+        case .firstStack:
+            return [
+                SnapLayoutZone(action: .firstThirdTop, rect: CGRect(x: 0, y: 0.5, width: 1.0 / 3, height: 0.5)),
+                SnapLayoutZone(action: .firstThirdBottom, rect: CGRect(x: 0, y: 0, width: 1.0 / 3, height: 0.5)),
+                SnapLayoutZone(action: .lastTwoThirds, rect: CGRect(x: 1.0 / 3, y: 0, width: 2.0 / 3, height: 1)),
+            ]
+        case .lastStack:
+            return [
+                SnapLayoutZone(action: .lastThirdTop, rect: CGRect(x: 2.0 / 3, y: 0.5, width: 1.0 / 3, height: 0.5)),
+                SnapLayoutZone(action: .lastThirdBottom, rect: CGRect(x: 2.0 / 3, y: 0, width: 1.0 / 3, height: 0.5)),
+                SnapLayoutZone(action: .firstTwoThirds, rect: CGRect(x: 0, y: 0, width: 2.0 / 3, height: 1)),
+            ]
+        case .leftQuarters:
+            return [
+                SnapLayoutZone(action: .topLeftQuarter, rect: CGRect(x: 0, y: 0.5, width: 0.5, height: 0.5)),
+                SnapLayoutZone(action: .bottomLeftQuarter, rect: CGRect(x: 0, y: 0, width: 0.5, height: 0.5)),
+                SnapLayoutZone(action: .rightHalf, rect: CGRect(x: 0.5, y: 0, width: 0.5, height: 1)),
+            ]
+        case .rightQuarters:
+            return [
+                SnapLayoutZone(action: .topRightQuarter, rect: CGRect(x: 0.5, y: 0.5, width: 0.5, height: 0.5)),
+                SnapLayoutZone(action: .bottomRightQuarter, rect: CGRect(x: 0.5, y: 0, width: 0.5, height: 0.5)),
+                SnapLayoutZone(action: .leftHalf, rect: CGRect(x: 0, y: 0, width: 0.5, height: 1)),
+            ]
         }
     }
 
@@ -149,7 +190,7 @@ enum SnapMultiWindowLayout: CaseIterable, Equatable {
         guard portrait else { return zones }
         return zones.map { zone in
             let action: SnapAction
-            if self == .leftStack {
+            if self == .leftStack || self == .lastStack {
                 switch zone.action {
                 case .lastThirdTop: action = .lastThirdBottom
                 case .lastThirdBottom: action = .lastThirdTop
@@ -166,7 +207,7 @@ enum SnapMultiWindowLayout: CaseIterable, Equatable {
     }
 
     static func containing(_ action: SnapAction) -> Self? {
-        allCases.first { $0.zones.contains { $0.action == action } }
+        menuLayouts.first { $0.zones.contains { $0.action == action } }
     }
 }
 

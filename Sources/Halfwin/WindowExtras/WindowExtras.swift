@@ -38,7 +38,7 @@ enum ShowDesktopEvents {
 /// Adds the small system-wide window actions that do not belong to drag snapping.
 final class WindowExtrasManager {
     private static let eventMask: CGEventMask = [
-        CGEventType.leftMouseDown, .leftMouseUp, .keyDown, .keyUp
+        CGEventType.leftMouseDown, .leftMouseUp, .keyDown, .keyUp, .flagsChanged
     ].reduce(CGEventMask(0)) { $0 | (CGEventMask(1) << $1.rawValue) }
 
     private var greenButtonEnabled = false
@@ -50,6 +50,9 @@ final class WindowExtrasManager {
     private var permissionTimer: Timer?
     private var swallowedMouseDownEventNumber: Int64?
     private var swallowedCommandArrowKeyCodes = Set<Int64>()
+    /// True once a Command-arrow snap has run while Command is held; the tap
+    /// flushes Snap Assist when that Command press ends.
+    private var commandArrowAssistPending = false
     private var hiddenApplications: [NSRunningApplication]?
     private var hiddenApplicationsAt: TimeInterval?
     private var pushedWindows: [AXWindow: (frame: CGRect, pushedFrame: CGRect, windowID: CGWindowID, application: NSRunningApplication)] = [:]
@@ -168,6 +171,7 @@ final class WindowExtrasManager {
         if type == .tapDisabledByTimeout || type == .tapDisabledByUserInput {
             swallowedMouseDownEventNumber = nil
             swallowedCommandArrowKeyCodes.removeAll()
+            commandArrowAssistPending = false
             if let eventTap { CGEvent.tapEnable(tap: eventTap, enable: true) }
             return Unmanaged.passUnretained(event)
         }
@@ -226,8 +230,12 @@ final class WindowExtrasManager {
             swallowedMouseDownEventNumber = nil
             return swallowed == event.getIntegerValueField(.mouseEventNumber) ? nil : Unmanaged.passUnretained(event)
         case .keyDown:
-            guard commandArrowEnabled, isExactCommand(event.flags) else { return Unmanaged.passUnretained(event) }
             let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
+            if commandArrowAssistPending, ![Int64(123), 124, 125, 126].contains(keyCode) {
+                commandArrowAssistPending = false
+                DispatchQueue.main.async { SnapEvents.commandArrowCancelled() }
+            }
+            guard commandArrowEnabled, isExactCommand(event.flags) else { return Unmanaged.passUnretained(event) }
             guard [Int64(123), 124, 125, 126].contains(keyCode),
                   NSWorkspace.shared.frontmostApplication?.processIdentifier != ProcessInfo.processInfo.processIdentifier else {
                 return Unmanaged.passUnretained(event)
@@ -243,10 +251,21 @@ final class WindowExtrasManager {
                 return Unmanaged.passUnretained(event)
             }
             swallowedCommandArrowKeyCodes.insert(keyCode)
+            commandArrowAssistPending = true
             if event.getIntegerValueField(.keyboardEventAutorepeat) == 0 {
-                DispatchQueue.main.async { [weak self] in self?.applyCommandArrow(keyCode) }
+                DispatchQueue.main.async { [weak self] in
+                    SnapEvents.commandArrowCancelled()
+                    self?.applyCommandArrow(keyCode)
+                }
             }
             return nil
+        case .flagsChanged:
+            guard commandArrowAssistPending, !event.flags.contains(.maskCommand) else {
+                return Unmanaged.passUnretained(event)
+            }
+            commandArrowAssistPending = false
+            DispatchQueue.main.async { SnapEvents.commandArrowFinished() }
+            return Unmanaged.passUnretained(event)
         case .keyUp:
             let keyCode = event.getIntegerValueField(.keyboardEventKeycode)
             guard swallowedCommandArrowKeyCodes.remove(keyCode) != nil else { return Unmanaged.passUnretained(event) }
@@ -282,6 +301,7 @@ final class WindowExtrasManager {
         runLoopSource = nil
         swallowedMouseDownEventNumber = nil
         swallowedCommandArrowKeyCodes.removeAll()
+        commandArrowAssistPending = false
     }
 
     private func isExactCommand(_ flags: CGEventFlags) -> Bool {
@@ -381,19 +401,69 @@ final class WindowExtrasManager {
         let action: SnapAction
         var rememberFrame = true
         var screen: NSScreen?
+        var hopScreen: NSScreen?
+        var hopFrom: NSScreen?
         switch keyCode {
         case 123:
-            action = .leftHalf
+            switch snapped?.action {
+            case .leftHalf:
+                action = .firstThird
+            case .topLeftQuarter:
+                action = .firstThirdTop
+            case .bottomLeftQuarter:
+                action = .firstThirdBottom
+            case .firstThird, .firstThirdTop, .firstThirdBottom:
+                // Already in the left third: hop to the display on the left,
+                // otherwise step back to the half or quarter that led here.
+                if let current = snapped?.screen, let adjacent = adjacentScreen(from: current, direction: -1) {
+                    action = .rightHalf
+                    hopScreen = adjacent
+                    hopFrom = current
+                } else {
+                    switch snapped?.action {
+                    case .firstThirdTop: action = .topLeftQuarter
+                    case .firstThirdBottom: action = .bottomLeftQuarter
+                    default: action = .leftHalf
+                    }
+                }
+            default:
+                action = .leftHalf
+            }
             rememberFrame = true
         case 124:
-            action = .rightHalf
+            switch snapped?.action {
+            case .rightHalf:
+                action = .lastThird
+            case .topRightQuarter:
+                action = .lastThirdTop
+            case .bottomRightQuarter:
+                action = .lastThirdBottom
+            case .lastThird, .lastThirdTop, .lastThirdBottom:
+                if let current = snapped?.screen, let adjacent = adjacentScreen(from: current, direction: 1) {
+                    action = .leftHalf
+                    hopScreen = adjacent
+                    hopFrom = current
+                } else {
+                    switch snapped?.action {
+                    case .lastThirdTop: action = .topRightQuarter
+                    case .lastThirdBottom: action = .bottomRightQuarter
+                    default: action = .rightHalf
+                    }
+                }
+            default:
+                action = .rightHalf
+            }
             rememberFrame = true
         case 126:
             switch snapped?.action {
             case .leftHalf: action = .topLeftQuarter
             case .rightHalf: action = .topRightQuarter
+            case .firstThird: action = .firstThirdTop
+            case .lastThird: action = .lastThirdTop
             case .bottomLeftQuarter: action = .leftHalf
             case .bottomRightQuarter: action = .rightHalf
+            case .firstThirdBottom: action = .firstThird
+            case .lastThirdBottom: action = .lastThird
             default: action = .maximize
             }
             screen = snapped?.screen
@@ -402,15 +472,26 @@ final class WindowExtrasManager {
             switch snapped?.action {
             case .leftHalf: action = .bottomLeftQuarter
             case .rightHalf: action = .bottomRightQuarter
+            case .firstThird: action = .firstThirdBottom
+            case .lastThird: action = .lastThirdBottom
             case .topLeftQuarter: action = .leftHalf
             case .topRightQuarter: action = .rightHalf
-            case .bottomLeftQuarter, .bottomRightQuarter, .maximize:
+            case .firstThirdTop: action = .firstThird
+            case .lastThirdTop: action = .lastThird
+            case .bottomLeftQuarter, .bottomRightQuarter, .firstThirdBottom, .lastThirdBottom:
                 if frameMemory.restore(window, current: frame) {
                     registry.unsnap(window)
                     return
                 }
                 action = .center
                 rememberFrame = false
+            case .maximize:
+                action = .commandCenter
+            case nil where lane == nil:
+                action = .commandCenter
+            case .commandCenter:
+                if frameMemory.restore(window, current: frame) { registry.unsnap(window) }
+                return
             default:
                 if frameMemory.restore(window, current: frame) {
                     registry.unsnap(window)
@@ -424,6 +505,7 @@ final class WindowExtrasManager {
             return
         }
         let usesFill = SnapSettings.shared.fillAvailableSpace && [123, 124].contains(keyCode)
+            && (action == .leftHalf || action == .rightHalf)
         func resolvedDestination(for action: SnapAction, on target: (frame: CGRect, screen: NSScreen)) -> (frame: CGRect, action: SnapAction) {
             guard usesFill else { return (target.frame, action) }
             let visible = target.screen.visibleFrame
@@ -446,18 +528,9 @@ final class WindowExtrasManager {
             }
             return (target.frame, action)
         }
-        guard var target = targetFrame(action, for: window, current: frame, on: screen) else { return }
-        var result = resolvedDestination(for: action, on: target)
-        if [123, 124].contains(keyCode),
-           SnapGeometry.isClose(result.frame, frame, tolerance: SnapGeometry.edgeTolerance) {
-            let direction: CGFloat = keyCode == 123 ? -1 : 1
-            let hopAction: SnapAction = keyCode == 123 ? .rightHalf : .leftHalf
-            guard let adjacent = adjacentScreen(from: target.screen, direction: direction),
-                  let hoppedTarget = targetFrame(hopAction, for: window, current: frame, on: adjacent) else { return }
-            frameMemory.moveRestoreFrame(window, from: target.screen, to: adjacent)
-            target = hoppedTarget
-            result = resolvedDestination(for: hopAction, on: target)
-        }
+        guard let target = targetFrame(action, for: window, current: frame, on: hopScreen ?? screen) else { return }
+        if let hopFrom, let hopScreen { frameMemory.moveRestoreFrame(window, from: hopFrom, to: hopScreen) }
+        let result = resolvedDestination(for: action, on: target)
         let destination = result.frame
         let effectiveAction = result.action
         if rememberFrame && effectiveAction != .fill {
@@ -471,7 +544,26 @@ final class WindowExtrasManager {
             : SnapGeometry.matchesSnapEdges(readBack, target: destination, screenFrame: target.screen.visibleFrame) &&
                 SnapGeometry.matchesSnapSize(readBack, target: destination)) {
             if effectiveAction == .fill { frameMemory.remember(window, current: frame) }
-            SnapEvents.didSnap(window: window, action: effectiveAction, screen: target.screen, frame: readBack)
+            SnapEvents.didSnap(window: window, action: effectiveAction, screen: target.screen,
+                               origin: .commandArrow, frame: readBack,
+                               layout: commandArrowAssistLayout(for: effectiveAction))
+        }
+    }
+
+    /// The layout Snap Assist should offer for the space a Command-arrow snap
+    /// left behind. Passed to `SnapEvents` explicitly so the keyboard path
+    /// never has to guess through `SnapMultiWindowLayout.containing(_:)`.
+    private func commandArrowAssistLayout(for action: SnapAction) -> SnapMultiWindowLayout? {
+        switch action {
+        case .leftHalf, .rightHalf: return .halves
+        case .firstThird: return .rightTwoThirds
+        case .lastThird: return .leftTwoThirds
+        case .firstThirdTop, .firstThirdBottom: return .firstStack
+        case .lastThirdTop, .lastThirdBottom: return .lastStack
+        case .topLeftQuarter, .bottomLeftQuarter: return .leftQuarters
+        case .topRightQuarter, .bottomRightQuarter: return .rightQuarters
+        case .commandCenter: return .commandCenter
+        default: return nil
         }
     }
 
@@ -491,8 +583,10 @@ final class WindowExtrasManager {
 
     private func snappedAction(for frame: CGRect) -> (action: SnapAction, screen: NSScreen)? {
         let actions: [SnapAction] = [
-            .maximize, .leftHalf, .rightHalf, .topLeftQuarter, .topRightQuarter,
-            .bottomLeftQuarter, .bottomRightQuarter,
+            .maximize, .leftHalf, .rightHalf, .topHalf, .bottomHalf,
+            .topLeftQuarter, .topRightQuarter, .bottomLeftQuarter, .bottomRightQuarter,
+            .firstThird, .centerThird, .lastThird, .firstThirdTop, .firstThirdBottom,
+            .lastThirdTop, .lastThirdBottom, .commandCenterLeft, .commandCenter, .commandCenterRight,
         ]
         for screen in NSScreen.screens {
             for action in actions {
