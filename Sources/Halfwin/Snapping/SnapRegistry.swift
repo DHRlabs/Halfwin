@@ -145,9 +145,12 @@ final class SnapWindowRegistry {
     }
 
     /// The zones of `layout` that one snapped window already sits in, each with
-    /// that window. A single snapped window filling the slot counts even when
-    /// the registry no longer owns the zone by action; two windows that only
-    /// cover it between them (two halves over a Command Center center) do not.
+    /// that window. A slot counts only when a single record's frame matches the
+    /// slot frame within `SnapGeometry.edgeTolerance` on every edge, the same
+    /// test `adoptVisiblePartners` uses; a window that merely contains the slot
+    /// (a half over a third or a Command Center side) does not fill it. When two
+    /// records fit one slot, ties break on window ID so the preview and fill pick
+    /// the same window.
     func filledZones(for layout: SnapMultiWindowLayout, on screen: NSScreen,
                      excluding incoming: AXWindow? = nil) -> [SnapAction: AXWindow] {
         // Same filters as fillNeighborFrames.
@@ -156,6 +159,7 @@ final class SnapWindowRegistry {
                 displayID(for: record.frame) == SnapDisplayID(screen) &&
                 record.frame.intersects(screen.visibleFrame)
         }
+        .sorted { ($0.windowID ?? .max) < ($1.windowID ?? .max) }
         guard !neighbors.isEmpty else { return [:] }
         let portrait = screen.frame.height > screen.frame.width
         var filled: [SnapAction: AXWindow] = [:]
@@ -163,11 +167,9 @@ final class SnapWindowRegistry {
             guard let expected = SnapGeometry.frame(for: zone.action, visibleFrame: screen.visibleFrame,
                                                     currentWindowFrame: screen.visibleFrame,
                                                     portrait: portrait) else { continue }
-            // Allow the same slack a landed snap gets: AX writes settle a few
-            // points off, and an app's minimum size can shave a zone edge.
-            let probe = expected.insetBy(dx: SnapGeometry.edgeTolerance, dy: SnapGeometry.edgeTolerance)
-            guard !probe.isNull, probe.width > 0, probe.height > 0,
-                  let record = neighbors.first(where: { $0.frame.contains(probe) }) else { continue }
+            guard let record = neighbors.first(where: {
+                SnapGeometry.isClose($0.frame, expected, tolerance: SnapGeometry.edgeTolerance)
+            }) else { continue }
             filled[zone.action] = record.window
         }
         return filled
@@ -350,6 +352,13 @@ final class SnapWindowRegistry {
         restored.state = .active
         if restored.windowID == nil { restored.windowID = matchWindowID(record.window, frame: frame) }
         records[record.window] = restored
+        if let windowID = restored.windowID {
+            visibleWindows = visibleWindows.map { visible in
+                guard visible.id == windowID else { return visible }
+                return VisibleWindow(id: visible.id, pid: visible.pid, title: visible.title,
+                                     layer: visible.layer, frame: frame)
+            }
+        }
         rebuildZoneOwners()
         rebuildSeams()
     }

@@ -398,31 +398,32 @@ final class SnapManager {
             }
         }
 
+        // A window let go back in its old slot lands exactly there; only a drag
+        // that ended elsewhere is a glue candidate.
+        if reinstateIfInSlot(draggedWindow) { return }
         if settings.glueTouchingWindowsEnabled,
            !SnapGeometry.isClose(initialFrame, frame, tolerance: 1),
            currentZone == nil, currentDropZone == nil {
-            let beforeGlue = draggedWindow.frame
             glue(draggedWindow, to: frame)
-            // Glue owns the outcome when it actually moves the window.
-            if let beforeGlue, let afterGlue = draggedWindow.frame,
-               !SnapGeometry.isClose(beforeGlue, afterGlue, tolerance: 1) {
-                return
-            }
         }
-        reinstateIfInSlot(draggedWindow)
     }
 
     /// A drag that ends without snapping anywhere leaves the window where the
     /// user let go; if that is still its old slot, put the dropped record back
     /// so fill and Snap Assist keep treating the zone as occupied.
-    private func reinstateIfInSlot(_ window: AXWindow) {
+    @discardableResult
+    private func reinstateIfInSlot(_ window: AXWindow) -> Bool {
         guard let record = unsnappedRecord, let frame = window.frame,
-              SnapGeometry.isClose(frame, record.frame, tolerance: 2) else { return }
+              !SnapWindowRegistry.shared.hasRecord(for: window),
+              SnapGeometry.isClose(frame, record.frame, tolerance: 2) else { return false }
         // Land it exactly in the slot: a 1px title-bar jitter would otherwise
         // leave it a point off, and a later edge fill would butt against that.
-        window.setFrame(record.frame)
-        let landed = window.frame.flatMap { SnapGeometry.isClose($0, record.frame, tolerance: 2) ? $0 : nil }
-        SnapWindowRegistry.shared.reinstate(record, frame: landed ?? frame)
+        // Skip the write when it is already exact.
+        if frame != record.frame { window.setFrame(record.frame) }
+        let landed = window.frame ?? frame
+        guard SnapGeometry.isClose(landed, record.frame, tolerance: 2) else { return false }
+        SnapWindowRegistry.shared.reinstate(record, frame: landed)
+        return true
     }
 
     private func scheduleReleaseSnapshots(for window: AXWindow, releasedAt: TimeInterval) {

@@ -789,20 +789,24 @@ final class LayoutMenuManager {
         var choices: [String: [SnapWindowChoice]] = [:]
 
         for layout in SnapMultiWindowLayout.allCases where layout != .halves {
-            let windows = SnapWindowRegistry.shared.zoneOccupants(for: layout, on: screen)
+            let occupants = SnapWindowRegistry.shared.zoneOccupants(for: layout, on: screen)
                 .filter { $0.value != targetWindow }
+            // A slot a snapped window already sits in is filled even when the
+            // registry doesn't own it by action. Merging it into the remembered
+            // windows makes the view show that window and skip the slot when
+            // handing out fill choices, the same set showNextZone uses.
+            let covered = SnapWindowRegistry.shared.filledZones(for: layout, on: screen, excluding: targetWindow)
+            let windows = occupants.merging(covered) { occupant, _ in occupant }
             remembered[layout.title] = windows
 
             guard fillMode == .mostRecent else { continue }
-            // Matches fillEmptyZones: a slot a window already sits in needs no fill.
-            let covered = SnapWindowRegistry.shared.filledZones(for: layout, on: screen, excluding: targetWindow)
             let needed = layout.zones.map { selected in
                 layout.zones.filter {
-                    $0.action != selected.action && windows[$0.action] == nil && covered[$0.action] == nil
+                    $0.action != selected.action && windows[$0.action] == nil
                 }.count
             }.max() ?? 0
             guard needed > 0 else { continue }
-            let excluded = Set(windows.values).union(covered.values).union(targetWindow.map { [$0] } ?? [])
+            let excluded = Set(windows.values).union(targetWindow.map { [$0] } ?? [])
             choices[layout.title] = SnapWindowInventory.choices(on: screen, excluding: excluded, limit: needed)
         }
         return LayoutMenuPreview(targetIcon: targetIcon, fillMode: fillMode,
