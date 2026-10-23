@@ -4,7 +4,7 @@
 
 # Halfwin
 
-**The Windows window habits Mac switchers miss, in one free native app.**
+**The Windows window habits Mac switchers miss, in one free, open-source native app.**
 
 If you came to the Mac from Windows, the small things are what you notice. Edge snapping is limited or missing, depending on your macOS version. There is no layout menu at the top of the screen. Dock icons do not show you the windows behind them. The mouse scrolls the wrong way and the side buttons do nothing. Halfwin puts those habits back. It is a native macOS menu-bar app, and it covers snapping, layouts, mouse behavior, Dock previews, Show desktop, and keeping your Mac awake, so you do not need a stack of separate utilities.
 
@@ -76,4 +76,4 @@ If macOS blocks a downloaded build, open **System Settings > Privacy & Security*
 
 The drag-to-edge snapping design and geometry are adapted from [Rectangle](https://github.com/rxhanson/Rectangle) by Ryan Hanson (MIT). See [NOTICE](NOTICE) for details.
 
-Halfwin is licensed under the [MIT License](LICENSE).
+Halfwin is licensed under the [GNU General Public License v3.0](LICENSE). The adapted MIT code keeps its MIT notices in NOTICE.
